@@ -60,7 +60,8 @@ else
     apt-get install -y --no-install-recommends \
       bash curl wget git ca-certificates gnupg \
       build-essential python3 python3-pip \
-      jq ripgrep fd-find unzip
+      jq ripgrep fd-find unzip \
+      bubblewrap socat libseccomp2 libseccomp-dev
     rm -rf /var/lib/apt/lists/*
 
     # ── Node.js (LTS) ────────────────────────────────────────────────────────

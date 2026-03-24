@@ -56,11 +56,17 @@ re-attaches to the existing one rather than creating a new one.
 
 | Host | Container |
 |------|-----------|
-| Your project dir | `/workspace` |
+| Your project dir | Same path (e.g. `/Users/you/projects/my-app`) |
 | `~/.claude` | `/root/.claude` |
 
 `~/.claude` is shared across all containers — global memory, settings, and
 sessions stay in sync with your host Claude Code installation.
+
+**Authentication note:** Claude Code stores OAuth credentials in the macOS
+Keychain, not in `~/.claude`. The bind-mount does not carry them into the
+container, so `claude` will prompt you to log in the first time you use it in
+a new container. Run `claude login` inside the container once; subsequent
+re-attaches to the same container will already be authenticated.
 
 ## Rebuilding the image
 

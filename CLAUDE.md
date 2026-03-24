@@ -17,9 +17,10 @@ CLAUDE.md        — this file
 `new-project.sh` sets up a `claude-dev:latest` image on first run (cached after
 that), then creates and attaches a named container with:
 
-- The project directory mounted at `/workspace`
+- The project directory mounted at its host path (not `/workspace`)
 - `~/.claude` mounted at `/root/.claude` (global memory, settings, sessions)
 - Node LTS, Claude Code CLI, uv/uvx, git, ripgrep, fd, jq
+- bubblewrap, socat, libseccomp2/dev (Claude Code sandbox dependencies)
 
 If the named container already exists, it just starts and re-attaches it.
 
@@ -41,6 +42,12 @@ checking the exit code.
 
 **`~/.claude` is bind-mounted, not copied.** This keeps global memory and
 settings in sync with the host and avoids divergence across containers.
+
+**Auth requires one-time `claude login` per new container.** Claude Code stores
+OAuth credentials in the macOS Keychain, which is not accessible inside the
+container. The bind-mount of `~/.claude` does not carry credentials in. Run
+`claude login` once inside a new container; re-attaching to the same container
+retains the session.
 
 ## Making changes
 
