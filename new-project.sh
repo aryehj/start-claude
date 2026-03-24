@@ -42,6 +42,13 @@ if container image inspect "$IMAGE_TAG" &>/dev/null; then
   echo "==> Image $IMAGE_TAG already exists — skipping setup."
 else
   echo "==> Setting up dev image from $BASE_IMAGE…"
+
+  # Apple Containers does not auto-pull images on `run`
+  if ! container image inspect "$BASE_IMAGE" &>/dev/null; then
+    echo "==> Pulling $BASE_IMAGE…"
+    container image pull "$BASE_IMAGE"
+  fi
+
   SETUP_NAME="claude-dev-setup-$$"
   trap 'container rm "$SETUP_NAME" 2>/dev/null || true' EXIT
 

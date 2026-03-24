@@ -5,5 +5,9 @@
       "Bash(container system:*)",
       "WebFetch(domain:github.com)"
     ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": false
   }
 }
