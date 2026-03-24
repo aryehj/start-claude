@@ -41,11 +41,11 @@ IMAGE_TAG="claude-dev:latest"
 if container image inspect "$IMAGE_TAG" &>/dev/null; then
   echo "==> Image $IMAGE_TAG already exists — skipping setup."
 else
-  echo "==> Setting up dev image from $BASE_IMAGE…"
+  echo "==> Setting up dev image from ${BASE_IMAGE}"
 
   # Apple Containers does not auto-pull images on `run`
   if ! container image inspect "$BASE_IMAGE" &>/dev/null; then
-    echo "==> Pulling $BASE_IMAGE…"
+    echo "==> Pulling $BASE_IMAGE"
     container image pull "$BASE_IMAGE"
   fi
 
@@ -77,14 +77,14 @@ else
     npm install -g @anthropic-ai/claude-code
   '
 
-  echo "==> Exporting $IMAGE_TAG…"
+  echo "==> Exporting $IMAGE_TAG"
   container export --image "$IMAGE_TAG" "$SETUP_NAME"
   container rm "$SETUP_NAME"
   trap - EXIT
 fi
 
 # ── run container ──────────────────────────────────────────────────────────────
-echo "==> Creating container '$CONTAINER_NAME'…"
+echo "==> Creating container '$CONTAINER_NAME'"
 echo "    project : $PROJECT_DIR  →  $PROJECT_DIR"
 echo "    claude  : $CLAUDE_DIR   →  /root/.claude"
 
