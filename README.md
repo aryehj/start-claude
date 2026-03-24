@@ -8,12 +8,13 @@ dev environment for a project, pre-configured for Claude Code.
 - macOS with Apple Containers installed (`container` CLI on PATH)
 - Apple Silicon Mac
 - Kata kernel installed: `container system kernel set --recommended`
+- Rosetta 2 installed: `softwareupdate --install-rosetta --agree-to-license`
 
 ## Setup
 
 ```bash
-# Make it available everywhere
-echo 'export PATH="/Users/Shared/claude-setup:$PATH"' >> ~/.zshrc
+# Optional: Make it available everywhere
+echo 'export PATH="/Path/To/claude-setup:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
