@@ -1,7 +1,7 @@
 # TL; DR
 The author is a dilletente who starts a lot of projects, but is slow to learn syntax and commands. Therefore, the author automated most of the creation of safe-ish containerized workspaces for LLM-aided development in a given working directory. 
 
-# new-project.sh
+# start-claude.sh
 
 Spins up an isolated [Apple Containers](https://developer.apple.com/documentation/virtualization)
 dev environment for a project, pre-configured for Claude Code.
@@ -25,14 +25,17 @@ source ~/.zshrc
 
 ```bash
 # From inside your project directory
-new-project.sh
+start-claude.sh
 
 # Explicit project dir
-new-project.sh ~/projects/my-app
+start-claude.sh ~/projects/my-app
 
 # Explicit project dir + container name
-new-project.sh ~/projects/my-app my-app
+start-claude.sh ~/projects/my-app my-app
 ```
+
+The script starts the container service automatically if it isn't already
+running, so no manual `container system start` is needed beforehand.
 
 On first run, the script pulls `debian:bookworm-slim`, installs tools inside a
 temporary container, then exports it as `claude-dev:latest` — takes a few
@@ -75,11 +78,11 @@ re-attaches to the same container will already be authenticated.
 ## Rebuilding the image
 
 To rebuild from scratch (e.g. after editing the setup script in
-`new-project.sh`):
+`start-claude.sh`):
 
 ```bash
 container image rm claude-dev:latest
-new-project.sh  # re-runs setup automatically
+start-claude.sh  # re-runs setup automatically
 ```
 
 ## Environment variable reference

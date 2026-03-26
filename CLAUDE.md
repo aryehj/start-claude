@@ -6,7 +6,7 @@ using Apple Containers. One script, one container per project.
 ## Layout
 
 ```
-new-project.sh   — main script; sets up image, creates and attaches container
+start-claude.sh  — main script; sets up image, creates and attaches container
 ROADMAP.md       — planned work
 README.md        — usage reference
 CLAUDE.md        — this file
@@ -14,13 +14,16 @@ CLAUDE.md        — this file
 
 ## What the script does
 
-`new-project.sh` sets up a `claude-dev:latest` image on first run (cached after
+`start-claude.sh` sets up a `claude-dev:latest` image on first run (cached after
 that), then creates and attaches a named container with:
 
 - The project directory mounted at its host path (not `/workspace`)
 - `~/.claude` mounted at `/root/.claude` (global memory, settings, sessions)
 - Node LTS, Claude Code CLI, uv/uvx, git, ripgrep, fd, jq
 - bubblewrap, socat, libseccomp2/dev (Claude Code sandbox dependencies)
+
+It also starts the container service automatically (`container system start`) so
+the script works even if the service isn't already running.
 
 If the named container already exists, it just starts and re-attaches it.
 
@@ -35,6 +38,10 @@ builder daemon that times out on first use. Instead, the script runs setup
 commands inside a temporary `debian:bookworm-slim` container, then exports the
 result as `claude-dev:latest` via `container export --image`. Same outcome,
 no builder dependency.
+
+**`container system start` is idempotent.** The script always calls it before
+any other container operations. It returns immediately if the service is already
+running, so there's no need to check status first.
 
 **`container inspect` returns `[]` with exit 0 for missing containers.** The
 existence check uses `[[ "$(container inspect ...)" != "[]" ]]` rather than
@@ -52,7 +59,7 @@ retains the session.
 ## Making changes
 
 The setup script is embedded as a `bash -c '...'` heredoc inside
-`new-project.sh`. Edit it there. After changing it, delete the cached image so
+`start-claude.sh`. Edit it there. After changing it, delete the cached image so
 it re-runs:
 
 ```bash

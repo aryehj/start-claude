@@ -28,6 +28,10 @@ if [[ ! -d "$PROJECT_DIR" ]]; then
   exit 1
 fi
 
+# ── ensure container service is running ───────────────────────────────────────
+echo "==> Starting container service (no-op if already running)"
+container system start
+
 # ── check for existing container ──────────────────────────────────────────────
 if [[ "$(container inspect "$CONTAINER_NAME" 2>/dev/null)" != "[]" ]]; then
   echo "Container '$CONTAINER_NAME' already exists — starting it."
