@@ -61,13 +61,23 @@ fi
 # ── inject project settings ───────────────────────────────────────────────────
 # settings.local.json is gitignored by Claude Code and project-specific.
 PROJECT_SETTINGS_FILE="$PROJECT_DIR/.claude/settings.local.json"
-if [[ ! -f "$PROJECT_SETTINGS_FILE" ]]; then
+if [[ -f "$PROJECT_SETTINGS_FILE" ]]; then
+  # Migrate boolean sandbox to object form (Claude Code schema change)
+  python3 - "$PROJECT_SETTINGS_FILE" << 'PYEOF'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    data = json.load(f)
+if isinstance(data.get('sandbox'), bool):
+    data['sandbox'] = {}
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+        f.write('\n')
+    print(f"==> Migrated sandbox boolean→object in {path}")
+PYEOF
+else
   mkdir -p "$PROJECT_DIR/.claude"
-  cat > "$PROJECT_SETTINGS_FILE" << 'EOF'
-{
-  "sandbox": true
-}
-EOF
+  printf '{\n  "sandbox": {}\n}\n' > "$PROJECT_SETTINGS_FILE"
   echo "==> Created $PROJECT_SETTINGS_FILE"
 fi
 
