@@ -139,12 +139,10 @@ BASHRC
   '
 
   echo "==> Exporting $IMAGE_TAG"
-  sleep 10
-  container export --image "$IMAGE_TAG" "$SETUP_NAME"
-
   until container inspect "$SETUP_NAME" 2>/dev/null | grep -q '"status":"stopped"'; do
     sleep 0.1
   done
+  container export --image "$IMAGE_TAG" "$SETUP_NAME"
   container rm "$SETUP_NAME"
   trap - EXIT
 
