@@ -60,7 +60,6 @@ if $REBUILD; then
 fi
 
 # ── inject project settings ───────────────────────────────────────────────────
-# Write .claude/settings.local.json in the project dir if it doesn't exist yet.
 # settings.local.json is gitignored by Claude Code and project-specific.
 PROJECT_SETTINGS_FILE="$PROJECT_DIR/.claude/settings.local.json"
 if [[ ! -f "$PROJECT_SETTINGS_FILE" ]]; then
@@ -115,6 +114,7 @@ else
       jq ripgrep fd-find unzip \
       bubblewrap socat libseccomp2 libseccomp-dev
     apt-get upgrade -y
+    rm -rf /var/lib/apt/lists/*
 
     # Record apt upgrade time for staleness check
     touch /var/lib/apt/last-upgrade
