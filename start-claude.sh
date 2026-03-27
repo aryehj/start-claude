@@ -24,6 +24,8 @@ PROJECT_DIR="${POSITIONAL[0]:-$(pwd)}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"          # absolute, resolved
 CONTAINER_NAME="${POSITIONAL[1]:-$(basename "$PROJECT_DIR")}"
 BASE_IMAGE="${CLAUDE_CONTAINER_IMAGE:-debian:bookworm-slim}"
+CONTAINER_MEMORY="${CLAUDE_CONTAINER_MEMORY:-4G}"
+CONTAINER_CPUS="${CLAUDE_CONTAINER_CPUS:-4}"
 CLAUDE_DIR="$HOME/.claude"
 IMAGE_STAMP="$HOME/.claude-dev-image-built"
 
@@ -147,6 +149,8 @@ echo "    claude  : $CLAUDE_DIR   →  /root/.claude"
 container run \
   --name "$CONTAINER_NAME" \
   -it \
+  -m "$CONTAINER_MEMORY" \
+  -c "$CONTAINER_CPUS" \
   -v "$PROJECT_DIR:$PROJECT_DIR" \
   -v "$CLAUDE_DIR:/root/.claude" \
   -w "$PROJECT_DIR" \
