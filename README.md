@@ -48,7 +48,7 @@ re-attaches to the existing one rather than creating a new one.
 
 | Tool | Notes |
 |------|-------|
-| `claude` | Claude Code CLI |
+| `claude` | Claude Code CLI (installed via official installer) |
 | `uv` / `uvx` | Python package manager |
 | `node` / `npm` | Node.js LTS |
 | `git` | Latest from apt |

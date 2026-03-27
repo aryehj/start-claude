@@ -26,8 +26,8 @@ CONTAINER_NAME="${POSITIONAL[1]:-$(basename "$PROJECT_DIR")}"
 BASE_IMAGE="${CLAUDE_CONTAINER_IMAGE:-debian:bookworm-slim}"
 CONTAINER_MEMORY="${CLAUDE_CONTAINER_MEMORY:-4G}"
 CONTAINER_CPUS="${CLAUDE_CONTAINER_CPUS:-4}"
-CLAUDE_DIR="$HOME/.claude"
 IMAGE_STAMP="$HOME/.claude-dev-image-built"
+TERM_ARGS=(-e "TERM=$TERM" -e "COLORTERM=${COLORTERM:-}" -e "TERM_PROGRAM=${TERM_PROGRAM:-}")
 
 # ── pre-flight ─────────────────────────────────────────────────────────────────
 if ! command -v container &>/dev/null; then
@@ -58,11 +58,25 @@ if $REBUILD; then
   fi
 fi
 
+# ── inject project settings ───────────────────────────────────────────────────
+# settings.local.json is gitignored by Claude Code and project-specific.
+PROJECT_SETTINGS_FILE="$PROJECT_DIR/.claude/settings.local.json"
+if [[ ! -f "$PROJECT_SETTINGS_FILE" ]]; then
+  mkdir -p "$PROJECT_DIR/.claude"
+  cat > "$PROJECT_SETTINGS_FILE" << 'EOF'
+{
+  "theme": "light",
+  "sandbox": true
+}
+EOF
+  echo "==> Created $PROJECT_SETTINGS_FILE"
+fi
+
 # ── check for existing container ──────────────────────────────────────────────
 if [[ "$(container inspect "$CONTAINER_NAME" 2>/dev/null)" != "[]" ]]; then
-  echo "Container '$CONTAINER_NAME' already exists — starting it."
-  container start "$CONTAINER_NAME"
-  container exec -it "$CONTAINER_NAME" /bin/bash
+  echo "Container '$CONTAINER_NAME' already exists — attaching."
+  container start "$CONTAINER_NAME" 2>/dev/null || true
+  container exec -it "${TERM_ARGS[@]}" "$CONTAINER_NAME" /bin/bash
   exit 0
 fi
 
@@ -120,22 +134,31 @@ BASHRC
     apt-get install -y nodejs
     rm -rf /var/lib/apt/lists/*
 
+    npm install -g npm@latest @anthropic-ai/sandbox-runtime
+
     # ── uv ───────────────────────────────────────────────────────────────────
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    ln -s /root/.local/bin/uv /usr/local/bin/uv
-    ln -s /root/.local/bin/uvx /usr/local/bin/uvx
+    # UV_INSTALL_DIR puts the binaries directly into /usr/local/bin, so no
+    # PATH fixup is needed and the installer does not print the "add to PATH"
+    # warning.
+    curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh
 
     # ── Claude Code CLI ──────────────────────────────────────────────────────
-    npm install -g @anthropic-ai/claude-code
+    # The installer puts the binary in ~/.local/bin, which is not in the default
+    # PATH. Symlink into /usr/local/bin for invocability; also add ~/.local/bin
+    # to PATH in .bashrc so the claude binary itself does not warn at startup.
+    export PATH="/root/.local/bin:$PATH"
+    curl -fsSL https://claude.ai/install.sh | bash
+    ln -sf /root/.local/bin/claude /usr/local/bin/claude
+    echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> /root/.bashrc
   '
 
   echo "==> Exporting $IMAGE_TAG"
+  until container inspect "$SETUP_NAME" 2>/dev/null | grep -q '"status":"stopped"'; do
+    sleep 0.1
+  done
   container export --image "$IMAGE_TAG" "$SETUP_NAME"
   container rm "$SETUP_NAME"
   trap - EXIT
-
-  echo "==> Stopping buildkit container"
-  container stop buildkit 2>/dev/null || true
 
   # Record image build time for age check
   date +%s > "$IMAGE_STAMP"
@@ -144,7 +167,6 @@ fi
 # ── run container ──────────────────────────────────────────────────────────────
 echo "==> Creating container '$CONTAINER_NAME'"
 echo "    project : $PROJECT_DIR  →  $PROJECT_DIR"
-echo "    claude  : $CLAUDE_DIR   →  /root/.claude"
 
 container run \
   --name "$CONTAINER_NAME" \
@@ -152,7 +174,7 @@ container run \
   -m "$CONTAINER_MEMORY" \
   -c "$CONTAINER_CPUS" \
   -v "$PROJECT_DIR:$PROJECT_DIR" \
-  -v "$CLAUDE_DIR:/root/.claude" \
   -w "$PROJECT_DIR" \
+  "${TERM_ARGS[@]}" \
   "$IMAGE_TAG" \
   /bin/bash

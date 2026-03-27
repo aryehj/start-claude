@@ -18,9 +18,8 @@ CLAUDE.md        — this file
 that), then creates and attaches a named container with:
 
 - The project directory mounted at its host path (not `/workspace`)
-- `~/.claude` mounted at `/root/.claude` (global memory, settings, sessions)
-- Node LTS, Claude Code CLI, uv/uvx, git, ripgrep, fd, jq
-- bubblewrap, socat, libseccomp2/dev (Claude Code sandbox dependencies)
+- Node LTS, Claude Code CLI (via official installer), uv/uvx, git, ripgrep, fd, jq
+- bubblewrap, socat, libseccomp2/dev, `@anthropic-ai/sandbox-runtime` (Claude Code sandbox dependencies)
 
 It also starts the container service automatically (`container system start`) so
 the script works even if the service isn't already running.
@@ -47,14 +46,14 @@ running, so there's no need to check status first.
 existence check uses `[[ "$(container inspect ...)" != "[]" ]]` rather than
 checking the exit code.
 
-**`~/.claude` is bind-mounted, not copied.** This keeps global memory and
-settings in sync with the host and avoids divergence across containers.
+**Claude Code installer binary is symlinked into `/usr/local/bin`.** The official installer places the `claude` binary in `~/.local/bin`, which is not in the default PATH. The setup script symlinks it into `/usr/local/bin` (`ln -sf /root/.local/bin/claude /usr/local/bin/claude`) so `claude` is available regardless of shell login mode. `PATH` is also exported before the installer runs to suppress its "not in PATH" warning. `~/.local/bin` is also added to `PATH` in `/root/.bashrc` so the claude binary itself doesn't warn at startup that its install location isn't in PATH. `uv` avoids this entirely by using `UV_INSTALL_DIR=/usr/local/bin`.
+
+**`TERM`, `COLORTERM`, and `TERM_PROGRAM` are forwarded into the container.** Without these, Claude Code falls back to a lower color mode (16 or 256 colors) and renders very differently from the host. Both `container run` (new container) and `container exec` (re-attach) pass them via `TERM_ARGS`.
 
 **Auth requires one-time `claude login` per new container.** Claude Code stores
 OAuth credentials in the macOS Keychain, which is not accessible inside the
-container. The bind-mount of `~/.claude` does not carry credentials in. Run
-`claude login` once inside a new container; re-attaching to the same container
-retains the session.
+container. Run `claude login` once inside a new container; re-attaching to the
+same container retains the session.
 
 ## Making changes
 
