@@ -78,12 +78,14 @@ re-attaches to the same container will already be authenticated.
 ## Rebuilding the image
 
 To rebuild from scratch (e.g. after editing the setup script in
-`start-claude.sh`):
+`start-claude.sh`), use the `--rebuild` flag:
 
 ```bash
-container image rm claude-dev:latest
-start-claude.sh  # re-runs setup automatically
+start-claude.sh --rebuild
 ```
+
+This removes the existing container for the project (if any) and the
+`claude-dev:latest` image, then rebuilds from scratch.
 
 ## Environment variable reference
 

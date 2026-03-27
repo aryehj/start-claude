@@ -59,9 +59,12 @@ retains the session.
 ## Making changes
 
 The setup script is embedded as a `bash -c '...'` heredoc inside
-`start-claude.sh`. Edit it there. After changing it, delete the cached image so
-it re-runs:
+`start-claude.sh`. Edit it there. After changing it, run with `--rebuild` to
+apply the changes:
 
 ```bash
-container image rm claude-dev:latest
+start-claude.sh --rebuild
 ```
+
+This removes the existing project container (if any) and the `claude-dev:latest`
+image, then rebuilds from scratch.

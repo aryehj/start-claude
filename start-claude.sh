@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# new-project.sh — spin up a Claude Code dev container for a project
+# start-claude.sh — spin up a Claude Code dev container for a project
 #
 # Usage:
-#   new-project.sh [project-dir] [container-name]
+#   start-claude.sh [--rebuild] [project-dir] [container-name]
 #
 # Defaults:
 #   project-dir    = current directory
@@ -11,11 +11,21 @@
 set -euo pipefail
 
 # ── args ──────────────────────────────────────────────────────────────────────
-PROJECT_DIR="${1:-$(pwd)}"
+REBUILD=false
+POSITIONAL=()
+for arg in "$@"; do
+  case "$arg" in
+    --rebuild) REBUILD=true ;;
+    *) POSITIONAL+=("$arg") ;;
+  esac
+done
+
+PROJECT_DIR="${POSITIONAL[0]:-$(pwd)}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"          # absolute, resolved
-CONTAINER_NAME="${2:-$(basename "$PROJECT_DIR")}"
+CONTAINER_NAME="${POSITIONAL[1]:-$(basename "$PROJECT_DIR")}"
 BASE_IMAGE="${CLAUDE_CONTAINER_IMAGE:-debian:bookworm-slim}"
 CLAUDE_DIR="$HOME/.claude"
+IMAGE_STAMP="$HOME/.claude-dev-image-built"
 
 # ── pre-flight ─────────────────────────────────────────────────────────────────
 if ! command -v container &>/dev/null; then
@@ -32,6 +42,20 @@ fi
 echo "==> Starting container service (no-op if already running)"
 container system start
 
+# ── rebuild: remove existing container and image ──────────────────────────────
+IMAGE_TAG="claude-dev:latest"
+
+if $REBUILD; then
+  if [[ "$(container inspect "$CONTAINER_NAME" 2>/dev/null)" != "[]" ]]; then
+    echo "==> --rebuild requested — removing existing container '$CONTAINER_NAME'."
+    container rm "$CONTAINER_NAME"
+  fi
+  if container image inspect "$IMAGE_TAG" &>/dev/null; then
+    echo "==> --rebuild requested — removing existing image."
+    container image rm "$IMAGE_TAG"
+  fi
+fi
+
 # ── check for existing container ──────────────────────────────────────────────
 if [[ "$(container inspect "$CONTAINER_NAME" 2>/dev/null)" != "[]" ]]; then
   echo "Container '$CONTAINER_NAME' already exists — starting it."
@@ -40,10 +64,16 @@ if [[ "$(container inspect "$CONTAINER_NAME" 2>/dev/null)" != "[]" ]]; then
   exit 0
 fi
 
-# ── build dev image (skip if cached) ──────────────────────────────────────────
-IMAGE_TAG="claude-dev:latest"
 if container image inspect "$IMAGE_TAG" &>/dev/null; then
   echo "==> Image $IMAGE_TAG already exists — skipping setup."
+  if [[ -f "$IMAGE_STAMP" ]]; then
+    BUILD_TIME=$(cat "$IMAGE_STAMP")
+    NOW=$(date +%s)
+    AGE_DAYS=$(( (NOW - BUILD_TIME) / 86400 ))
+    if (( AGE_DAYS >= 30 )); then
+      echo "==> Warning: dev image is ${AGE_DAYS} days old. Run with --rebuild to refresh."
+    fi
+  fi
 else
   echo "==> Setting up dev image from ${BASE_IMAGE}"
 
@@ -66,7 +96,22 @@ else
       build-essential python3 python3-pip \
       jq ripgrep fd-find unzip \
       bubblewrap socat libseccomp2 libseccomp-dev
+    apt-get upgrade -y
     rm -rf /var/lib/apt/lists/*
+
+    # Record apt upgrade time for staleness check
+    touch /var/lib/apt/last-upgrade
+
+    # ── apt staleness warning (fires on every shell attach) ───────────────
+    cat >> /etc/bash.bashrc << '"'"'BASHRC'"'"'
+if [[ -f /var/lib/apt/last-upgrade ]]; then
+  _apt_age=$(( ($(date +%s) - $(date -r /var/lib/apt/last-upgrade +%s)) / 86400 ))
+  if (( _apt_age >= 7 )); then
+    echo "Warning: apt packages are ${_apt_age} days old — run: apt-get update && apt-get upgrade"
+  fi
+  unset _apt_age
+fi
+BASHRC
 
     # ── Node.js (LTS) ────────────────────────────────────────────────────────
     curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
@@ -86,6 +131,12 @@ else
   container export --image "$IMAGE_TAG" "$SETUP_NAME"
   container rm "$SETUP_NAME"
   trap - EXIT
+
+  echo "==> Stopping buildkit container"
+  container stop buildkit 2>/dev/null || true
+
+  # Record image build time for age check
+  date +%s > "$IMAGE_STAMP"
 fi
 
 # ── run container ──────────────────────────────────────────────────────────────
