@@ -157,6 +157,8 @@ BASHRC
   done
   container export --image "$IMAGE_TAG" "$SETUP_NAME"
   container rm "$SETUP_NAME"
+  container stop buildkit 2>/dev/null || true
+  container rm buildkit 
   trap - EXIT
 
   # Record image build time for age check
