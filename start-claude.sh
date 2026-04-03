@@ -143,7 +143,7 @@ BASHRC
     apt-get install -y nodejs
     rm -rf /var/lib/apt/lists/*
 
-    npm install -g npm@latest @anthropic-ai/sandbox-runtime
+    npm install -g npm@latest @anthropic-ai/sandbox-runtime@0.0.46
 
     # ── uv ───────────────────────────────────────────────────────────────────
     # UV_INSTALL_DIR puts the binaries directly into /usr/local/bin, so no
