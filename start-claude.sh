@@ -70,6 +70,10 @@ path = sys.argv[1]
 with open(path) as f:
     data = json.load(f)
 changed = False
+if 'theme' not in data:
+    data['theme'] = 'light'
+    changed = True
+    print(f"==> Added theme:light to {path}")
 if isinstance(data.get('sandbox'), bool):
     data['sandbox'] = {"enabled": True, "autoAllowBashIfSandboxed": True}
     changed = True
@@ -88,7 +92,7 @@ if changed:
 PYEOF
 else
   mkdir -p "$PROJECT_DIR/.claude"
-  printf '{\n  "sandbox": {\n    "enabled": true,\n    "autoAllowBashIfSandboxed": true,\n    "filesystem": {\n      "allowWrite": ["/tmp/uv-cache"]\n    }\n  }\n}\n' > "$PROJECT_SETTINGS_FILE"
+  printf '{\n  "theme": "light",\n  "sandbox": {\n    "enabled": true,\n    "autoAllowBashIfSandboxed": true,\n    "filesystem": {\n      "allowWrite": ["/tmp/uv-cache"]\n    }\n  }\n}\n' > "$PROJECT_SETTINGS_FILE"
   echo "==> Created $PROJECT_SETTINGS_FILE"
 fi
 
@@ -219,4 +223,4 @@ container run \
   -w "$PROJECT_DIR" \
   "${TERM_ARGS[@]}" \
   "$IMAGE_TAG" \
-  bash -c 'echo "{\"theme\":\"light\"}" > /root/.claude.json && exec bash'
+  bash

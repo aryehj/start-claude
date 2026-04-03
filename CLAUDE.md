@@ -66,9 +66,19 @@ writes to `/tmp/uv-cache` even though the env var points there. See ADR-001 in
 
 **`~/.claude` is shared across all containers via a host volume mount.**
 `~/.claude-containers/shared/` on the host is mounted to `/root/.claude` inside
-every container. This persists auth credentials, memory, and user settings
-across container restarts and across projects. `claude login` only needs to be
-run once; all containers share the session.
+every container. This persists auth credentials (`.credentials.json`), memory,
+and user settings across container restarts and across projects. `claude login`
+only needs to be run once; all containers share the session. Note: only
+`/root/.claude/` (the directory) is mounted — `/root/.claude.json` (the
+top-level config file) is **not** persisted. The script does not write to
+`.claude.json`; anything that needs to survive container recreation goes in the
+mounted directory or in project-level `settings.local.json`.
+
+**Theme is set at the project level, not globally.** The light theme is
+configured in each project's `.claude/settings.local.json` rather than in the
+global `~/.claude.json`. This avoids needing to persist or merge `.claude.json`
+across container lifecycles. The migration block in the settings injection
+section adds `"theme": "light"` to existing settings files that lack it.
 
 ## Making changes
 

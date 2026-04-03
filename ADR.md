@@ -82,3 +82,49 @@ Add `/tmp/uv-cache` to `sandbox.filesystem.allowWrite` in each project's
   are now kept in sync by the same script.
 - Existing containers need their `settings.local.json` updated (happens
   automatically on next `start-claude.sh` run) but do not require `--rebuild`.
+
+## ADR-003: Set theme in project-level settings, not global `.claude.json`
+
+**Date:** 2026-04-03
+**Status:** Accepted
+
+### Context
+
+The script previously set `"theme": "light"` by overwriting `/root/.claude.json`
+on every `container run`:
+
+```bash
+bash -c 'echo "{\"theme\":\"light\"}" > /root/.claude.json && exec bash'
+```
+
+`/root/.claude.json` is a top-level file, separate from the `/root/.claude/`
+directory that is volume-mounted for credential persistence. Because `.claude.json`
+was not persisted, it was ephemeral — but it also meant the overwrite destroyed
+any auth-related state that Claude Code wrote there (e.g. `oauthAccount`,
+`hasCompletedOnboarding`), potentially contributing to re-login prompts on
+container recreation.
+
+Mounting `.claude.json` as a second volume was considered but adds complexity
+(seeding the file, merging settings across versions).
+
+### Decision
+
+Move the theme setting to the project-level `settings.local.json`, which the
+script already creates and migrates. The `container run` entrypoint is now plain
+`bash` with no file writes.
+
+- New projects get `"theme": "light"` in the generated `settings.local.json`.
+- Existing projects get it added by the migration block (same pattern as the
+  sandbox and `allowWrite` migrations).
+
+### Consequences
+
+- `.claude.json` is no longer touched by the script. Claude Code manages it
+  internally; its contents are ephemeral to each container but no longer
+  clobbered on creation.
+- Theme is project-scoped, which is how `settings.local.json` is designed to
+  work. Different projects could theoretically use different themes.
+- Auth persistence depends solely on the `~/.claude/` volume mount (which
+  contains `.credentials.json`). If `.claude.json` turns out to hold state
+  required for session continuity, a separate volume mount would need to be
+  added.
