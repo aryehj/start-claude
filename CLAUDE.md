@@ -7,6 +7,8 @@ using Apple Containers. One script, one container per project.
 
 ```
 start-claude.sh  — main script; sets up image, creates and attaches container
+skills/          — reusable Claude Code skills (back up of ~/.claude/skills/)
+plans/           — implementation plans written by /plan skill
 ROADMAP.md       — planned work
 README.md        — usage reference
 ADR.md           — architecture decision records

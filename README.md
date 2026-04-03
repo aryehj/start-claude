@@ -82,6 +82,27 @@ start-claude.sh --rebuild
 This removes the existing container for the project (if any) and the
 `claude-dev:latest` image, then rebuilds from scratch.
 
+## Included skills
+
+The `skills/` directory contains backups of reusable Claude Code skills
+(normally installed at `~/.claude/skills/`). To use them, copy or symlink into
+your global skills directory:
+
+```bash
+# Copy a skill
+cp -r skills/cleanup ~/.claude/skills/cleanup
+
+# Or symlink
+ln -s "$(pwd)/skills/cleanup" ~/.claude/skills/cleanup
+```
+
+Once installed, invoke with `/cleanup` inside any Claude Code session.
+
+| Skill | What it does |
+|-------|-------------|
+| `cleanup` | Post-implementation housekeeping — updates CLAUDE.md, README.md, appends ADR.md, and renames completed plan files |
+| `plan` | Explores the codebase and writes implementation plans to `plans/` as markdown files targeted at Claude Sonnet |
+
 ## Environment variable reference
 
 | Variable | Default | Description |
