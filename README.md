@@ -64,12 +64,11 @@ re-attaches to the existing one rather than creating a new one.
 | Host | Container |
 |------|-----------|
 | Your project dir | Same path (e.g. `/Users/you/projects/my-app`) |
+| `~/.claude-containers/shared/` | `/root/.claude` |
 
-**Authentication note:** Claude Code stores OAuth credentials in the macOS
-Keychain, not in `~/.claude`. The bind-mount does not carry them into the
-container, so `claude` will prompt you to log in the first time you use it in
-a new container. Run `claude login` inside the container once; subsequent
-re-attaches to the same container will already be authenticated.
+**Authentication note:** `~/.claude` is shared across all containers via the
+host volume mount above. Run `claude login` once in any container; all
+containers share the session.
 
 ## Rebuilding the image
 
@@ -88,3 +87,4 @@ This removes the existing container for the project (if any) and the
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CLAUDE_CONTAINER_IMAGE` | `debian:bookworm-slim` | Override the base image |
+| `UV_CACHE_DIR` | `/tmp/uv-cache` | UV cache location (set automatically inside the container to avoid sandbox read-only filesystem errors) |

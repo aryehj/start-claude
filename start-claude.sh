@@ -27,7 +27,8 @@ BASE_IMAGE="${CLAUDE_CONTAINER_IMAGE:-debian:bookworm-slim}"
 CONTAINER_MEMORY="${CLAUDE_CONTAINER_MEMORY:-4G}"
 CONTAINER_CPUS="${CLAUDE_CONTAINER_CPUS:-4}"
 IMAGE_STAMP="$HOME/.claude-dev-image-built"
-TERM_ARGS=(-e "TERM=$TERM" -e "COLORTERM=${COLORTERM:-}" -e "TERM_PROGRAM=${TERM_PROGRAM:-}")
+CLAUDE_CONFIG_DIR="$HOME/.claude-containers/shared"
+TERM_ARGS=(-e "TERM=$TERM" -e "COLORTERM=${COLORTERM:-}" -e "TERM_PROGRAM=${TERM_PROGRAM:-}" -e "UV_CACHE_DIR=/tmp/uv-cache")
 
 # ── pre-flight ─────────────────────────────────────────────────────────────────
 if ! command -v container &>/dev/null; then
@@ -159,6 +160,12 @@ BASHRC
     curl -fsSL https://claude.ai/install.sh | bash
     ln -sf /root/.local/bin/claude /usr/local/bin/claude
     echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> /root/.bashrc
+    # UV needs a writable cache dir; /root/.cache is read-only in the sandbox.
+    # Set it everywhere: .bashrc (interactive), /etc/environment (PAM login),
+    # and /etc/profile.d (login shells).
+    echo "export UV_CACHE_DIR=/tmp/uv-cache" >> /root/.bashrc
+    echo "UV_CACHE_DIR=/tmp/uv-cache" >> /etc/environment
+    echo "export UV_CACHE_DIR=/tmp/uv-cache" > /etc/profile.d/uv-cache.sh
   '
 
   echo "==> Exporting $IMAGE_TAG"
@@ -190,12 +197,15 @@ fi
 echo "==> Creating container '$CONTAINER_NAME'"
 echo "    project : $PROJECT_DIR  →  $PROJECT_DIR"
 
+mkdir -p "$CLAUDE_CONFIG_DIR"
+
 container run \
   --name "$CONTAINER_NAME" \
   -it \
   -m "$CONTAINER_MEMORY" \
   -c "$CONTAINER_CPUS" \
   -v "$PROJECT_DIR:$PROJECT_DIR" \
+  -v "$CLAUDE_CONFIG_DIR:/root/.claude" \
   -w "$PROJECT_DIR" \
   "${TERM_ARGS[@]}" \
   "$IMAGE_TAG" \

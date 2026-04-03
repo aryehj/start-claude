@@ -9,6 +9,7 @@ using Apple Containers. One script, one container per project.
 start-claude.sh  — main script; sets up image, creates and attaches container
 ROADMAP.md       — planned work
 README.md        — usage reference
+ADR.md           — architecture decision records
 CLAUDE.md        — this file
 ```
 
@@ -49,12 +50,19 @@ checking the exit code.
 
 **Claude Code installer binary is symlinked into `/usr/local/bin`.** The official installer places the `claude` binary in `~/.local/bin`, which is not in the default PATH. The setup script symlinks it into `/usr/local/bin` (`ln -sf /root/.local/bin/claude /usr/local/bin/claude`) so `claude` is available regardless of shell login mode. `PATH` is also exported before the installer runs to suppress its "not in PATH" warning. `~/.local/bin` is also added to `PATH` in `/root/.bashrc` so the claude binary itself doesn't warn at startup that its install location isn't in PATH. `uv` avoids this entirely by using `UV_INSTALL_DIR=/usr/local/bin`.
 
+**`UV_CACHE_DIR` is set to `/tmp/uv-cache` in the container environment.**
+Claude Code's sandbox makes `/root/.cache` read-only, which breaks UV's default
+cache path. `UV_CACHE_DIR` is passed via `TERM_ARGS` (so Claude Code's sandbox
+subprocesses inherit it) and also baked into `.bashrc`, `/etc/environment`, and
+`/etc/profile.d/` for interactive sessions. See ADR-001 in `ADR.md`.
+
 **`TERM`, `COLORTERM`, and `TERM_PROGRAM` are forwarded into the container.** Without these, Claude Code falls back to a lower color mode (16 or 256 colors) and renders very differently from the host. Both `container run` (new container) and `container exec` (re-attach) pass them via `TERM_ARGS`.
 
-**Auth requires one-time `claude login` per new container.** Claude Code stores
-OAuth credentials in the macOS Keychain, which is not accessible inside the
-container. Run `claude login` once inside a new container; re-attaching to the
-same container retains the session.
+**`~/.claude` is shared across all containers via a host volume mount.**
+`~/.claude-containers/shared/` on the host is mounted to `/root/.claude` inside
+every container. This persists auth credentials, memory, and user settings
+across container restarts and across projects. `claude login` only needs to be
+run once; all containers share the session.
 
 ## Making changes
 
