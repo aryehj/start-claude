@@ -28,6 +28,7 @@ CONTAINER_MEMORY="${CLAUDE_CONTAINER_MEMORY:-4G}"
 CONTAINER_CPUS="${CLAUDE_CONTAINER_CPUS:-4}"
 IMAGE_STAMP="$HOME/.claude-dev-image-built"
 CLAUDE_CONFIG_DIR="$HOME/.claude-containers/shared"
+CLAUDE_JSON_FILE="$HOME/.claude-containers/claude.json"
 TERM_ARGS=(-e "TERM=$TERM" -e "COLORTERM=${COLORTERM:-}" -e "TERM_PROGRAM=${TERM_PROGRAM:-}")
 
 # ── pre-flight ─────────────────────────────────────────────────────────────────
@@ -220,6 +221,11 @@ echo "==> Creating container '$CONTAINER_NAME'"
 echo "    project : $PROJECT_DIR  →  $PROJECT_DIR"
 
 mkdir -p "$CLAUDE_CONFIG_DIR"
+# Ensure the top-level .claude.json exists on the host so the bind mount
+# below resolves to a file (not an auto-created directory). This file holds
+# oauthAccount and other auth state that Claude Code writes outside ~/.claude,
+# so it needs to survive --rebuild alongside ~/.claude/.credentials.json.
+[[ -f "$CLAUDE_JSON_FILE" ]] || echo '{}' > "$CLAUDE_JSON_FILE"
 
 # ── sync skills from upstream repo ────────────────────────────────────────────
 # Pulls skills/ from the upstream repo and drops each skill directory into the
@@ -257,6 +263,7 @@ container run \
   -c "$CONTAINER_CPUS" \
   -v "$PROJECT_DIR:$PROJECT_DIR" \
   -v "$CLAUDE_CONFIG_DIR:/root/.claude" \
+  -v "$CLAUDE_JSON_FILE:/root/.claude.json" \
   -w "$PROJECT_DIR" \
   "${TERM_ARGS[@]}" \
   "$IMAGE_TAG" \

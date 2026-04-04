@@ -169,7 +169,7 @@ script already creates and migrates. The `container run` entrypoint is now plain
 - Auth persistence depends solely on the `~/.claude/` volume mount (which
   contains `.credentials.json`). If `.claude.json` turns out to hold state
   required for session continuity, a separate volume mount would need to be
-  added.
+  added. *(This caveat materialised — see ADR-006.)*
 
 ## ADR-005: Sync skills from upstream repo on new container build
 
@@ -217,3 +217,49 @@ or extraction failures produce a warning and container creation proceeds.
 - Re-attaching to an existing container does not trigger a sync, matching
   the existing invariant that image/container state only changes on new
   builds.
+
+## ADR-006: Persist `/root/.claude.json` via a file bind-mount
+
+**Date:** 2026-04-04
+**Status:** Accepted (addresses caveat in ADR-003)
+
+### Context
+
+ADR-003 moved the theme setting out of `.claude.json` so the script stopped
+clobbering that file, but left its persistence unaddressed — the file was
+ephemeral per container. This turned out to break authentication across
+`--rebuild`: Claude Code stores `oauthAccount` and other auth state in
+`~/.claude.json`, not just in `~/.claude/.credentials.json`. When `--rebuild`
+destroyed the container, the fresh container had `.credentials.json` mounted
+in (via the `~/.claude/` volume) but no `.claude.json`, and Claude Code
+prompted for re-login every time.
+
+The user confirmed they are container-only (no host Claude install), so
+separation between host and container `.claude.json` state is not needed.
+
+### Decision
+
+Add a second bind mount: the host file `~/.claude-containers/claude.json`
+maps to `/root/.claude.json` in the container. The script creates and
+initializes the file to `{}` on the host if it does not already exist, so the
+bind mount resolves to a file rather than an auto-created directory.
+
+The file sits alongside (not inside) `~/.claude-containers/shared/`, because
+`shared/` is already mounted at `/root/.claude`, and nesting `claude.json`
+inside it would expose it at the wrong path (`/root/.claude/claude.json`).
+
+### Consequences
+
+- `claude login` now survives `--rebuild`. Both halves of Claude Code's auth
+  state (`~/.claude/.credentials.json` and `~/.claude.json`) are persisted on
+  the host.
+- All containers share the same `.claude.json`, matching the existing
+  "shared across containers" model for `~/.claude/`. Per-project config
+  still lives in each project's `.claude/settings.local.json`, unaffected.
+- Relies on Apple Containers supporting file-level bind mounts
+  (`-v host_file:container_file`). If a future version drops that support,
+  fall back to mounting the parent directory or seeding `.claude.json` into
+  `~/.claude-containers/shared/` with a symlink.
+- To reset auth state: delete `~/.claude-containers/claude.json` and
+  `~/.claude-containers/shared/.credentials.json`, then re-run
+  `claude login`.

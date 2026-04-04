@@ -65,10 +65,11 @@ re-attaches to the existing one rather than creating a new one.
 |------|-----------|
 | Your project dir | Same path (e.g. `/Users/you/projects/my-app`) |
 | `~/.claude-containers/shared/` | `/root/.claude` |
+| `~/.claude-containers/claude.json` | `/root/.claude.json` |
 
-**Authentication note:** `~/.claude` is shared across all containers via the
-host volume mount above. Run `claude login` once in any container; all
-containers share the session.
+**Authentication note:** `~/.claude` and `~/.claude.json` are shared across all
+containers via the host volume mounts above. Run `claude login` once in any
+container; all containers share the session, and auth survives `--rebuild`.
 
 ## Rebuilding the image
 

@@ -70,11 +70,15 @@ See ADR-001 in `ADR.md`.
 `~/.claude-containers/shared/` on the host is mounted to `/root/.claude` inside
 every container. This persists auth credentials (`.credentials.json`), memory,
 and user settings across container restarts and across projects. `claude login`
-only needs to be run once; all containers share the session. Note: only
-`/root/.claude/` (the directory) is mounted — `/root/.claude.json` (the
-top-level config file) is **not** persisted. The script does not write to
-`.claude.json`; anything that needs to survive container recreation goes in the
-mounted directory or in project-level `settings.local.json`.
+only needs to be run once; all containers share the session.
+
+**`/root/.claude.json` is also persisted, as a file bind-mount.** Claude Code
+stores `oauthAccount` and related auth state in the top-level `~/.claude.json`,
+not just in `~/.claude/.credentials.json` — so losing it forces a re-login even
+when `.credentials.json` survives. The script creates
+`~/.claude-containers/claude.json` on the host (initialized to `{}` if absent)
+and mounts it to `/root/.claude.json` alongside the `~/.claude/` directory
+mount. This way both halves of Claude Code's auth state survive `--rebuild`.
 
 **Skills are synced from the upstream repo on every new-container build.**
 Right before `container run`, the script downloads the repo tarball from
