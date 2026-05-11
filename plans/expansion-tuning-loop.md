@@ -4,7 +4,7 @@ This is a single-phase plan that adds **Phase 6.5** to `local-research-harness.m
 
 ## Status
 
-- [ ] Phase 6.5: query expansion + search-term tuning loop (agent-as-loop)
+- [x] Phase 6.5: query expansion + search-term tuning loop (agent-as-loop)
 
 <!-- mark [x] when complete. No effort annotation: same shape as Phase 6 — sonnet-high recommended because agent judgement IS the metric. -->
 
