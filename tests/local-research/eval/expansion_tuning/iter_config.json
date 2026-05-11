@@ -1,6 +1,6 @@
 {
-  "prompt_template": null,
+  "prompt_template": "Output {n} short search-keyword strings (3-6 tokens each) suitable for a search engine, derived from the question. No natural-language phrasings; no quoting; no site: operators. Output exactly one keyword string per line with no numbering, bullets, or extra text.\n\nQuery: {query}",
   "n_expansions": 4,
-  "include_seed": true,
+  "include_seed": false,
   "per_expansion_routing": []
 }

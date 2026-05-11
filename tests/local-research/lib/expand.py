@@ -1,11 +1,13 @@
 """
 Query expansion via the EXPAND_MODEL.
-Returns [original_query, *expansions] so the seed is always searched.
+Returns [original_query, *expansions]; callers pass include_seed=False to drop
+the seed before searching (recommended for long natural-language questions where
+the seed crowds out keyword expansions in top-N slots).
 
 Prompt selection (in priority order):
   1. EXPAND_PROMPT env var — raw template string with {n} and {query} placeholders
-  2. EXPAND_PROMPT_NAME env var — one of: generic, scholarly-tilt, anti-seo
-  3. Default: generic
+  2. EXPAND_PROMPT_NAME env var — one of: keyword-distillation, generic, scholarly-tilt, anti-seo
+  3. Default: keyword-distillation
 """
 import os
 
@@ -13,6 +15,13 @@ from lib.config import EXPAND_MODEL
 from lib import omlx
 
 _PROMPTS = {
+    "keyword-distillation": (
+        "Output {n} short search-keyword strings (3-6 tokens each) suitable for a search "
+        "engine, derived from the question. No natural-language phrasings; no quoting; no "
+        "site: operators. Output exactly one keyword string per line with no numbering, "
+        "bullets, or extra text.\n\nQuery: {query}"
+    ),
+
     "generic": (
         "Generate {n} alternative phrasings of the following research query. "
         "Cover different angles: technical vs. lay terminology, narrow vs. broad scope, "
@@ -45,7 +54,7 @@ _PROMPTS = {
 }
 
 _raw_env = os.environ.get("EXPAND_PROMPT") or ""
-_name_env = os.environ.get("EXPAND_PROMPT_NAME") or "generic"
+_name_env = os.environ.get("EXPAND_PROMPT_NAME") or "keyword-distillation"
 
 if _raw_env:
     _ACTIVE_PROMPT = _raw_env

@@ -383,49 +383,47 @@ class TestPipelineWithPriors(unittest.TestCase):
         for r in result["ranked"]:
             self.assertIn("prior_adj", r, "ranked results must have prior_adj from source priors")
 
-    def test_scholarly_mode_routes_expansions_to_science(self):
-        captured_categories = []
+    def test_expand_routing_routes_per_position(self):
+        captured: list[dict] = []
 
         def capture_search(query, n=20, categories=None, engines=None, pages=1):
-            captured_categories.append(categories)
-            return [{"url": f"https://{i}.com", "title": "T", "content": "C", "engine": "g", "score": 1.0}
-                    for i in range(3)]
+            captured.append({"categories": categories, "engines": engines})
+            return [{"url": f"https://r{len(captured)}.com", "title": "T", "content": "C",
+                     "engine": "g", "score": 1.0}
+                    for _ in range(2)]
 
-        with patch.dict(os.environ, {"SCHOLARLY_MODE": "1"}, clear=False), \
-             patch("lib.expand.expand", return_value=["seed", "scholarly-exp1", "scholarly-exp2"]), \
+        routing = '[{"categories": "science", "engines": null}, {"categories": null, "engines": "pubmed"}]'
+        with patch.dict(os.environ, {"EXPAND_ROUTING": routing}, clear=False), \
+             patch("lib.expand.expand", return_value=["seed", "exp1", "exp2"]), \
              patch("lib.search.search", side_effect=capture_search), \
              patch("lib.omlx.embed", return_value=[[1.0, 0.0, 0.0]] * 20):
-            import importlib
-            importlib.reload(lib.pipeline)
-            lib.pipeline.gather_sources("test query")
+            lib.pipeline.gather_sources("test query", include_seed=False)
 
-        with patch.dict(os.environ, {"SCHOLARLY_MODE": ""}, clear=False):
-            importlib.reload(lib.pipeline)
+        # include_seed=False: exp1 → pos-0 routing, exp2 → pos-1 routing
+        self.assertEqual(captured[0]["categories"], "science", "pos-0 must use categories=science per routing")
+        self.assertIsNone(captured[0]["engines"], "pos-0 engines must be None per routing")
+        self.assertIsNone(captured[1]["categories"], "pos-1 categories must be None per routing")
+        self.assertEqual(captured[1]["engines"], "pubmed", "pos-1 must use engines=pubmed per routing")
 
-        # First expansion (seed, index 0) → None; rest → "science"
-        self.assertIsNone(captured_categories[0], "seed query must use default categories (None)")
-        self.assertTrue(
-            all(c == "science" for c in captured_categories[1:]),
-            "non-seed expansions in scholarly mode must use categories=science",
-        )
-
-    def test_non_scholarly_mode_no_categories(self):
+    def test_default_routing_no_categories(self):
         captured_categories = []
+        captured_engines = []
 
         def capture_search(query, n=20, categories=None, engines=None, pages=1):
             captured_categories.append(categories)
-            return [{"url": f"https://{i}.com", "title": "T", "content": "C", "engine": "g", "score": 1.0}
-                    for i in range(2)]
+            captured_engines.append(engines)
+            return [{"url": f"https://r{len(captured_categories)}.com", "title": "T",
+                     "content": "C", "engine": "g", "score": 1.0}
+                    for _ in range(2)]
 
-        with patch.dict(os.environ, {"SCHOLARLY_MODE": ""}, clear=False), \
+        with patch.dict(os.environ, {"EXPAND_ROUTING": ""}, clear=False), \
              patch("lib.expand.expand", return_value=["seed", "exp1"]), \
              patch("lib.search.search", side_effect=capture_search), \
              patch("lib.omlx.embed", return_value=[[1.0, 0.0, 0.0]] * 10):
-            import importlib
-            importlib.reload(lib.pipeline)
-            lib.pipeline.gather_sources("test query")
+            lib.pipeline.gather_sources("test query", include_seed=False)
 
-        self.assertTrue(all(c is None for c in captured_categories), "all categories must be None without SCHOLARLY_MODE")
+        self.assertTrue(all(c is None for c in captured_categories), "all categories must be None without EXPAND_ROUTING")
+        self.assertTrue(all(e is None for e in captured_engines), "all engines must be None without EXPAND_ROUTING")
 
 
 if __name__ == "__main__":

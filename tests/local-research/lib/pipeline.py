@@ -1,6 +1,7 @@
 """
 Per-round search + rerank pipeline, plus fetch + extract + notes.
 """
+import json
 import pathlib
 import sys
 import time
@@ -21,13 +22,22 @@ def gather_sources(
     n_expansions: int = 4,
     n_per_query: int = 20,
     top_k: int = 15,
+    include_seed: bool = False,
 ) -> dict:
     """
     expand → search-each → flatten → dedupe → apply priors → rerank
 
-    When SCHOLARLY_MODE env var is set, non-seed expansions (index 1+) are
-    routed to categories=science (arxiv, scholar, semantic-scholar, pubmed-if-
-    enabled).  The seed query (index 0) always uses the default SearXNG mix.
+    Per-expansion routing is read from the EXPAND_ROUTING env var: a JSON list
+    of {categories, engines} dicts indexed by expansion position (post-seed-
+    drop). Missing slots default to {categories: null, engines: null}.
+    Example:
+        EXPAND_ROUTING='[{"categories": null, "engines": null},
+                         {"categories": "science", "engines": null}]'
+
+    include_seed controls whether the original query (index 0 of the expand
+    output) is included as the first search call. False (the default) drops the
+    seed; this is strongly recommended for long natural-language questions where
+    the seed crowds out short keyword expansions in the top-N result slots.
 
     Returns:
         {
@@ -39,7 +49,12 @@ def gather_sources(
         }
     """
     import os
-    scholarly_mode = bool(os.environ.get("SCHOLARLY_MODE") or "")
+
+    _routing_raw = os.environ.get("EXPAND_ROUTING") or "[]"
+    try:
+        per_expansion_routing: list[dict] = json.loads(_routing_raw)
+    except (json.JSONDecodeError, TypeError):
+        per_expansion_routing = []
 
     exclude_urls = exclude_urls or set()
     t0 = time.monotonic()
@@ -47,14 +62,16 @@ def gather_sources(
     expansions = _expand_mod.expand(query, n=n_expansions)
     t_expand = time.monotonic()
 
+    to_search = expansions if include_seed else expansions[1:]
+
     # Search each expansion, flatten, dedupe by URL.
     seen_urls: set[str] = set(exclude_urls)
     raw: list[dict] = []
-    for i, q in enumerate(expansions):
-        # Seed query (i==0) uses the default engine mix; scholarly expansions use
-        # categories=science to bias toward arxiv/scholar/semantic-scholar.
-        categories = "science" if (scholarly_mode and i > 0) else None
-        for r in _search_mod.search(q, n=n_per_query, categories=categories):
+    for i, q in enumerate(to_search):
+        slot = per_expansion_routing[i] if i < len(per_expansion_routing) else {}
+        categories = (slot or {}).get("categories")
+        engines = (slot or {}).get("engines")
+        for r in _search_mod.search(q, n=n_per_query, categories=categories, engines=engines):
             url = r.get("url", "")
             if url and url not in seen_urls:
                 seen_urls.add(url)

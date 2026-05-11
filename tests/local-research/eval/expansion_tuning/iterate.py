@@ -34,6 +34,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -148,6 +149,8 @@ def main() -> None:
     p.add_argument("--mutation-summary", default="", help="one-line description of the change")
     p.add_argument("--queries", default=",".join(QUERIES),
                    help="comma-separated subset of fixture slugs")
+    p.add_argument("--search-delay", type=float, default=2.0,
+                   help="seconds to sleep between each SearXNG call (avoids engine rate-limits)")
     args = p.parse_args()
 
     slugs = [s.strip() for s in args.queries.split(",") if s.strip()]
@@ -183,6 +186,8 @@ def main() -> None:
             r = routing_for(cfg["per_expansion_routing"], i)
             print(f"    [{slug}] search pos={i} cats={r['categories']} eng={r['engines']}: {exp[:60]!r}",
                   file=sys.stderr)
+            if i > 0 and args.search_delay > 0:
+                time.sleep(args.search_delay)
             results = _search_mod.search(
                 exp,
                 n=args.n_per_query,

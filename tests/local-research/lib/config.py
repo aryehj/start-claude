@@ -21,9 +21,8 @@ SYNTH_MODEL = os.environ.get("SYNTH_MODEL") or "gemma-4-26b-a4b-it-8bit"
 
 SESSION_ROOT = os.environ.get("SESSION_ROOT") or "/sessions"
 
-# Source-quality biasing (Phase 5).
-# When truthy, non-seed query expansions are routed to categories=science.
-SCHOLARLY_MODE = bool(os.environ.get("SCHOLARLY_MODE") or "")
+# Per-expansion routing (Phase 6.5).
+# JSON list of {categories, engines} dicts; read by pipeline.gather_sources via EXPAND_ROUTING.
 
 # Batch-mode termination budgets (Phase 8).
 MAX_ROUNDS = int(os.environ.get("MAX_ROUNDS") or "4")
