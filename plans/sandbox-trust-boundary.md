@@ -21,8 +21,8 @@ The user wants a redesign where the entire host-side trust surface is exactly on
 
 Design discussion settled the following before this plan was written:
 - Single shared Colima profile (`claude-agent`); narrow VM mount via `colima start --mount $SANDBOX_ROOT:w`. Only one sandbox active at a time; switching restarts the VM with the new mount (`colima stop && colima start --mount $NEW:w`). Per-sandbox profiles were considered and rejected — simultaneous sandbox use is not a requirement, and a single profile keeps the image cache and Colima namespace simple.
-- `.sandbox` marker file at the sandbox root — empty, basename-as-name. Detection walks up from `$(pwd)`.
-- One layout (option B): `.config/claude/` (dir) and `.config/claude.json` (file) as siblings; `.config/opencode/{config,data}` both RW; `.config/allowlist.txt` mounted `:ro` at `/etc/claude-agent/allowlist.txt`; `.config/searxng/settings.yml` (existing pattern).
+- `.sandbox_config/` marker directory at the sandbox root — its presence (and contents: per-sandbox auth, allowlist, etc.) defines the sandbox. Detection walks up from `$(pwd)`.
+- One layout (option B): `.sandbox_config/claude/` (dir) and `.sandbox_config/claude.json` (file) as siblings; `.sandbox_config/opencode/{config,data}` both RW; `.sandbox_config/allowlist.txt` mounted `:ro` at `/etc/claude-agent/allowlist.txt`; `.sandbox_config/searxng/settings.yml` (existing pattern).
 - Source code lives under `$SANDBOX/projects/<repo>/`. PROJECT_DIR must resolve inside `$SANDBOX/projects/`.
 - The container does **not** bind-mount `$SANDBOX` as a whole. That's what makes the `:ro` on the allowlist load-bearing — the agent has no other writable path to it.
 - No automated migration from `~/.claude-containers/` and `~/.claude-agent/`. CLAUDE.md gets a manual `cp` recipe.
@@ -33,7 +33,7 @@ Design discussion settled the following before this plan was written:
 - `$SANDBOX_ROOT` is the only host-side path the VM or container can see. Everything outside it is invisible to both.
 - The single `claude-agent` Colima profile is launched with `--mount $SANDBOX_ROOT:w` (no default `$HOME` mount). Only one sandbox can be active at a time; switching restarts the VM with the new mount.
 - The container's allowlist is bind-mounted `:ro` at a stable in-container path; the agent can read but cannot rewrite which URLs are permitted.
-- Sandboxes are detected by an explicit `.sandbox` marker, not by env vars or directory conventions. `--init-sandbox PATH` creates one.
+- Sandboxes are detected by an explicit `.sandbox_config/` marker, not by env vars or directory conventions. `--init-sandbox PATH` creates one.
 - Running outside a sandbox is a hard error with a clear remediation message.
 - No backwards-compatibility shims for the old `$HOME`-scattered layout. Legacy users follow a documented manual migration.
 
@@ -41,7 +41,7 @@ Design discussion settled the following before this plan was written:
 
 The trust boundary moves from "scattered host paths under `$HOME`, plus whatever Colima's default mount drags along" to "exactly `$SANDBOX_ROOT`." Two architectural moves carry the change. First, `colima start --mount $SANDBOX_ROOT:w` replaces the default `$HOME` virtiofs mount, so the VM literally cannot see anything else on the host. Second, the `docker run` mount block stays granular — separate path-renamed bind-mounts for each in-container destination — so we can keep `:ro` on the allowlist meaningful. If we collapsed to a single `$SANDBOX:$SANDBOX` mount instead, the agent would have a writable path to the allowlist via the union view and the `:ro` line elsewhere wouldn't help.
 
-Sandbox detection uses an explicit marker file rather than `$CLAUDE_SANDBOX` env or cwd-based heuristics. Marker files are easy to grep for, hard to forget, and let `cd` into any depth of the sandbox tree work transparently. Sandbox name is the basename of the marker's directory and is used only in log messages; no Colima profile suffix or other shell-unsafe context, so no name-validation regex is needed.
+Sandbox detection uses the presence of `.sandbox_config/` rather than `$CLAUDE_SANDBOX` env or cwd-based heuristics. The config directory doubles as the marker: easy to grep for, hard to forget, and lets `cd` into any depth of the sandbox tree work transparently. Sandbox name is the basename of the containing directory and is used only in log messages; no Colima profile suffix or other shell-unsafe context, so no name-validation regex is needed.
 
 Switching sandboxes requires `colima stop && colima start --mount $NEW_SANDBOX_ROOT:w` because the VM's mount config has to change. That's a ~10s restart, acceptable for coarse-grained sandboxes you switch between rarely. The single shared profile preserves the image-build cache across all sandboxes and avoids any per-sandbox Colima namespacing.
 
@@ -53,7 +53,7 @@ Switching sandboxes requires `colima stop && colima start --mount $NEW_SANDBOX_R
 
 3. **Is `/etc/claude-agent/` writable in the image as it stands?** The Dockerfile at `dockerfiles/claude-agent.Dockerfile` may or may not create this directory. Bind-mounting a file at `/etc/claude-agent/allowlist.txt` requires the parent dir to be writable enough that docker can create the mount point — usually fine on `tmpfs`-style overlays but worth checking. If not, add a `RUN mkdir -p /etc/claude-agent` to the Dockerfile. *Affects: Phase 1, "Restructure docker run bind-mounts" subsection; possibly Dockerfile.*
 
-4. **Does OpenCode tolerate `.config/opencode/config` being writable but containing a host-side path that may have been edited mid-session?** Pre-redesign behavior is identical (RW), so the answer is "yes, this is current behavior." Not a real unknown — flagged only to confirm we're not regressing anything. No verification needed.
+4. **Does OpenCode tolerate `.sandbox_config/opencode/config` being writable but containing a host-side path that may have been edited mid-session?** Pre-redesign behavior is identical (RW), so the answer is "yes, this is current behavior." Not a real unknown — flagged only to confirm we're not regressing anything. No verification needed.
 
 ---
 
@@ -68,16 +68,15 @@ All script changes in `start-agent.sh`. Five subsections grouped under one phase
 1. Add `--init-sandbox PATH` to the argparse loop at `start-agent.sh:92-120`. Treat it as a one-shot operation: when set, perform the init and `exit 0` before any VM/container logic runs.
 
 2. Implement `init_sandbox(target_path)`:
-   - Reject if `$target_path/.sandbox` already exists (sandbox already initialized — refuse to clobber). An existing `$target_path` directory without a marker is fine: we layer the sandbox structure into it.
+   - Reject if `$target_path/.sandbox_config/` already exists (sandbox already initialized — refuse to clobber). An existing `$target_path` directory without the marker dir is fine: we layer the sandbox structure into it.
    - If `$target_path` does not exist: `mkdir -m 0700 -p "$target_path"`. If it does exist: leave its permissions alone.
-   - Create subdirs (idempotent): `.config/claude/`, `.config/opencode/config/`, `.config/opencode/data/`, `.config/searxng/`, `projects/`. `mkdir -p` is safe over existing dirs.
-   - `touch "$target_path/.sandbox"` (empty marker file).
+   - Create subdirs (idempotent): `.sandbox_config/claude/`, `.sandbox_config/opencode/config/`, `.sandbox_config/opencode/data/`, `.sandbox_config/searxng/`, `projects/`. `mkdir -p` is safe over existing dirs. The `.sandbox_config/` directory itself is the marker.
    - Print a "next step" message: `cd "$target_path/projects" && git clone <repo>`, then `start-agent.sh` from inside the cloned repo.
 
-   Init does **not** seed `.config/allowlist.txt` or `.config/claude.json`. After the repointing step below, the existing idempotent seed code at `start-agent.sh:234-236` (allowlist heredoc) and `start-agent.sh:928` (`echo '{}' > "$CLAUDE_JSON_FILE"`) seeds them on the first `start-agent.sh` invocation inside the sandbox. No helper extraction needed.
+   Init does **not** seed `.sandbox_config/allowlist.txt` or `.sandbox_config/claude.json`. After the repointing step below, the existing idempotent seed code at `start-agent.sh:234-236` (allowlist heredoc) and `start-agent.sh:928` (`echo '{}' > "$CLAUDE_JSON_FILE"`) seeds them on the first `start-agent.sh` invocation inside the sandbox. No helper extraction needed.
 
 3. Implement `find_sandbox_root()`:
-   - Walk up from `$(pwd)`: at each level, test for `-f .sandbox`. Stop at `/`.
+   - Walk up from `$(pwd)`: at each level, test for `-d .sandbox_config`. Stop at `/`.
    - On hit: echo the dir, return 0. On miss: return 1.
 
 4. After arg parsing (around `start-agent.sh:122` where `PROJECT_DIR` is currently resolved), call `find_sandbox_root` unconditionally. If empty, print a clear error pointing at `--init-sandbox` and `exit 1`.
@@ -87,22 +86,22 @@ All script changes in `start-agent.sh`. Five subsections grouped under one phase
 **Acceptance:**
 
 - Running `start-agent.sh` outside any sandbox prints the remediation message and exits non-zero, without starting Colima.
-- `start-agent.sh --init-sandbox /tmp/sb-test` creates the directory tree and marker file; running it again refuses (marker already present).
-- `start-agent.sh --init-sandbox /some/existing/empty-or-populated/dir` succeeds as long as the dir has no `.sandbox` marker; the structure is layered in alongside whatever is already there.
+- `start-agent.sh --init-sandbox /tmp/sb-test` creates the directory tree; running it again refuses (`.sandbox_config/` already present).
+- `start-agent.sh --init-sandbox /some/existing/empty-or-populated/dir` succeeds as long as the dir has no `.sandbox_config/` marker; the structure is layered in alongside whatever is already there.
 
-### Repoint host-state constants under `$SANDBOX/.config/`
+### Repoint host-state constants under `$SANDBOX/.sandbox_config/`
 
 **Steps:**
 
 1. In the constants block at `start-agent.sh:185-201`, replace:
-   - `CLAUDE_CONFIG_DIR` → `$SANDBOX_ROOT/.config/claude`
-   - `CLAUDE_JSON_FILE` → `$SANDBOX_ROOT/.config/claude.json` (sibling, not nested)
-   - `OPENCODE_CONFIG_DIR` → `$SANDBOX_ROOT/.config/opencode/config`
-   - `OPENCODE_DATA_DIR` → `$SANDBOX_ROOT/.config/opencode/data`
+   - `CLAUDE_CONFIG_DIR` → `$SANDBOX_ROOT/.sandbox_config/claude`
+   - `CLAUDE_JSON_FILE` → `$SANDBOX_ROOT/.sandbox_config/claude.json` (sibling, not nested)
+   - `OPENCODE_CONFIG_DIR` → `$SANDBOX_ROOT/.sandbox_config/opencode/config`
+   - `OPENCODE_DATA_DIR` → `$SANDBOX_ROOT/.sandbox_config/opencode/data`
    - `ALLOWLIST_DIR` (drop)
-   - `ALLOWLIST_FILE` → `$SANDBOX_ROOT/.config/allowlist.txt`
-   - `SEARXNG_DIR` → `$SANDBOX_ROOT/.config/searxng`
-   - `SEARXNG_SETTINGS_FILE` → `$SANDBOX_ROOT/.config/searxng/settings.yml`
+   - `ALLOWLIST_FILE` → `$SANDBOX_ROOT/.sandbox_config/allowlist.txt`
+   - `SEARXNG_DIR` → `$SANDBOX_ROOT/.sandbox_config/searxng`
+   - `SEARXNG_SETTINGS_FILE` → `$SANDBOX_ROOT/.sandbox_config/searxng/settings.yml`
 
 2. Audit downstream uses of these constants (state-dir creation at `start-agent.sh:907`, `mkdir -p` calls, the SearXNG seed at `start-agent.sh:695-728`, the global CLAUDE.md / AGENTS.md seed at `start-agent.sh:910-949`, the OpenCode config write at `start-agent.sh:978-1116`, the skills-sync `dest=$CLAUDE_CONFIG_DIR/skills` at `start-agent.sh:1121`). All should still resolve correctly with the new values; no logic changes needed beyond confirming the path strings.
 
@@ -110,12 +109,12 @@ All script changes in `start-agent.sh`. Five subsections grouped under one phase
 
 4. Validate `PROJECT_DIR` (resolved at `start-agent.sh:122-123` from `${POSITIONAL[0]:-$(pwd)}`):
    - After resolving to an absolute path, require `$PROJECT_DIR` to be inside `$SANDBOX_ROOT/projects/` (string-prefix check). Reject otherwise with: "PROJECT_DIR ($PROJECT_DIR) must be a subdirectory of $SANDBOX_ROOT/projects/."
-   - This forecloses running from `$SANDBOX_ROOT` itself, from `$SANDBOX_ROOT/.config/`, or from anywhere outside the sandbox tree.
+   - This forecloses running from `$SANDBOX_ROOT` itself, from `$SANDBOX_ROOT/.sandbox_config/`, or from anywhere outside the sandbox tree.
 
 **Acceptance:**
 
 - All `$HOME/.claude-containers/` and `$HOME/.claude-agent/` references in `start-agent.sh` are gone (verify by grep).
-- Running `start-agent.sh` from `$SANDBOX_ROOT/.config/` rejects with a clear message; running from `$SANDBOX_ROOT/projects/foo` proceeds.
+- Running `start-agent.sh` from `$SANDBOX_ROOT/.sandbox_config/` rejects with a clear message; running from `$SANDBOX_ROOT/projects/foo` proceeds.
 
 ### Narrow VM mount per active sandbox
 
@@ -141,11 +140,11 @@ All script changes in `start-agent.sh`. Five subsections grouped under one phase
 1. Replace the mount block at `start-agent.sh:1267-1271` with:
    ```
    -v "$SANDBOX_ROOT/projects:$SANDBOX_ROOT/projects"
-   -v "$SANDBOX_ROOT/.config/claude:/root/.claude"
-   -v "$SANDBOX_ROOT/.config/claude.json:/root/.claude.json"
-   -v "$SANDBOX_ROOT/.config/opencode/config:/root/.config/opencode"
-   -v "$SANDBOX_ROOT/.config/opencode/data:/root/.local/share/opencode"
-   -v "$SANDBOX_ROOT/.config/allowlist.txt:/etc/claude-agent/allowlist.txt:ro"
+   -v "$SANDBOX_ROOT/.sandbox_config/claude:/root/.claude"
+   -v "$SANDBOX_ROOT/.sandbox_config/claude.json:/root/.claude.json"
+   -v "$SANDBOX_ROOT/.sandbox_config/opencode/config:/root/.config/opencode"
+   -v "$SANDBOX_ROOT/.sandbox_config/opencode/data:/root/.local/share/opencode"
+   -v "$SANDBOX_ROOT/.sandbox_config/allowlist.txt:/etc/claude-agent/allowlist.txt:ro"
    ```
    The first mount covers all repos and is RW. The next four are state mounts at the paths Claude Code and OpenCode expect. The last is the `:ro` allowlist — the agent can `cat /etc/claude-agent/allowlist.txt` to know what's permitted but cannot rewrite the source of truth. Crucially, do **not** add `-v "$SANDBOX_ROOT:$SANDBOX_ROOT"` — that would expose the allowlist as RW via the union view and defeat the design.
 
@@ -156,7 +155,7 @@ All script changes in `start-agent.sh`. Five subsections grouped under one phase
 **Acceptance:**
 
 - Inside the running container, `cat /etc/claude-agent/allowlist.txt` succeeds; `echo x >> /etc/claude-agent/allowlist.txt` fails with EROFS.
-- Inside the running container, `ls $SANDBOX_ROOT` shows only `projects/` (not `.config/` or `.sandbox`).
+- Inside the running container, `ls $SANDBOX_ROOT` shows only `projects/` (not `.sandbox_config/`).
 
 ### Help text, log messages, `--rebuild` prompt
 
@@ -165,7 +164,7 @@ All script changes in `start-agent.sh`. Five subsections grouped under one phase
 1. Rewrite the `usage()` block at `start-agent.sh:37-90`:
    - Top-of-file comment: replace the "shared VM + shared container" framing with the per-sandbox model. Note the trust boundary explicitly.
    - USAGE: add the `start-agent.sh --init-sandbox PATH` line.
-   - OPTIONS: add `--init-sandbox PATH`. Update the `--reload-allowlist` and `--reseed-allowlist` lines to reference `$SANDBOX_ROOT/.config/allowlist.txt` (or a generic "the sandbox's allowlist file" since the path varies by sandbox).
+   - OPTIONS: add `--init-sandbox PATH`. Update the `--reload-allowlist` and `--reseed-allowlist` lines to reference `$SANDBOX_ROOT/.sandbox_config/allowlist.txt` (or a generic "the sandbox's allowlist file" since the path varies by sandbox).
    - ALLOWLIST: section: rewrite path references; the file is now sandbox-relative.
    - ENVIRONMENT: section: unchanged (none of these vars referenced the old paths).
 
@@ -183,7 +182,7 @@ All script changes in `start-agent.sh`. Five subsections grouped under one phase
 
 **Acceptance:**
 
-- `start-agent.sh --help` mentions `--init-sandbox`, the trust boundary, and `$SANDBOX_ROOT/.config/allowlist.txt`.
+- `start-agent.sh --help` mentions `--init-sandbox`, the trust boundary, and `$SANDBOX_ROOT/.sandbox_config/allowlist.txt`.
 - No help text or log message references `~/.claude-containers/` or `~/.claude-agent/`.
 
 ---
@@ -196,20 +195,20 @@ All script changes in `start-agent.sh`. Five subsections grouped under one phase
 
 1. CLAUDE.md "start-agent.sh key decisions" block (`CLAUDE.md:69-89`):
    - Update the "Colima, one shared VM + one shared container" line: still a single shared `claude-agent` profile, but the VM is now launched with `--mount $SANDBOX_ROOT:w` per active sandbox, replacing the default `$HOME` mount. Only one sandbox can be active at a time; switching restarts the VM with the new mount.
-   - Replace the "Allowlist file on the host, not in the repo" line; the allowlist now lives in `$SANDBOX_ROOT/.config/allowlist.txt` and is RO from inside the container.
-   - Replace the "Shared `~/.claude` state with `start-claude.sh`" line; sandboxes have their own `.config/claude/` and there is no longer cross-script sharing. Note this is a deliberate trade-off (lose shared auth, gain trust boundary).
+   - Replace the "Allowlist file on the host, not in the repo" line; the allowlist now lives in `$SANDBOX_ROOT/.sandbox_config/allowlist.txt` and is RO from inside the container.
+   - Replace the "Shared `~/.claude` state with `start-claude.sh`" line; sandboxes have their own `.sandbox_config/claude/` and there is no longer cross-script sharing. Note this is a deliberate trade-off (lose shared auth, gain trust boundary).
    - Add a one-liner for the `--init-sandbox` UX. Reference the new ADR.
 
-2. Add ADR-033 to `ADR.md`. Title: "One-directory trust boundary for start-agent.sh". Body covers: the threat model (Colima default `$HOME` mount, scattered state, RW allowlist); the design (marker file, single shared profile with per-sandbox narrow `--mount`, granular bind-mounts with `:ro` allowlist); rejected alternatives (per-sandbox Colima profile — adds image-rebuild cost and Colima namespacing for a use case (simultaneous sandboxes) that isn't required; per-project state under `$HOME`; sandbox-as-single-mount; dedicated macOS user); the cost (only one sandbox active at a time, ~10s VM restart on switch, manual migration). Cross-link from ADR-006 and ADR-014 if relevant.
+2. Add ADR-033 to `ADR.md`. Title: "One-directory trust boundary for start-agent.sh". Body covers: the threat model (Colima default `$HOME` mount, scattered state, RW allowlist); the design (`.sandbox_config/` marker directory, single shared profile with per-sandbox narrow `--mount`, granular bind-mounts with `:ro` allowlist); rejected alternatives (per-sandbox Colima profile — adds image-rebuild cost and Colima namespacing for a use case (simultaneous sandboxes) that isn't required; per-project state under `$HOME`; sandbox-as-single-mount; dedicated macOS user); the cost (only one sandbox active at a time, ~10s VM restart on switch, manual migration). Cross-link from ADR-006 and ADR-014 if relevant.
 
 3. Add a short migration recipe to CLAUDE.md (under start-agent.sh's "Making changes" section, or a new "Migrating from legacy state" subsection):
    ```
    start-agent.sh --init-sandbox ~/sandboxes/default
-   cp -r ~/.claude-containers/shared/* ~/sandboxes/default/.config/claude/
-   cp ~/.claude-containers/claude.json ~/sandboxes/default/.config/claude.json
-   cp -r ~/.claude-agent/opencode-config ~/sandboxes/default/.config/opencode/config
-   cp -r ~/.claude-agent/opencode-data   ~/sandboxes/default/.config/opencode/data
-   cp ~/.claude-agent/allowlist.txt      ~/sandboxes/default/.config/allowlist.txt
+   cp -r ~/.claude-containers/shared/* ~/sandboxes/default/.sandbox_config/claude/
+   cp ~/.claude-containers/claude.json ~/sandboxes/default/.sandbox_config/claude.json
+   cp -r ~/.claude-agent/opencode-config ~/sandboxes/default/.sandbox_config/opencode/config
+   cp -r ~/.claude-agent/opencode-data   ~/sandboxes/default/.sandbox_config/opencode/data
+   cp ~/.claude-agent/allowlist.txt      ~/sandboxes/default/.sandbox_config/allowlist.txt
    # Move repos in:  mv ~/Code/foo ~/sandboxes/default/projects/foo
    # Once verified:   rm -rf ~/.claude-containers ~/.claude-agent
    ```
@@ -227,7 +226,7 @@ All script changes in `start-agent.sh`. Five subsections grouped under one phase
 
 2. Add a "First run" subsection under start-agent.sh's coverage, showing:
    - `start-agent.sh --init-sandbox ~/sandboxes/default` produces the directory tree.
-   - A short tree diagram of `~/sandboxes/default/` with `.sandbox`, `.config/`, `projects/`.
+   - A short tree diagram of `~/sandboxes/default/` with `.sandbox_config/` and `projects/`.
    - The expected workflow: `cd ~/sandboxes/default/projects && git clone <repo> && cd <repo> && start-agent.sh`.
 
 3. If the README has a "Multiple projects" or "Per-project" subsection, replace it with a "Multiple sandboxes" note: only one sandbox active at a time; switching restarts the shared `claude-agent` VM with the new `--mount`; projects within a sandbox share auth/memory.

@@ -46,8 +46,8 @@ usage() {
   cat <<'USAGE'
 start-agent.sh — Colima-backed Claude Code + OpenCode dev container
 
-Each project lives inside a sandbox — a directory tree with a .sandbox marker
-file that defines the trust boundary. The single 'claude-agent' Colima VM is
+Each project lives inside a sandbox — a directory tree with a .sandbox_config/
+directory that defines the trust boundary. The single 'claude-agent' Colima VM is
 launched with --mount $SANDBOX_ROOT:w so only that sandbox is visible to the
 VM; $HOME and the rest of the filesystem are inaccessible. The allowlist is
 mounted read-only inside the container so the agent can read but not rewrite
@@ -59,8 +59,8 @@ USAGE:
 
 OPTIONS:
   --init-sandbox PATH    Create a new sandbox at PATH with the required
-                         directory layout and .sandbox marker. One-shot;
-                         exits immediately after creation.
+                         directory layout. One-shot; exits immediately after
+                         creation.
   --rebuild              Remove image + container and recreate. With
                          confirmation, also delete and recreate the Colima VM.
   --reset-container      Remove the project container (and SearXNG container)
@@ -90,8 +90,7 @@ OPTIONS:
 
 SANDBOX LAYOUT:
   $SANDBOX/
-    .sandbox                  — marker file (presence detected by start-agent.sh)
-    .config/
+    .sandbox_config/          — marker dir (presence detected by start-agent.sh)
       allowlist.txt           — domain allowlist (mounted :ro at /etc/claude-agent/allowlist.txt)
       claude/                 — ~/.claude state (auth, settings, memory)
       claude.json             — ~/.claude.json OAuth state
@@ -100,7 +99,7 @@ SANDBOX LAYOUT:
     projects/                 — your work (the only RW path visible inside the container)
 
 ALLOWLIST:
-  Edit  $SANDBOX/.config/allowlist.txt  on the macOS host to change which
+  Edit  $SANDBOX/.sandbox_config/allowlist.txt  on the macOS host to change which
   domains the container can reach. One domain per line; '#' for comments;
   suffix match (github.com covers api.github.com). Apply changes with:
       start-agent.sh --reload-allowlist
@@ -112,7 +111,7 @@ ALLOWLIST:
 SWITCHING SANDBOXES:
   Only one sandbox can be active at a time. Switching sandboxes restarts the
   shared 'claude-agent' Colima VM with the new --mount (~10 s). Projects
-  within a sandbox share auth/memory state in .config/claude/.
+  within a sandbox share auth/memory state in .sandbox_config/claude/.
 
 ENVIRONMENT:
   CLAUDE_AGENT_MEMORY    Default VM memory (overridden by --memory).
@@ -172,23 +171,23 @@ fi
 
 # ── sandbox helpers ───────────────────────────────────────────────────────────
 
-# Create a new sandbox directory tree with the .sandbox marker file.
+# Create a new sandbox directory tree. The .sandbox_config/ directory itself
+# is the marker that distinguishes a sandbox root.
 init_sandbox() {
   local target="$1"
-  if [[ -e "$target/.sandbox" ]]; then
-    echo "error: '$target' is already initialized as a sandbox (.sandbox marker present)." >&2
+  if [[ -d "$target/.sandbox_config" ]]; then
+    echo "error: '$target' is already initialized as a sandbox (.sandbox_config/ present)." >&2
     exit 1
   fi
   if [[ ! -d "$target" ]]; then
     mkdir -m 0700 -p "$target"
   fi
   mkdir -p \
-    "$target/.config/claude" \
-    "$target/.config/opencode/config" \
-    "$target/.config/opencode/data" \
-    "$target/.config/searxng" \
+    "$target/.sandbox_config/claude" \
+    "$target/.sandbox_config/opencode/config" \
+    "$target/.sandbox_config/opencode/data" \
+    "$target/.sandbox_config/searxng" \
     "$target/projects"
-  touch "$target/.sandbox"
   echo "==> Sandbox created at $target"
   echo ""
   echo "Next steps:"
@@ -197,13 +196,13 @@ init_sandbox() {
   echo "  start-agent.sh"
 }
 
-# Walk up from the current directory until a .sandbox marker is found.
+# Walk up from the current directory until a .sandbox_config/ dir is found.
 # Prints the sandbox root path and returns 0; returns 1 if none found.
 find_sandbox_root() {
   local dir
   dir="$(pwd)"
   while [[ "$dir" != "/" ]]; do
-    if [[ -f "$dir/.sandbox" ]]; then
+    if [[ -d "$dir/.sandbox_config" ]]; then
       echo "$dir"
       return 0
     fi
@@ -223,7 +222,7 @@ PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 
 # ── sandbox detection ─────────────────────────────────────────────────────────
 SANDBOX_ROOT="$(find_sandbox_root)" || {
-  echo "error: no .sandbox marker found in the current directory or any parent." >&2
+  echo "error: no .sandbox_config/ directory found in the current directory or any parent." >&2
   echo "  To create a sandbox, run:" >&2
   echo "    start-agent.sh --init-sandbox PATH" >&2
   exit 1
@@ -303,14 +302,14 @@ CONTAINER_NAME="claude-agent"
 IMAGE_TAG="claude-agent:latest"
 DOCKERFILE_PATH="$(cd "$(dirname "$0")" && pwd)/dockerfiles/claude-agent.Dockerfile"
 DOCKERFILE_DIR="$(dirname "$DOCKERFILE_PATH")"
-CLAUDE_CONFIG_DIR="$SANDBOX_ROOT/.config/claude"
-CLAUDE_JSON_FILE="$SANDBOX_ROOT/.config/claude.json"
-OPENCODE_CONFIG_DIR="$SANDBOX_ROOT/.config/opencode/config"
-OPENCODE_DATA_DIR="$SANDBOX_ROOT/.config/opencode/data"
-ALLOWLIST_FILE="$SANDBOX_ROOT/.config/allowlist.txt"
+CLAUDE_CONFIG_DIR="$SANDBOX_ROOT/.sandbox_config/claude"
+CLAUDE_JSON_FILE="$SANDBOX_ROOT/.sandbox_config/claude.json"
+OPENCODE_CONFIG_DIR="$SANDBOX_ROOT/.sandbox_config/opencode/config"
+OPENCODE_DATA_DIR="$SANDBOX_ROOT/.sandbox_config/opencode/data"
+ALLOWLIST_FILE="$SANDBOX_ROOT/.sandbox_config/allowlist.txt"
 TINYPROXY_PORT=8888
 SEARXNG_CONTAINER="searxng"
-SEARXNG_DIR="$SANDBOX_ROOT/.config/searxng"
+SEARXNG_DIR="$SANDBOX_ROOT/.sandbox_config/searxng"
 SEARXNG_SETTINGS_FILE="$SEARXNG_DIR/settings.yml"
 AGENT_NET_NAME="claude-agent-net"
 
