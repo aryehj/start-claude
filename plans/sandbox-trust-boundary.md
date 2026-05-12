@@ -68,9 +68,9 @@ All script changes in `start-agent.sh`. Five subsections grouped under one phase
 1. Add `--init-sandbox PATH` to the argparse loop at `start-agent.sh:92-120`. Treat it as a one-shot operation: when set, perform the init and `exit 0` before any VM/container logic runs.
 
 2. Implement `init_sandbox(target_path)`:
-   - Reject if `target_path` already exists.
-   - `mkdir -m 0700 -p "$target_path"`.
-   - Create subdirs: `state/claude/`, `state/opencode/config/`, `state/opencode/data/`, `state/searxng/`, `repos/`.
+   - Reject if `$target_path/.sandbox` already exists (sandbox already initialized — refuse to clobber). An existing `$target_path` directory without a marker is fine: we layer the sandbox structure into it.
+   - If `$target_path` does not exist: `mkdir -m 0700 -p "$target_path"`. If it does exist: leave its permissions alone.
+   - Create subdirs (idempotent): `state/claude/`, `state/opencode/config/`, `state/opencode/data/`, `state/searxng/`, `repos/`. `mkdir -p` is safe over existing dirs.
    - `touch "$target_path/.sandbox"` (empty marker file).
    - Print a "next step" message: `cd "$target_path/repos" && git clone <repo>`, then `start-agent.sh` from inside the cloned repo.
 
@@ -87,7 +87,8 @@ All script changes in `start-agent.sh`. Five subsections grouped under one phase
 **Acceptance:**
 
 - Running `start-agent.sh` outside any sandbox prints the remediation message and exits non-zero, without starting Colima.
-- `start-agent.sh --init-sandbox /tmp/sb-test` creates the directory tree and marker file; running it again refuses (path exists).
+- `start-agent.sh --init-sandbox /tmp/sb-test` creates the directory tree and marker file; running it again refuses (marker already present).
+- `start-agent.sh --init-sandbox /some/existing/empty-or-populated/dir` succeeds as long as the dir has no `.sandbox` marker; the structure is layered in alongside whatever is already there.
 
 ### Repoint host-state constants under `$SANDBOX/state/`
 

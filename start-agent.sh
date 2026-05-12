@@ -175,11 +175,13 @@ fi
 # Create a new sandbox directory tree with the .sandbox marker file.
 init_sandbox() {
   local target="$1"
-  if [[ -e "$target" ]]; then
-    echo "error: '$target' already exists." >&2
+  if [[ -e "$target/.sandbox" ]]; then
+    echo "error: '$target' is already initialized as a sandbox (.sandbox marker present)." >&2
     exit 1
   fi
-  mkdir -m 0700 -p "$target"
+  if [[ ! -d "$target" ]]; then
+    mkdir -m 0700 -p "$target"
+  fi
   mkdir -p \
     "$target/state/claude" \
     "$target/state/opencode/config" \
