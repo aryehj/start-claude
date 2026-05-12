@@ -201,20 +201,6 @@ else
     apt-get upgrade -y
     rm -rf /var/lib/apt/lists/*
 
-    # Record apt upgrade time for staleness check
-    touch /var/lib/apt/last-upgrade
-
-    # ── apt staleness warning (fires on every shell attach) ───────────────
-    cat >> /etc/bash.bashrc << '"'"'BASHRC'"'"'
-if [[ -f /var/lib/apt/last-upgrade ]]; then
-  _apt_age=$(( ($(date +%s) - $(date -r /var/lib/apt/last-upgrade +%s)) / 86400 ))
-  if (( _apt_age >= 7 )); then
-    echo "Warning: apt packages are ${_apt_age} days old — run: apt-get update && apt-get upgrade"
-  fi
-  unset _apt_age
-fi
-BASHRC
-
     # ── Node.js (LTS) ────────────────────────────────────────────────────────
     curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
     apt-get install -y nodejs
