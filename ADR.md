@@ -2059,3 +2059,97 @@ CLAUDE.md "Making changes" section documents a manual `cp` recipe.
 - **One sandbox active at a time.** Switching costs a ~10s VM restart. Acceptable
   for coarse-grained sandboxes switched infrequently; revisit with per-sandbox
   Colima profiles if simultaneous use becomes a real requirement.
+
+## ADR-035: Phases must be load-bearing; plans state decisions, not artifacts
+
+**Date:** 2026-05-12
+**Status:** Accepted
+
+### Context
+
+ADR-032 reduced `/plan`'s structural overhead (dropped per-phase `### Files`
+and `### Testing`, added optional `## Approach` and `### Acceptance criteria`)
+and explicitly flagged the failure mode: "optional sections become de-facto
+required if the model only sees an example to fill in." A subsequent review
+of `plans/` confirmed that prediction. Plans written after ADR-032 reliably:
+
+1. **Split decorative phases.** `sandbox-trust-boundary.md:62` admits its
+   five Phase-1 subsections "are inseparable — none ships independently of
+   the others." That is one phase split for narrative organization, not a
+   sequence of phase boundaries. Same pattern in `loose-agent-firewall.md`
+   Phase 1 (constants) feeding Phase 2 (the actual swap).
+
+2. **Transcribe artifacts the implementer would produce anyway.** Literal
+   `docker -v` blocks, eight-line constant-rename tables, helper-function
+   pseudocode (`On hit: echo the dir, return 0. On miss: return 1.`), and
+   per-phase Acceptance criteria like "ADR-XXX exists and is the
+   highest-numbered ADR." The plan stops pointing at the change and starts
+   becoming the change.
+
+3. **Treat opt-in sections as default-on.** Every post-ADR-032 plan
+   sampled has `## Approach` and per-phase `### Acceptance criteria`,
+   regardless of whether the work has a real through-line or whether AC
+   adds anything beyond plan-level Goals.
+
+The length-proportionality rule that ADR-032 Phase 1 step 5 proposed
+("match plan length to task size") never landed in SKILL.md with teeth.
+The skill said sections were optional but did not show what *not* to write,
+so the model filled them in defensively.
+
+### Decision
+
+Four tightenings to `skills/plan/SKILL.md`. `skills/implement/SKILL.md` is
+unchanged; its phase-and-AC fallback chain from ADR-032 already handles
+both the new and existing plan formats.
+
+1. **Phases must change what the next phase looks like.** Introduce an
+   explicit phase test as a top-level section: "If the next phase's steps
+   would be written identically whether or not this phase happened, there
+   is no phase boundary." Enumerate three legitimate reasons a phase earns
+   its place: uncertainty resolution, shipping checkpoint, or
+   context-window scoping. Make step-level Status checkboxes the *default*;
+   phase-level only when one of the three reasons applies. This promotes
+   the previously-buried step-level escape valve to first-class.
+
+2. **State decisions, not artifacts.** New top-level Rule. The plan
+   records *what was chosen and why*; the artifact shape (the literal
+   block, the rename table, the pseudocode) is the implementer's to
+   produce. Test phrased to be directly applicable per-block: "if a
+   competent implementer could produce something equivalent from the
+   surrounding decisions alone, drop it." Grounding via file paths and
+   line numbers is still encouraged; transcribing the code at those paths
+   is not.
+
+3. **Tighten opt-in framing on `## Approach` and `### Acceptance
+   criteria`.** Both sections gain explicit "Omit by default" language and
+   delete-it-if conditions ("if your AC restates a Step or a plan-level
+   Goal, delete it"). The length-proportionality rule from ADR-032 lands
+   for real, in the Rules block, naming Approach and per-phase AC and
+   phases themselves as opt-in not default-on.
+
+4. **Negative examples.** New "What overspec looks like" section at the
+   end of SKILL.md with two before/after pairs: decorative phases (good
+   = one Status list with step-level checkboxes) and transcribed
+   artifacts (good = the decision plus a file:line citation, not the
+   diff). The previous reform's Notes flagged the absence of negative
+   examples as a likely future-failure mode; this lands them.
+
+### Consequences
+
+- **Existing plans in `plans/` are not migrated.** `/implement` already
+  reads step-level checkboxes (its "first unchecked `[ ]`" rule is
+  agnostic to phase- vs. step-level) and tolerates plans without
+  `## Approach` or per-phase AC.
+- **Future plans should look smaller.** Single-phase plans become
+  step-list plans; multi-phase plans become single-phase plans when their
+  phase splits were narrative. Plans that *are* genuinely phased — staged
+  de-risking, real shipping checkpoints — keep their phase structure.
+- **The de-facto-required risk reappears here too.** Negative examples
+  blunt it but don't kill it. If `## Approach` and per-phase AC continue
+  to sprout reflexively, the next iteration either deletes them outright
+  or moves them behind an explicit `--with-approach` style affordance.
+- **The decision-vs-artifact rule has a fuzzy boundary.** Some
+  transcribed blocks (a specific regex, a flag whose exact spelling is
+  load-bearing, a path the implementer cannot derive) are decisions
+  disguised as artifacts. The Rule is applied per-block via the
+  "implementer could derive it" test; expect judgment calls at the edges.
