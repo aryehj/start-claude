@@ -1,5 +1,5 @@
 """Static analysis: docker run commands in start-agent.sh must not publish host ports.
-Also verifies --reset-container flag structure invariants."""
+Also verifies --reset-container and sandbox trust-boundary invariants."""
 import re
 from pathlib import Path
 
@@ -92,3 +92,47 @@ def test_reset_container_skips_image_rm():
         assert "REBUILD" in context, (
             f"docker image rm at line {lineno + 1} is not inside a REBUILD guard:\n{context}"
         )
+
+
+# ── sandbox trust-boundary invariants ────────────────────────────────────────
+
+def test_init_sandbox_arg_case_exists():
+    assert "--init-sandbox)" in _SCRIPT_TEXT or "--init-sandbox=*)" in _SCRIPT_TEXT, (
+        "--init-sandbox case missing from arg parser"
+    )
+
+
+def test_init_sandbox_in_help_text():
+    assert "--init-sandbox" in _SCRIPT_TEXT, (
+        "--init-sandbox missing from usage/help block"
+    )
+
+
+def test_no_legacy_home_paths():
+    # After the redesign, all state lives under $SANDBOX_ROOT — no hardcoded
+    # ~/.claude-containers/ or ~/.claude-agent/ paths should remain.
+    assert ".claude-containers/" not in _SCRIPT_TEXT, (
+        "start-agent.sh still references ~/.claude-containers/ — should use $SANDBOX_ROOT/state/"
+    )
+    assert ".claude-agent/" not in _SCRIPT_TEXT, (
+        "start-agent.sh still references ~/.claude-agent/ — should use $SANDBOX_ROOT/state/"
+    )
+
+
+def test_sandbox_root_variable_present():
+    assert "SANDBOX_ROOT" in _SCRIPT_TEXT, (
+        "SANDBOX_ROOT variable missing from start-agent.sh"
+    )
+
+
+def test_allowlist_mounted_ro():
+    # The agent's docker run block must mount the allowlist read-only so the
+    # container cannot rewrite which URLs are permitted.
+    agent_block = next((b for b in _BLOCKS if "IMAGE_TAG" in b), None)
+    assert agent_block is not None, "claude-agent docker run block not found"
+    assert ":ro" in agent_block, (
+        "allowlist not mounted :ro in claude-agent docker run block"
+    )
+    assert "/etc/claude-agent/allowlist.txt" in agent_block, (
+        "allowlist not mounted at /etc/claude-agent/allowlist.txt in docker run block"
+    )

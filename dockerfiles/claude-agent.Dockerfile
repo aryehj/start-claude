@@ -92,6 +92,11 @@ export UV_PROJECT_ENVIRONMENT="${TMPDIR:-/tmp}/.venv"
 mkdir -p "$UV_PROJECT_ENVIRONMENT" 2>/dev/null || true
 UVEOF
 
+# ── allowlist mount point ────────────────────────────────────────────────────
+# start-agent.sh bind-mounts the allowlist here :ro so the agent can read but
+# not rewrite which URLs are permitted.
+RUN mkdir -p /etc/claude-agent
+
 # ── git identity placeholders ────────────────────────────────────────────────
 # Real values are injected at `docker run` time via GIT_AUTHOR_* / GIT_COMMITTER_*
 # env vars (see start-agent.sh). The gitconfig lines below exist so direct git

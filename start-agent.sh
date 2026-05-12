@@ -7,7 +7,13 @@
 # allowlist via tinyproxy + iptables DOCKER-USER rules, and routes local
 # inference to Ollama or omlx running on the macOS host.
 #
+# Projects must live inside a sandbox — a directory tree created by
+# --init-sandbox. The Colima VM is launched with --mount $SANDBOX_ROOT:w so
+# only that sandbox is visible to the VM and to the container. The allowlist
+# is bind-mounted :ro inside the container at /etc/claude-agent/allowlist.txt.
+#
 # Usage:
+#   start-agent.sh --init-sandbox PATH
 #   start-agent.sh [--rebuild] [--reset-container] [--reload-allowlist]
 #                  [--backend=ollama|omlx]
 #                  [--disable-search]
@@ -33,30 +39,42 @@ CLI_DISABLE_SEARCH=""
 CLI_PLAN_MODEL=""
 CLI_EXEC_MODEL=""
 CLI_SMALL_MODEL=""
+INIT_SANDBOX=""
 POSITIONAL=()
 
 usage() {
   cat <<'USAGE'
 start-agent.sh — Colima-backed Claude Code + OpenCode dev container
 
+Each project lives inside a sandbox — a directory tree with a .sandbox marker
+file that defines the trust boundary. The single 'claude-agent' Colima VM is
+launched with --mount $SANDBOX_ROOT:w so only that sandbox is visible to the
+VM; $HOME and the rest of the filesystem are inaccessible. The allowlist is
+mounted read-only inside the container so the agent can read but not rewrite
+which URLs are permitted.
+
 USAGE:
+  start-agent.sh --init-sandbox PATH
   start-agent.sh [options] [project-dir]
 
 OPTIONS:
+  --init-sandbox PATH    Create a new sandbox at PATH with the required
+                         directory layout and .sandbox marker. One-shot;
+                         exits immediately after creation.
   --rebuild              Remove image + container and recreate. With
                          confirmation, also delete and recreate the Colima VM.
   --reset-container      Remove the project container (and SearXNG container)
                          but keep the image and VM. Cheaper than --rebuild
                          when you only need to reset container state.
                          Mutually exclusive with --rebuild.
-  --reload-allowlist     Regenerate tinyproxy's filter file from
-                         ~/.claude-agent/allowlist.txt and reload tinyproxy.
-                         Fast path; does not restart the container.
-  --reseed-allowlist     Overwrite ~/.claude-agent/allowlist.txt with the
+  --reload-allowlist     Regenerate tinyproxy's filter file from the sandbox's
+                         allowlist.txt and reload tinyproxy. Fast path; does
+                         not restart the container.
+  --reseed-allowlist     Overwrite the sandbox's allowlist.txt with the
                          built-in default, then reload. Use after pulling repo
                          updates that added new entries to the default list.
-  --reseed-global-claudemd  Overwrite ~/.claude-containers/shared/CLAUDE.md
-                         with the repo template (default is seed-if-missing).
+  --reseed-global-claudemd  Overwrite the sandbox's CLAUDE.md with the repo
+                         template (default is seed-if-missing).
   --memory=VALUE         VM memory (e.g. 8, 8G, 8GB). Default: 8 GiB.
   --cpus=N               VM CPU count. Default: 6.
   --backend=BACKEND      Local inference backend: ollama (default) or omlx.
@@ -70,13 +88,31 @@ OPTIONS:
   --small-model=MODEL    OpenCode small model for lightweight tasks (small_model).
   -h, --help             Show this help.
 
+SANDBOX LAYOUT:
+  $SANDBOX/
+    .sandbox                  — marker file (presence detected by start-agent.sh)
+    state/
+      allowlist.txt           — domain allowlist (mounted :ro at /etc/claude-agent/allowlist.txt)
+      claude/                 — ~/.claude state (auth, settings, memory)
+      claude.json             — ~/.claude.json OAuth state
+      opencode/{config,data}/ — OpenCode config and data dirs
+      searxng/                — SearXNG settings
+    repos/                    — git repos (the only RW path visible inside the container)
+
 ALLOWLIST:
-  Edit  ~/.claude-agent/allowlist.txt  on the macOS host to change which
+  Edit  $SANDBOX/state/allowlist.txt  on the macOS host to change which
   domains the container can reach. One domain per line; '#' for comments;
   suffix match (github.com covers api.github.com). Apply changes with:
       start-agent.sh --reload-allowlist
   To pick up new default entries after a repo pull:
       start-agent.sh --reseed-allowlist
+  The allowlist is mounted :ro inside the container — the agent can read
+  /etc/claude-agent/allowlist.txt but cannot modify the source file.
+
+SWITCHING SANDBOXES:
+  Only one sandbox can be active at a time. Switching sandboxes restarts the
+  shared 'claude-agent' Colima VM with the new --mount (~10 s). Projects
+  within a sandbox share auth/memory state in state/claude/.
 
 ENVIRONMENT:
   CLAUDE_AGENT_MEMORY    Default VM memory (overridden by --memory).
@@ -119,6 +155,8 @@ while [[ $# -gt 0 ]]; do
     --exec-model)        CLI_EXEC_MODEL="${2:?--exec-model requires a value}"; shift ;;
     --small-model=*)     CLI_SMALL_MODEL="${1#--small-model=}" ;;
     --small-model)       CLI_SMALL_MODEL="${2:?--small-model requires a value}"; shift ;;
+    --init-sandbox=*)    INIT_SANDBOX="${1#--init-sandbox=}" ;;
+    --init-sandbox)      INIT_SANDBOX="${2:?--init-sandbox requires a PATH}"; shift ;;
     -h|--help)           usage; exit 0 ;;
     *)                   POSITIONAL+=("$1") ;;
   esac
@@ -132,8 +170,71 @@ if $RESET_CONTAINER && $REBUILD; then
   exit 1
 fi
 
+# ── sandbox helpers ───────────────────────────────────────────────────────────
+
+# Create a new sandbox directory tree with the .sandbox marker file.
+init_sandbox() {
+  local target="$1"
+  if [[ -e "$target" ]]; then
+    echo "error: '$target' already exists." >&2
+    exit 1
+  fi
+  mkdir -m 0700 -p "$target"
+  mkdir -p \
+    "$target/state/claude" \
+    "$target/state/opencode/config" \
+    "$target/state/opencode/data" \
+    "$target/state/searxng" \
+    "$target/repos"
+  touch "$target/.sandbox"
+  echo "==> Sandbox created at $target"
+  echo ""
+  echo "Next steps:"
+  echo "  cd $target/repos"
+  echo "  git clone <your-repo>"
+  echo "  cd <repo>"
+  echo "  start-agent.sh"
+}
+
+# Walk up from the current directory until a .sandbox marker is found.
+# Prints the sandbox root path and returns 0; returns 1 if none found.
+find_sandbox_root() {
+  local dir
+  dir="$(pwd)"
+  while [[ "$dir" != "/" ]]; do
+    if [[ -f "$dir/.sandbox" ]]; then
+      echo "$dir"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
+# ── --init-sandbox: one-shot operation ───────────────────────────────────────
+if [[ -n "$INIT_SANDBOX" ]]; then
+  init_sandbox "$INIT_SANDBOX"
+  exit 0
+fi
+
 PROJECT_DIR="${POSITIONAL[0]:-$(pwd)}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+
+# ── sandbox detection ─────────────────────────────────────────────────────────
+SANDBOX_ROOT="$(find_sandbox_root)" || {
+  echo "error: no .sandbox marker found in the current directory or any parent." >&2
+  echo "  To create a sandbox, run:" >&2
+  echo "    start-agent.sh --init-sandbox PATH" >&2
+  exit 1
+}
+SANDBOX_NAME="$(basename "$SANDBOX_ROOT")"
+
+# PROJECT_DIR must be inside $SANDBOX_ROOT/repos/ to stay within the trust boundary.
+if [[ "$PROJECT_DIR" != "$SANDBOX_ROOT/repos" && "$PROJECT_DIR" != "$SANDBOX_ROOT/repos/"* ]]; then
+  echo "error: PROJECT_DIR ($PROJECT_DIR) must be a subdirectory of $SANDBOX_ROOT/repos/." >&2
+  echo "  The sandbox's repos directory is: $SANDBOX_ROOT/repos/" >&2
+  exit 1
+fi
 
 # Accept "8", "8G", "8GB" (any case); normalize to an integer GiB that
 # `colima start --memory` expects.
@@ -201,15 +302,14 @@ CONTAINER_NAME="claude-agent"
 IMAGE_TAG="claude-agent:latest"
 DOCKERFILE_PATH="$(cd "$(dirname "$0")" && pwd)/dockerfiles/claude-agent.Dockerfile"
 DOCKERFILE_DIR="$(dirname "$DOCKERFILE_PATH")"
-CLAUDE_CONFIG_DIR="$HOME/.claude-containers/shared"
-CLAUDE_JSON_FILE="$HOME/.claude-containers/claude.json"
-OPENCODE_CONFIG_DIR="$HOME/.claude-agent/opencode-config"
-OPENCODE_DATA_DIR="$HOME/.claude-agent/opencode-data"
-ALLOWLIST_DIR="$HOME/.claude-agent"
-ALLOWLIST_FILE="$ALLOWLIST_DIR/allowlist.txt"
+CLAUDE_CONFIG_DIR="$SANDBOX_ROOT/state/claude"
+CLAUDE_JSON_FILE="$SANDBOX_ROOT/state/claude.json"
+OPENCODE_CONFIG_DIR="$SANDBOX_ROOT/state/opencode/config"
+OPENCODE_DATA_DIR="$SANDBOX_ROOT/state/opencode/data"
+ALLOWLIST_FILE="$SANDBOX_ROOT/state/allowlist.txt"
 TINYPROXY_PORT=8888
 SEARXNG_CONTAINER="searxng"
-SEARXNG_DIR="$HOME/.claude-agent/searxng"
+SEARXNG_DIR="$SANDBOX_ROOT/state/searxng"
 SEARXNG_SETTINGS_FILE="$SEARXNG_DIR/settings.yml"
 AGENT_NET_NAME="claude-agent-net"
 
@@ -232,7 +332,7 @@ if [[ ! -f "$DOCKERFILE_PATH" ]]; then
 fi
 
 # ── seed allowlist (first run only) ──────────────────────────────────────────
-mkdir -p "$ALLOWLIST_DIR"
+mkdir -p "$(dirname "$ALLOWLIST_FILE")"
 if [[ ! -f "$ALLOWLIST_FILE" ]] || $RESEED_ALLOWLIST; then
   cat > "$ALLOWLIST_FILE" <<'ALLOWLIST'
 # start-agent allowlist — edit on the macOS host.
@@ -495,7 +595,7 @@ justia.com
 oyez.org
 
 # === Major universities ===
-# Starter set; add institutions to ~/.claude-agent/allowlist.txt as needed.
+# Starter set; add institutions to the sandbox's allowlist.txt as needed.
 mit.edu
 stanford.edu
 harvard.edu
@@ -523,9 +623,9 @@ mpg.de
 utoronto.ca
 ALLOWLIST
   if $RESEED_ALLOWLIST; then
-    echo "==> Reseeded allowlist at $ALLOWLIST_FILE"
+    echo "==> Reseeded allowlist at $ALLOWLIST_FILE (sandbox: $SANDBOX_NAME)"
   else
-    echo "==> Seeded allowlist at $ALLOWLIST_FILE"
+    echo "==> Seeded allowlist at $ALLOWLIST_FILE (sandbox: $SANDBOX_NAME)"
   fi
 fi
 
@@ -558,11 +658,13 @@ destroy_colima_vm() {
 
 start_colima_vm() {
   echo "==> Starting Colima VM '$COLIMA_PROFILE' ($CLAUDE_AGENT_MEMORY_GB GiB RAM, $CLAUDE_AGENT_CPUS CPUs)"
+  echo "    sandbox mount: $SANDBOX_ROOT"
   colima start -p "$COLIMA_PROFILE" \
     --vm-type vz \
     --runtime docker \
     --cpu "$CLAUDE_AGENT_CPUS" \
     --memory "$CLAUDE_AGENT_MEMORY_GB" \
+    --mount "$SANDBOX_ROOT:w" \
     --mount-type virtiofs \
     --network-address
 }
@@ -627,16 +729,24 @@ fi
 if ! colima_profile_running; then
   start_colima_vm
 else
-  # Warn if the running VM sizing differs from what was requested.
-  running_json=$(colima list -p "$COLIMA_PROFILE" --json 2>/dev/null || true)
-  if [[ -n "$running_json" ]]; then
-    running_cpu=$(printf '%s' "$running_json" | python3 -c 'import json,sys;d=json.loads(sys.stdin.read());print(d.get("cpus",""))' 2>/dev/null || echo "")
-    running_mem=$(printf '%s' "$running_json" | python3 -c 'import json,sys;d=json.loads(sys.stdin.read());m=d.get("memory","");print(m)' 2>/dev/null || echo "")
-    if [[ -n "$running_cpu" && "$running_cpu" != "$CLAUDE_AGENT_CPUS" ]]; then
-      echo "warning: running VM has $running_cpu CPUs; requested $CLAUDE_AGENT_CPUS. Use --rebuild to resize." >&2
-    fi
-    if [[ -n "$running_mem" && "$running_mem" != *"${CLAUDE_AGENT_MEMORY_GB}"* ]]; then
-      echo "warning: running VM memory is $running_mem; requested ${CLAUDE_AGENT_MEMORY_GB}GiB. Use --rebuild to resize." >&2
+  # Detect sandbox switch by checking the active virtiofs mount inside the VM.
+  current_vm_mount=$(vm_sh 'mount -t virtiofs 2>/dev/null | awk "{print \$3}" | head -1' 2>/dev/null | tr -d '\r' || true)
+  if [[ -n "$current_vm_mount" && "$current_vm_mount" != "$SANDBOX_ROOT" ]]; then
+    echo "==> Sandbox changed from '$current_vm_mount' to '$SANDBOX_ROOT' — restarting VM with new mount"
+    colima stop -p "$COLIMA_PROFILE"
+    start_colima_vm
+  else
+    # Warn if the running VM sizing differs from what was requested.
+    running_json=$(colima list -p "$COLIMA_PROFILE" --json 2>/dev/null || true)
+    if [[ -n "$running_json" ]]; then
+      running_cpu=$(printf '%s' "$running_json" | python3 -c 'import json,sys;d=json.loads(sys.stdin.read());print(d.get("cpus",""))' 2>/dev/null || echo "")
+      running_mem=$(printf '%s' "$running_json" | python3 -c 'import json,sys;d=json.loads(sys.stdin.read());m=d.get("memory","");print(m)' 2>/dev/null || echo "")
+      if [[ -n "$running_cpu" && "$running_cpu" != "$CLAUDE_AGENT_CPUS" ]]; then
+        echo "warning: running VM has $running_cpu CPUs; requested $CLAUDE_AGENT_CPUS. Use --rebuild to resize." >&2
+      fi
+      if [[ -n "$running_mem" && "$running_mem" != *"${CLAUDE_AGENT_MEMORY_GB}"* ]]; then
+        echo "warning: running VM memory is $running_mem; requested ${CLAUDE_AGENT_MEMORY_GB}GiB. Use --rebuild to resize." >&2
+      fi
     fi
   fi
 fi
@@ -851,7 +961,7 @@ colima ssh -p "$COLIMA_PROFILE" -- sudo sh < "$TMP_WORK/firewall-apply.sh"
 # ── --reload-allowlist: fast-path exit ───────────────────────────────────────
 if $RELOAD_ALLOWLIST; then
   entry_count=$(grep -cv -E '^\s*(#|$)' "$ALLOWLIST_FILE" || echo 0)
-  echo "==> Allowlist reloaded ($entry_count entries)"
+  echo "==> Allowlist reloaded ($entry_count entries, sandbox: $SANDBOX_NAME)"
   rm -rf "$TMP_WORK"
   trap - EXIT
   exit 0
@@ -1252,9 +1362,11 @@ attach_existing() {
 }
 
 if docker container inspect "$CONTAINER_NAME" &>/dev/null; then
-  # Check that the existing mount matches $PROJECT_DIR. If not, recreate.
-  existing_mount=$(docker container inspect -f '{{range .Mounts}}{{if eq .Destination "'"$PROJECT_DIR"'"}}{{.Source}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)
-  if [[ "$existing_mount" == "$PROJECT_DIR" ]]; then
+  # All projects in a sandbox share the same repos mount. Check that the
+  # existing container's repos mount matches the current sandbox. If not
+  # (sandbox switched), recreate; otherwise just re-exec with the right -w.
+  existing_repos_mount=$(docker container inspect -f '{{range .Mounts}}{{if eq .Destination "'"$SANDBOX_ROOT/repos"'"}}{{.Source}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)
+  if [[ "$existing_repos_mount" == "$SANDBOX_ROOT/repos" ]]; then
     running_state=$(docker container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo "false")
     if [[ "$running_state" == "true" ]]; then
       if docker top "$CONTAINER_NAME" 2>/dev/null | grep -q '/bin/bash'; then
@@ -1263,7 +1375,7 @@ if docker container inspect "$CONTAINER_NAME" &>/dev/null; then
     fi
     attach_existing
   else
-    echo "==> Project dir changed; recreating container"
+    echo "==> Sandbox changed; recreating container"
     docker rm -f "$CONTAINER_NAME" >/dev/null
   fi
 fi
@@ -1277,10 +1389,11 @@ if $LOCAL_SEARCH_ENABLED; then
 fi
 
 echo "==> Creating container '$CONTAINER_NAME'"
-echo "    project : $PROJECT_DIR  →  $PROJECT_DIR"
-echo "    proxy   : http://$BRIDGE_IP:$TINYPROXY_PORT  (allowlist: $ALLOWLIST_FILE)"
+echo "    sandbox  : $SANDBOX_NAME  ($SANDBOX_ROOT)"
+echo "    project  : $PROJECT_DIR"
+echo "    proxy    : http://$BRIDGE_IP:$TINYPROXY_PORT  (allowlist: $ALLOWLIST_FILE, ro in container)"
 echo "    inference: $INFERENCE_LABEL at http://$HOST_IP:$INFERENCE_PORT"
-$LOCAL_SEARCH_ENABLED && echo "    search  : SearXNG on $AGENT_NET_NAME"
+$LOCAL_SEARCH_ENABLED && echo "    search   : SearXNG on $AGENT_NET_NAME"
 
 rm -rf "$TMP_WORK"
 trap - EXIT
@@ -1291,11 +1404,12 @@ exec docker run \
   --cpus "$CLAUDE_AGENT_CPUS" \
   --add-host=host.docker.internal:host-gateway \
   ${NETWORK_ARGS[@]+"${NETWORK_ARGS[@]}"} \
-  -v "$PROJECT_DIR:$PROJECT_DIR" \
+  -v "$SANDBOX_ROOT/repos:$SANDBOX_ROOT/repos" \
   -v "$CLAUDE_CONFIG_DIR:/root/.claude" \
   -v "$CLAUDE_JSON_FILE:/root/.claude.json" \
   -v "$OPENCODE_CONFIG_DIR:/root/.config/opencode" \
   -v "$OPENCODE_DATA_DIR:/root/.local/share/opencode" \
+  -v "$ALLOWLIST_FILE:/etc/claude-agent/allowlist.txt:ro" \
   -w "$PROJECT_DIR" \
   "${DOCKER_ENV_ARGS[@]}" \
   "$IMAGE_TAG" \
