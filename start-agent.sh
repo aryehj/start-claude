@@ -91,16 +91,16 @@ OPTIONS:
 SANDBOX LAYOUT:
   $SANDBOX/
     .sandbox                  — marker file (presence detected by start-agent.sh)
-    state/
+    .config/
       allowlist.txt           — domain allowlist (mounted :ro at /etc/claude-agent/allowlist.txt)
       claude/                 — ~/.claude state (auth, settings, memory)
       claude.json             — ~/.claude.json OAuth state
       opencode/{config,data}/ — OpenCode config and data dirs
       searxng/                — SearXNG settings
-    repos/                    — git repos (the only RW path visible inside the container)
+    projects/                 — your work (the only RW path visible inside the container)
 
 ALLOWLIST:
-  Edit  $SANDBOX/state/allowlist.txt  on the macOS host to change which
+  Edit  $SANDBOX/.config/allowlist.txt  on the macOS host to change which
   domains the container can reach. One domain per line; '#' for comments;
   suffix match (github.com covers api.github.com). Apply changes with:
       start-agent.sh --reload-allowlist
@@ -112,7 +112,7 @@ ALLOWLIST:
 SWITCHING SANDBOXES:
   Only one sandbox can be active at a time. Switching sandboxes restarts the
   shared 'claude-agent' Colima VM with the new --mount (~10 s). Projects
-  within a sandbox share auth/memory state in state/claude/.
+  within a sandbox share auth/memory state in .config/claude/.
 
 ENVIRONMENT:
   CLAUDE_AGENT_MEMORY    Default VM memory (overridden by --memory).
@@ -183,18 +183,17 @@ init_sandbox() {
     mkdir -m 0700 -p "$target"
   fi
   mkdir -p \
-    "$target/state/claude" \
-    "$target/state/opencode/config" \
-    "$target/state/opencode/data" \
-    "$target/state/searxng" \
-    "$target/repos"
+    "$target/.config/claude" \
+    "$target/.config/opencode/config" \
+    "$target/.config/opencode/data" \
+    "$target/.config/searxng" \
+    "$target/projects"
   touch "$target/.sandbox"
   echo "==> Sandbox created at $target"
   echo ""
   echo "Next steps:"
-  echo "  cd $target/repos"
-  echo "  git clone <your-repo>"
-  echo "  cd <repo>"
+  echo "  cd $target/projects"
+  echo "  git clone <your-repo>   # or: mkdir <project> && cd <project>"
   echo "  start-agent.sh"
 }
 
@@ -231,10 +230,10 @@ SANDBOX_ROOT="$(find_sandbox_root)" || {
 }
 SANDBOX_NAME="$(basename "$SANDBOX_ROOT")"
 
-# PROJECT_DIR must be inside $SANDBOX_ROOT/repos/ to stay within the trust boundary.
-if [[ "$PROJECT_DIR" != "$SANDBOX_ROOT/repos" && "$PROJECT_DIR" != "$SANDBOX_ROOT/repos/"* ]]; then
-  echo "error: PROJECT_DIR ($PROJECT_DIR) must be a subdirectory of $SANDBOX_ROOT/repos/." >&2
-  echo "  The sandbox's repos directory is: $SANDBOX_ROOT/repos/" >&2
+# PROJECT_DIR must be inside $SANDBOX_ROOT/projects/ to stay within the trust boundary.
+if [[ "$PROJECT_DIR" != "$SANDBOX_ROOT/projects" && "$PROJECT_DIR" != "$SANDBOX_ROOT/projects/"* ]]; then
+  echo "error: PROJECT_DIR ($PROJECT_DIR) must be a subdirectory of $SANDBOX_ROOT/projects/." >&2
+  echo "  The sandbox's projects directory is: $SANDBOX_ROOT/projects/" >&2
   exit 1
 fi
 
@@ -304,14 +303,14 @@ CONTAINER_NAME="claude-agent"
 IMAGE_TAG="claude-agent:latest"
 DOCKERFILE_PATH="$(cd "$(dirname "$0")" && pwd)/dockerfiles/claude-agent.Dockerfile"
 DOCKERFILE_DIR="$(dirname "$DOCKERFILE_PATH")"
-CLAUDE_CONFIG_DIR="$SANDBOX_ROOT/state/claude"
-CLAUDE_JSON_FILE="$SANDBOX_ROOT/state/claude.json"
-OPENCODE_CONFIG_DIR="$SANDBOX_ROOT/state/opencode/config"
-OPENCODE_DATA_DIR="$SANDBOX_ROOT/state/opencode/data"
-ALLOWLIST_FILE="$SANDBOX_ROOT/state/allowlist.txt"
+CLAUDE_CONFIG_DIR="$SANDBOX_ROOT/.config/claude"
+CLAUDE_JSON_FILE="$SANDBOX_ROOT/.config/claude.json"
+OPENCODE_CONFIG_DIR="$SANDBOX_ROOT/.config/opencode/config"
+OPENCODE_DATA_DIR="$SANDBOX_ROOT/.config/opencode/data"
+ALLOWLIST_FILE="$SANDBOX_ROOT/.config/allowlist.txt"
 TINYPROXY_PORT=8888
 SEARXNG_CONTAINER="searxng"
-SEARXNG_DIR="$SANDBOX_ROOT/state/searxng"
+SEARXNG_DIR="$SANDBOX_ROOT/.config/searxng"
 SEARXNG_SETTINGS_FILE="$SEARXNG_DIR/settings.yml"
 AGENT_NET_NAME="claude-agent-net"
 
@@ -1364,11 +1363,11 @@ attach_existing() {
 }
 
 if docker container inspect "$CONTAINER_NAME" &>/dev/null; then
-  # All projects in a sandbox share the same repos mount. Check that the
-  # existing container's repos mount matches the current sandbox. If not
+  # All projects in a sandbox share the same projects mount. Check that the
+  # existing container's projects mount matches the current sandbox. If not
   # (sandbox switched), recreate; otherwise just re-exec with the right -w.
-  existing_repos_mount=$(docker container inspect -f '{{range .Mounts}}{{if eq .Destination "'"$SANDBOX_ROOT/repos"'"}}{{.Source}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)
-  if [[ "$existing_repos_mount" == "$SANDBOX_ROOT/repos" ]]; then
+  existing_projects_mount=$(docker container inspect -f '{{range .Mounts}}{{if eq .Destination "'"$SANDBOX_ROOT/projects"'"}}{{.Source}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)
+  if [[ "$existing_projects_mount" == "$SANDBOX_ROOT/projects" ]]; then
     running_state=$(docker container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo "false")
     if [[ "$running_state" == "true" ]]; then
       if docker top "$CONTAINER_NAME" 2>/dev/null | grep -q '/bin/bash'; then
@@ -1406,7 +1405,7 @@ exec docker run \
   --cpus "$CLAUDE_AGENT_CPUS" \
   --add-host=host.docker.internal:host-gateway \
   ${NETWORK_ARGS[@]+"${NETWORK_ARGS[@]}"} \
-  -v "$SANDBOX_ROOT/repos:$SANDBOX_ROOT/repos" \
+  -v "$SANDBOX_ROOT/projects:$SANDBOX_ROOT/projects" \
   -v "$CLAUDE_CONFIG_DIR:/root/.claude" \
   -v "$CLAUDE_JSON_FILE:/root/.claude.json" \
   -v "$OPENCODE_CONFIG_DIR:/root/.config/opencode" \
