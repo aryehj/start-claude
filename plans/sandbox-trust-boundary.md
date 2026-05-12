@@ -3,7 +3,7 @@
 ## Status
 
 - [x] Phase 1: Implementation (script changes in `start-agent.sh`)
-- [ ] Phase 2: Documentation (CLAUDE.md, ADR-033, README)
+- [x] Phase 2: Documentation (CLAUDE.md, ADR-034, README)
 - [ ] Phase 3: Validate (syntax, static test, reference sweep, smoke test)
 
 ## Context

@@ -69,16 +69,17 @@ If the named container already exists, it just starts and re-attaches it.
 
 `start-agent.sh` is a sibling to `start-claude.sh`, not a replacement. It runs both Claude Code and OpenCode on top of a single shared Colima VM and a single shared docker container, with a VM-level egress allowlist the in-container LLM cannot modify, and routes local inference to Ollama or omlx on the macOS host.
 
-- **Colima, one shared VM + one shared container.** Single `claude-agent` Colima profile; `$(pwd)` bind-mounted at launch; default 8 GiB / 6 CPUs (overridable via `CLAUDE_AGENT_MEMORY` / `CLAUDE_AGENT_CPUS`).
+- **Colima, one shared VM + one sandbox active at a time.** Single `claude-agent` Colima profile; VM launched with `--mount $SANDBOX_ROOT:w` so only the active sandbox is visible inside the VM. Switching sandboxes stops and restarts the VM with the new mount (~10s). Default 8 GiB / 6 CPUs (overridable via `CLAUDE_AGENT_MEMORY` / `CLAUDE_AGENT_CPUS`). See ADR-034.
 - **Dockerfile, not an inline heredoc.** Image built from `dockerfiles/claude-agent.Dockerfile` via `docker build` — more readable and cacheable than the `start-claude.sh` inline approach.
 - **Egress allowlist via in-VM tinyproxy + CLAUDE_AGENT iptables chain.** tinyproxy runs inside the Colima VM; the CLAUDE_AGENT chain REJECTs all unmatched bridge egress atomically. See ADR-010.
-- **Allowlist file on the host, not in the repo.** `~/.claude-agent/allowlist.txt` seeded on first run; `--reload-allowlist` applies changes in ~2s without touching the container.
+- **Allowlist in `.sandbox_config/`, bind-mounted `:ro` in the container.** `$SANDBOX_ROOT/.sandbox_config/allowlist.txt` seeded on first run; mounted read-only at `/etc/claude-agent/allowlist.txt` so the agent can read but not rewrite it. `--reload-allowlist` applies host-side edits in ~2s without touching the container. See ADR-034.
 - **Seed omits write-capable hosts.** tinyproxy can't filter by path or method, so `github.com`, registries, and upload hubs are excluded. Code reads still work via `codeload.github.com` + `githubusercontent.com`.
 - **Ollama via host networking.** `HOST_IP` from the VM's default route; container pointed at `http://$HOST_IP:11434` via `OLLAMA_HOST`; iptables RETURN rule carves out that destination.
 - **OpenCode inference provider via `opencode.json` injection.** Script writes/migrates a provider entry using `@ai-sdk/openai-compatible`; `ollama` and `omlx` entries coexist; config and data dirs bind-mounted for persistence.
 - **Per-mode OpenCode models via `--plan-model`, `--exec-model`, `--small-model`.** Bare IDs prefixed with the active provider key; full `provider/model` strings used as-is.
 - **`--backend=omlx` selects omlx as the local inference server.** MLX-based Apple Silicon inference on port 8000 with API-key auth. See ADR-012.
-- **Shared `~/.claude` state with `start-claude.sh`.** Same `~/.claude-containers/shared/` and `claude.json` mounts; run only one script at a time.
+- **Per-sandbox auth and memory state; no cross-script sharing.** Each sandbox's `.sandbox_config/claude/` and `.sandbox_config/claude.json` hold its own Claude Code auth and memory. There is no shared state with `start-claude.sh`; `claude login` must be run once per sandbox. See ADR-034.
+- **`--init-sandbox PATH` creates a sandbox directory tree.** Creates `.sandbox_config/`, `projects/`, and all required subdirs at `PATH`; refuses if `.sandbox_config/` already exists. Running `start-agent.sh` outside any sandbox root is a hard error with a remediation message pointing at `--init-sandbox`. See ADR-034.
 - **`--rebuild` semantics.** Removes image + container non-interactively; Colima VM deletion requires an extra `y` because it wipes the entire VM runtime.
 - **`--reset-container` semantics.** Removes the container (and SearXNG container) but keeps the image and VM intact; mutually exclusive with `--rebuild`. Use when only container state needs resetting — avoids network egress for a full image rebuild.
 - **`NODE_USE_ENV_PROXY=1` makes Node honor the proxy natively.** Node 24 undici reads `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` when this flag is set — no shim packages needed. See ADR-013.
@@ -134,6 +135,25 @@ which removes `claude-agent:latest` and the container, then rebuilds. An
 additional confirmation prompt offers to delete the Colima VM too — only
 say yes if you want to start over from a clean VM (loses everything else
 inside the VM's docker runtime).
+
+### Migrating from the legacy `~/.claude-agent/` layout
+
+If you were using `start-agent.sh` before the sandbox redesign, your state
+lives in `~/.claude-containers/` and `~/.claude-agent/`. The new script
+ignores those directories; follow this recipe to migrate:
+
+```bash
+start-agent.sh --init-sandbox ~/sandboxes/default
+cp -r ~/.claude-containers/shared/* ~/sandboxes/default/.sandbox_config/claude/
+cp ~/.claude-containers/claude.json ~/sandboxes/default/.sandbox_config/claude.json
+cp -r ~/.claude-agent/opencode-config/* ~/sandboxes/default/.sandbox_config/opencode/config/
+cp -r ~/.claude-agent/opencode-data/*   ~/sandboxes/default/.sandbox_config/opencode/data/
+cp ~/.claude-agent/allowlist.txt        ~/sandboxes/default/.sandbox_config/allowlist.txt
+# Move repos in:
+mv ~/Code/my-repo ~/sandboxes/default/projects/my-repo
+# Once verified, remove legacy state:
+# rm -rf ~/.claude-containers ~/.claude-agent
+```
 
 For `research.py`, the script is a single Python file at the repo root. Edit it
 directly. After changing it:

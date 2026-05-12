@@ -1968,3 +1968,94 @@ applies regardless of sandbox state.
 - Any future attempt to re-enable the sandbox in `claude-agent` must address the
   `CAP_SYS_ADMIN` trade-off explicitly before modifying `start-agent.sh` or
   the Dockerfile.
+
+## ADR-034: One-directory trust boundary for `start-agent.sh`
+
+**Date:** 2026-05-12
+**Status:** Accepted
+
+### Context
+
+`start-agent.sh` originally scattered its host-side state across several `$HOME`
+paths and relied on Colima's default `$HOME` virtiofs mount. This had three
+concrete security consequences:
+
+1. **Broad VM read surface.** Colima's default mount exposes all of `$HOME`
+   inside the VM — SSH keys, browser data, dotfiles, Keychain-adjacent state. An
+   agent process that escapes the container into the VM has read access to all of
+   it.
+
+2. **RW allowlist.** `~/.claude-agent/allowlist.txt` was reachable from inside
+   the container as a writable file. tinyproxy reloads only on a host-driven
+   `--reload-allowlist` call, but an agent could stage a modified file for
+   activation on the next reload.
+
+3. **Shared blast radius.** `~/.claude-containers/shared/.credentials.json` was
+   shared across every project run, so a compromised session had access to all
+   projects' auth state.
+
+The goal of the redesign is to reduce the host-side trust surface to exactly one
+directory, with a read-only allowlist as the key invariant.
+
+### Decision
+
+**`.sandbox_config/` as the trust boundary marker.** A sandbox is defined by the
+presence of a `.sandbox_config/` directory at the root of a project tree. The
+marker doubles as the container for all per-sandbox state. `start-agent.sh`
+walks up from `$(pwd)` to find it; running outside any sandbox is a hard error.
+`--init-sandbox PATH` creates the tree.
+
+**Single shared `claude-agent` Colima profile, per-sandbox narrow VM mount.**
+`colima start --mount $SANDBOX_ROOT:w` replaces Colima's default `$HOME` mount.
+The VM literally cannot see anything outside `$SANDBOX_ROOT`. Only one sandbox
+can be active at a time; switching sandboxes stops the VM and restarts it with
+the new `--mount` argument (~10s restart).
+
+**Granular container bind-mounts, not a whole-sandbox mount.** The `docker run`
+mount block binds each in-container path individually:
+- `$SANDBOX_ROOT/projects` → same path (RW) — all repos
+- `.sandbox_config/claude/` → `/root/.claude` (RW)
+- `.sandbox_config/claude.json` → `/root/.claude.json` (RW) — see ADR-006
+- `.sandbox_config/opencode/config` → `/root/.config/opencode` (RW)
+- `.sandbox_config/opencode/data` → `/root/.local/share/opencode` (RW)
+- `.sandbox_config/allowlist.txt` → `/etc/claude-agent/allowlist.txt` (**`:ro`**)
+
+The container does **not** receive a bind-mount for `$SANDBOX_ROOT` itself. That
+is what makes the `:ro` on the allowlist load-bearing — the agent has no
+alternative writable path to the file.
+
+**No automatic migration.** The script does not detect or migrate from
+`~/.claude-containers/` or `~/.claude-agent/`. Legacy state is ignored; the
+CLAUDE.md "Making changes" section documents a manual `cp` recipe.
+
+### Rejected alternatives
+
+- **Per-sandbox Colima profiles.** Would allow simultaneous sandboxes but adds
+  per-sandbox image-rebuild cost and Colima namespace complexity. Simultaneous
+  sandbox use is not a requirement, so a single shared profile is strictly
+  simpler.
+
+- **Single `$SANDBOX_ROOT:$SANDBOX_ROOT` mount instead of granular mounts.**
+  Exposing the entire sandbox directory to the container would give the agent a
+  writable path to `.sandbox_config/allowlist.txt` via that bind-mount, defeating
+  the `:ro` invariant on the allowlist.
+
+- **Per-project state under `$HOME` with a narrow Colima mount per project.**
+  Keeps the `$HOME`-scatter problem and still requires a VM restart per project
+  switch. No benefit over the sandbox model.
+
+- **Dedicated macOS user per sandbox.** Strong isolation but a heavyweight
+  administrative burden with no Colima-level benefit.
+
+### Consequences
+
+- **Narrow VM trust surface.** `colima ssh -p claude-agent -- ls $HOME` shows
+  nothing outside `$SANDBOX_ROOT`; the default virtiofs `$HOME` mount is gone.
+- **Read-only allowlist.** Inside the container, `echo x >> /etc/claude-agent/allowlist.txt`
+  fails with EROFS. The source-of-truth file on the host is still editable; the
+  constraint only applies from inside the container.
+- **Per-sandbox auth.** `claude login` must be run once per sandbox. Shared auth
+  across projects (the previous `~/.claude-containers/shared/` model) is gone.
+- **One sandbox active at a time.** Switching costs a ~10s VM restart. Acceptable
+  for coarse-grained sandboxes switched infrequently; revisit with per-sandbox
+  Colima profiles if simultaneous use becomes a real requirement.

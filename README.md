@@ -147,6 +147,11 @@ that the in-container LLM cannot modify. Local inference is routed to an
 [Ollama](https://ollama.com) or [omlx](https://github.com/jundot/omlx) instance
 running on the macOS host.
 
+State is organized around **sandboxes** — a single directory tree rooted at
+`$SANDBOX_ROOT`, where `.sandbox_config/` holds per-sandbox auth and config and
+`projects/` holds your repos. The Colima VM is launched with
+`--mount $SANDBOX_ROOT:w` so only that sandbox is visible inside the VM.
+
 Use `start-agent.sh` when you want:
 
 - Both agents (Claude Code + OpenCode) in the same environment
@@ -156,6 +161,48 @@ Use `start-agent.sh` when you want:
 
 Use `start-claude.sh` when you want per-project microVM isolation via Apple
 Containers with no Colima, no docker, and no shared VM.
+
+## First run
+
+Initialize a sandbox, clone a repo into it, and run the script:
+
+```bash
+# Create the sandbox directory tree
+start-agent.sh --init-sandbox ~/sandboxes/default
+
+# Clone your repo into the sandbox
+cd ~/sandboxes/default/projects
+git clone https://github.com/you/my-repo.git
+cd my-repo
+
+# Start the agent environment
+start-agent.sh
+```
+
+`--init-sandbox` creates:
+
+```
+~/sandboxes/default/
+  .sandbox_config/
+    claude/          — Claude Code auth, memory, and settings (/root/.claude)
+    claude.json      — Claude Code OAuth state (/root/.claude.json)
+    opencode/
+      config/        — OpenCode config (/root/.config/opencode)
+      data/          — OpenCode data (/root/.local/share/opencode)
+    allowlist.txt    — egress domain allowlist (read-only inside the container)
+    searxng/         — SearXNG config
+  projects/          — your repos go here
+```
+
+Subsequent runs from inside any `projects/<repo>` subdirectory reattach
+in a few seconds. Running from outside a sandbox root is a hard error with a
+remediation message.
+
+**Multiple sandboxes.** Only one sandbox can be active at a time. If you
+run `start-agent.sh` from a different sandbox, the script detects the mount
+mismatch, stops the `claude-agent` VM, and restarts it with the new
+`--mount $SANDBOX_ROOT:w`. This takes ~10s. Projects within a sandbox share
+auth and memory state.
 
 ## Requirements
 
@@ -209,18 +256,19 @@ start-agent.sh --plan-model=gemma3:27b --exec-model=qwen2.5-coder:32b --small-mo
 # Set the OpenCode default model (no CLI flag; env var only)
 CLAUDE_AGENT_DEFAULT_MODEL=ollama/qwen2.5-coder:32b start-agent.sh
 
-# Overwrite ~/.claude-containers/shared/CLAUDE.md AND
-# ~/.claude-agent/opencode-config/AGENTS.md with the repo template
+# Overwrite $SANDBOX/.sandbox_config/claude/CLAUDE.md AND
+# $SANDBOX/.sandbox_config/opencode/config/AGENTS.md with the repo template
 start-agent.sh --reseed-global-claudemd
 ```
 
-First run brings up the Colima VM (`claude-agent` profile), installs
-`tinyproxy` inside it, builds `claude-agent:latest` from
-`dockerfiles/claude-agent.Dockerfile`, seeds the allowlist, applies iptables
-rules, and drops you into a bash shell inside the container at `$(pwd)`.
+First run brings up the Colima VM (`claude-agent` profile) with
+`--mount $SANDBOX_ROOT:w`, installs `tinyproxy` inside it, builds
+`claude-agent:latest` from `dockerfiles/claude-agent.Dockerfile`, seeds
+the allowlist at `$SANDBOX_ROOT/.sandbox_config/allowlist.txt`, applies
+iptables rules, and drops you into a bash shell inside the container.
 
-Subsequent runs from the same directory reattach in a few seconds. Running
-from a different directory recreates the container with the new mount.
+Subsequent runs from the same sandbox reattach in a few seconds. Switching
+to a different sandbox restarts the VM with the new `--mount` (~10s).
 
 ## What's inside
 
@@ -234,30 +282,32 @@ from a different directory recreates the container with the new mount.
 
 ## Mounts
 
-| Host | Container |
-|------|-----------|
-| Your project dir | Same path |
-| `~/.claude-containers/shared/` | `/root/.claude` |
-| `~/.claude-containers/claude.json` | `/root/.claude.json` |
-| `~/.claude-agent/opencode-config/` | `/root/.config/opencode` |
-| `~/.claude-agent/opencode-data/` | `/root/.local/share/opencode` |
+| Host | Container | Mode |
+|------|-----------|------|
+| `$SANDBOX_ROOT/projects/` | same path | RW |
+| `$SANDBOX_ROOT/.sandbox_config/claude/` | `/root/.claude` | RW |
+| `$SANDBOX_ROOT/.sandbox_config/claude.json` | `/root/.claude.json` | RW |
+| `$SANDBOX_ROOT/.sandbox_config/opencode/config/` | `/root/.config/opencode` | RW |
+| `$SANDBOX_ROOT/.sandbox_config/opencode/data/` | `/root/.local/share/opencode` | RW |
+| `$SANDBOX_ROOT/.sandbox_config/allowlist.txt` | `/etc/claude-agent/allowlist.txt` | **RO** |
 
-`~/.claude-containers/shared/` and `claude.json` are deliberately shared with
-`start-claude.sh`, so auth and skills persist across both scripts. Run only
-one at a time.
+Auth and memory state are per-sandbox; there is no shared state with
+`start-claude.sh`. `claude login` must be run once per sandbox. The
+`$SANDBOX_ROOT` directory itself is **not** mounted — only the above paths,
+keeping the allowlist's `:ro` mount meaningful.
 
 ## Global container CLAUDE.md
 
 On first run, `start-agent.sh` copies `templates/global-claude.md` from the
-repo into `~/.claude-containers/shared/CLAUDE.md`. Claude Code auto-injects
-that file into every session, giving the model shared context about the
-environment — path layout, proxy allowlist, local-inference host, `$TMPDIR`
-conventions — regardless of the project it's opened in. The file is shared
-with `start-claude.sh` via the same mount, so editing it once applies to both.
-Your edits are preserved across subsequent runs. Pass `--reseed-global-claudemd`
-to overwrite with the current template.
+repo into `$SANDBOX_ROOT/.sandbox_config/claude/CLAUDE.md`. Claude Code
+auto-injects that file into every session, giving the model shared context about
+the environment — path layout, proxy allowlist, local-inference host, `$TMPDIR`
+conventions — regardless of the project it's opened in. Your edits are preserved
+across subsequent runs. Pass `--reseed-global-claudemd` to overwrite with the
+current template.
 
-The same template is seeded into `~/.claude-agent/opencode-config/AGENTS.md`
+The same template is seeded into
+`$SANDBOX_ROOT/.sandbox_config/opencode/config/AGENTS.md`
 (mounted at `/root/.config/opencode/AGENTS.md`) and wired into OpenCode via
 the `instructions` field in `opencode.json`, so OpenCode picks up the same
 environment context. The `claude-dev` exceptions block at the end of the
@@ -283,11 +333,14 @@ fully compromised. See `ADR.md` §ADR-010 for the threat model.
 
 ```bash
 # On the macOS host — one domain per line; '#' for comments
-$EDITOR ~/.claude-agent/allowlist.txt
+$EDITOR $SANDBOX_ROOT/.sandbox_config/allowlist.txt
 
 # Apply changes (~2s, no container restart)
 start-agent.sh --reload-allowlist
 ```
+
+The allowlist is mounted **read-only** at `/etc/claude-agent/allowlist.txt`
+inside the container; the agent can read it but cannot modify the source file.
 
 Suffix matching applies — `github.com` covers `api.github.com`,
 `codeload.github.com`, etc. The file is seeded on first run with a permissive
@@ -302,11 +355,6 @@ their read surface at the HTTP-proxy layer: `github.com`, `gitlab.com`,
 work via `codeload.github.com` + `githubusercontent.com`. Add the write hosts
 back explicitly if your workflow requires `gh`, HTTPS push, image push, or
 dataset upload from inside the container.
-
-**Existing users:** these defaults only apply to newly-seeded allowlists. If
-`~/.claude-agent/allowlist.txt` already exists, hand-remove the write hosts
-above (or delete the file to re-seed) and run
-`start-agent.sh --reload-allowlist`.
 
 ### Verifying the egress allowlist
 
@@ -325,7 +373,7 @@ failed, when Ollama isn't running on the host).
 without restarting the container. From the macOS host:
 
 ```bash
-echo 'example.com' >> ~/.claude-agent/allowlist.txt
+echo 'example.com' >> $SANDBOX_ROOT/.sandbox_config/allowlist.txt
 start-agent.sh --reload-allowlist
 ```
 
@@ -385,10 +433,10 @@ entries the same way:
 **SearXNG** runs alongside `claude-agent` by default and is wired into OpenCode
 as a local `websearch` MCP tool. It fans out to search engines through the same
 tinyproxy allowlist, so all engine traffic is governed by
-`~/.claude-agent/allowlist.txt` — no third-party search gateway. The SearXNG
-config (including a generated `secret_key`) is seeded on first run at
-`~/.claude-agent/searxng/settings.yml` and survives `--rebuild`. To reset it,
-delete that directory and re-run.
+`$SANDBOX_ROOT/.sandbox_config/allowlist.txt` — no third-party search gateway.
+The SearXNG config (including a generated `secret_key`) is seeded on first run at
+`$SANDBOX_ROOT/.sandbox_config/searxng/settings.yml` and survives `--rebuild`.
+To reset it, delete that directory and re-run.
 
 Enabled engines by default: Google, Bing, DuckDuckGo, Brave, Qwant, Wikipedia,
 arXiv, GitHub code search, Stack Exchange. Add an engine by editing
