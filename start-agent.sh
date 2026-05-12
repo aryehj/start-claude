@@ -859,10 +859,15 @@ SXNG
 fi
 
 # ── tinyproxy install in VM (idempotent) ─────────────────────────────────────
-if ! vm_ssh sh -c 'command -v tinyproxy' >/dev/null 2>&1; then
+# Check the `tinyproxy` package, not the binary: on Ubuntu 24.04 the package is
+# split (`tinyproxy-bin` ships /usr/bin/tinyproxy; `tinyproxy` ships the systemd
+# unit + default config). A prior purge of `tinyproxy` can leave the binary
+# behind, so a `command -v` check would pass while `systemctl` has no unit.
+if ! vm_ssh dpkg-query -W -f='${Status}' tinyproxy 2>/dev/null | grep -q "install ok installed"; then
   echo "==> Installing tinyproxy in Colima VM"
   vm_ssh sudo apt-get update -qq
   vm_ssh sudo apt-get install -y tinyproxy
+  vm_ssh sudo systemctl daemon-reload
 fi
 
 # Build tinyproxy config and filter on the host, then push into the VM.
