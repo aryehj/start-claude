@@ -4,7 +4,7 @@
 
 - [ ] Phase 1: Sandbox detection + `--init-sandbox PATH`
 - [ ] Phase 2: Repoint host-state constants under `$SANDBOX/state/`
-- [ ] Phase 3: Per-sandbox Colima profile + narrow VM mount
+- [ ] Phase 3: Narrow VM mount per active sandbox
 - [ ] Phase 4: Restructure `docker run` bind-mounts (allowlist `:ro`)
 - [ ] Phase 5: Help text, log messages, `--rebuild` prompt
 - [ ] Phase 6: Update CLAUDE.md + add ADR-033
@@ -25,7 +25,7 @@ This shape has three concrete consequences. (1) An agent process that escapes th
 The user wants a redesign where the entire host-side trust surface is exactly one directory. Multiple sandboxes give them a coarse-grained isolation knob; everything inside a sandbox is mutually trusting by design.
 
 Design discussion settled the following before this plan was written:
-- Per-sandbox Colima VM (`sandbox-<name>` profile) — full VM-level isolation between sandboxes, at the cost of one image rebuild per sandbox.
+- Single shared Colima profile (`claude-agent`); narrow VM mount via `colima start --mount $SANDBOX_ROOT:w`. Only one sandbox active at a time; switching restarts the VM with the new mount (`colima stop && colima start --mount $NEW:w`). Per-sandbox profiles were considered and rejected — simultaneous sandbox use is not a requirement, and a single profile keeps the image cache and Colima namespace simple.
 - `.sandbox` marker file at the sandbox root — empty, basename-as-name. Detection walks up from `$(pwd)`.
 - One layout (option B): `state/claude/` (dir) and `state/claude.json` (file) as siblings; `state/opencode/{config,data}` both RW; `state/allowlist.txt` mounted `:ro` at `/etc/claude-agent/allowlist.txt`; `state/searxng/settings.yml` (existing pattern).
 - Source code lives under `$SANDBOX/repos/<repo>/`. PROJECT_DIR must resolve inside `$SANDBOX/repos/`.
@@ -36,7 +36,7 @@ Design discussion settled the following before this plan was written:
 ## Goals
 
 - `$SANDBOX_ROOT` is the only host-side path the VM or container can see. Everything outside it is invisible to both.
-- Each sandbox gets its own Colima VM (`sandbox-<name>`), launched with `--mount $SANDBOX_ROOT:w` (no default `$HOME` mount).
+- The single `claude-agent` Colima profile is launched with `--mount $SANDBOX_ROOT:w` (no default `$HOME` mount). Only one sandbox can be active at a time; switching restarts the VM with the new mount.
 - The container's allowlist is bind-mounted `:ro` at a stable in-container path; the agent can read but cannot rewrite which URLs are permitted.
 - Sandboxes are detected by an explicit `.sandbox` marker, not by env vars or directory conventions. `--init-sandbox PATH` creates one.
 - Running outside a sandbox is a hard error with a clear remediation message.
@@ -46,13 +46,13 @@ Design discussion settled the following before this plan was written:
 
 The trust boundary moves from "scattered host paths under `$HOME`, plus whatever Colima's default mount drags along" to "exactly `$SANDBOX_ROOT`." Two architectural moves carry the change. First, `colima start --mount $SANDBOX_ROOT:w` replaces the default `$HOME` virtiofs mount, so the VM literally cannot see anything else on the host. Second, the `docker run` mount block stays granular — separate path-renamed bind-mounts for each in-container destination — so we can keep `:ro` on the allowlist meaningful. If we collapsed to a single `$SANDBOX:$SANDBOX` mount instead, the agent would have a writable path to the allowlist via the union view and the `:ro` line elsewhere wouldn't help.
 
-Sandbox detection uses an explicit marker file rather than `$CLAUDE_SANDBOX` env or cwd-based heuristics. Marker files are easy to grep for, hard to forget, and let `cd` into any depth of the sandbox tree work transparently. Sandbox name is the basename of the marker's directory; the only namespacing it drives is the Colima profile (`sandbox-<name>`). Two sandboxes with colliding basenames would share a profile — documented user responsibility, not engineered around.
+Sandbox detection uses an explicit marker file rather than `$CLAUDE_SANDBOX` env or cwd-based heuristics. Marker files are easy to grep for, hard to forget, and let `cd` into any depth of the sandbox tree work transparently. Sandbox name is the basename of the marker's directory and is used only in log messages; no Colima profile suffix or other shell-unsafe context, so no name-validation regex is needed.
 
-Per-sandbox VMs mean one image build per sandbox (each VM has its own docker daemon). That's a known cost, mitigated by the fact that sandboxes are coarse-grained — you'd typically have a small number, not one per repo. If image-rebuild cost becomes annoying, `docker save | docker load` across VMs is a follow-up; not in scope here.
+Switching sandboxes requires `colima stop && colima start --mount $NEW_SANDBOX_ROOT:w` because the VM's mount config has to change. That's a ~10s restart, acceptable for coarse-grained sandboxes you switch between rarely. The single shared profile preserves the image-build cache across all sandboxes and avoids any per-sandbox Colima namespacing.
 
 ## Unknowns / To Verify
 
-1. **Does `colima start --mount` replace or augment the default `$HOME` mount?** The whole "narrow trust surface" claim depends on `--mount` being a replacement, not additive. If it augments, we'd need an explicit way to suppress defaults. Verify by reading `colima start --help` output for the version on the user's machine, or by post-launch inspection: `colima ssh -p sandbox-<name> -- mount | grep virtiofs` should show only `$SANDBOX_ROOT`, not `$HOME` or `/Users/...`. *Affects: Phase 3 step 2; if defaults are additive, the phase needs an extra `--mount-inherit=false` (or equivalent) flag, which may not exist on all Colima versions.*
+1. **Does `colima start --mount` replace or augment the default `$HOME` mount?** The whole "narrow trust surface" claim depends on `--mount` being a replacement, not additive. If it augments, we'd need an explicit way to suppress defaults. Verify by reading `colima start --help` output for the version on the user's machine, or by post-launch inspection: `colima ssh -p claude-agent -- mount | grep virtiofs` should show only `$SANDBOX_ROOT`, not `$HOME` or `/Users/...`. *Affects: Phase 3 step 2; if defaults are additive, the phase needs an extra `--mount-inherit=false` (or equivalent) flag, which may not exist on all Colima versions.*
 
 2. **Does `docker run -v $SANDBOX/repos:$SANDBOX/repos` work without `$SANDBOX` itself being a mount target?** Docker normally creates intermediate parent dirs for mount targets, but verify behavior on Colima's daemon version specifically. Quick check: launch a throwaway container with `-v /a/b:/a/b` where `/a` doesn't exist on the host and is a fresh path; confirm `ls /a` inside the container shows only `b/`. *Affects: Phase 4 step 1.*
 
@@ -73,9 +73,9 @@ Per-sandbox VMs mean one image build per sandbox (each VM has its own docker dae
    - `mkdir -m 0700 -p "$target_path"`.
    - Create subdirs: `state/claude/`, `state/opencode/config/`, `state/opencode/data/`, `state/searxng/`, `repos/`.
    - `touch "$target_path/.sandbox"` (empty marker file).
-   - Seed `state/claude.json` with `{}` so the file mount has a valid JSON target.
-   - Seed `state/allowlist.txt` from the same default allowlist content used today at `start-agent.sh:222-511` — extract the heredoc into a helper function so init and the existing seed-on-first-run path share it. (This is technically a refactor that the simplify-start-agent plan also lists as optional Step 5; landing it here is fine.)
    - Print a "next step" message: `cd "$target_path/repos" && git clone <repo>`, then `start-agent.sh` from inside the cloned repo.
+
+   Init does **not** seed `state/allowlist.txt` or `state/claude.json`. After Phase 2 repoints `ALLOWLIST_FILE` and `CLAUDE_JSON_FILE`, the existing idempotent seed code at `start-agent.sh:234-236` (allowlist heredoc) and `start-agent.sh:928` (`echo '{}' > "$CLAUDE_JSON_FILE"`) seeds them on the first `start-agent.sh` invocation inside the sandbox. No helper extraction needed.
 
 3. Implement `find_sandbox_root()`:
    - Walk up from `$(pwd)`: at each level, test for `-f .sandbox`. Stop at `/`.
@@ -83,7 +83,7 @@ Per-sandbox VMs mean one image build per sandbox (each VM has its own docker dae
 
 4. After arg parsing (around `start-agent.sh:122` where `PROJECT_DIR` is currently resolved), call `find_sandbox_root` unconditionally. If empty, print a clear error pointing at `--init-sandbox` and `exit 1`.
 
-5. Set `SANDBOX_ROOT` and `SANDBOX_NAME=$(basename "$SANDBOX_ROOT")`. Validate `SANDBOX_NAME` matches `^[a-zA-Z0-9_-]+$` so it's safe as a Colima profile suffix.
+5. Set `SANDBOX_ROOT` and `SANDBOX_NAME=$(basename "$SANDBOX_ROOT")`. `SANDBOX_NAME` is used only in log messages, so no name-validation regex is needed.
 
 ### Acceptance criteria
 
@@ -121,22 +121,22 @@ Per-sandbox VMs mean one image build per sandbox (each VM has its own docker dae
 
 ---
 
-## Phase 3: Per-sandbox Colima profile + narrow VM mount
+## Phase 3: Narrow VM mount per active sandbox
 
 ### Steps
 
-1. Change `COLIMA_PROFILE` (currently `claude-agent` at `start-agent.sh:186`) to `sandbox-$SANDBOX_NAME`. Container name (`CONTAINER_NAME=claude-agent`) stays — each VM has its own docker namespace, so reuse is fine.
+1. `COLIMA_PROFILE` stays at `claude-agent` (`start-agent.sh:186`). Single shared profile. `CONTAINER_NAME` and `docker context use "colima-$COLIMA_PROFILE"` at `start-agent.sh:622` are unchanged.
 
 2. Modify `start_colima_vm()` at `start-agent.sh:546-555` to add `--mount "$SANDBOX_ROOT:w"` to the `colima start` invocation. This replaces the default `$HOME` mount (assuming Unknown #1 resolves as expected; if not, also add whatever flag suppresses default mounts).
 
-3. Update the `--rebuild` VM-deletion confirm prompt at `start-agent.sh:594-601`. The prompt text should reflect that deletion is now per-sandbox-scoped, not global ("Also delete and recreate the Colima VM for sandbox '$SANDBOX_NAME' (`sandbox-$SANDBOX_NAME`)?"). Less scary language is appropriate.
+3. Detect sandbox-switch on entry. Before the existing "VM already running, no-op" path, query the active VM's mount config via `colima list -j claude-agent | jq …` (verify the JSON shape against the user's Colima version). If the active mount is anything other than `$SANDBOX_ROOT`, log "switching from <old> to $SANDBOX_ROOT", `colima stop`, then fall through to the start path with the new `--mount`. If the active mount already equals `$SANDBOX_ROOT`, keep the existing no-op behavior. If the VM isn't running, just start with the new `--mount`.
 
-4. Update `docker context use "colima-$COLIMA_PROFILE"` at `start-agent.sh:622` — this already templates on the profile name, so no change needed beyond confirming the new value flows through.
+4. The `--rebuild` VM-deletion prompt at `start-agent.sh:618` already reads "Also delete and recreate the Colima VM '$COLIMA_PROFILE'?" which still describes the right action under single-profile. No copy change required. (The plan's earlier reference to `start-agent.sh:594-601` for this prompt was an off-by-some line miss; the live prompt is at 618.)
 
 ### Acceptance criteria
 
-- `colima list` after a fresh `start-agent.sh` shows a profile named `sandbox-<name>`, not `claude-agent`.
-- `colima ssh -p sandbox-<name> -- mount | grep virtiofs` shows only `$SANDBOX_ROOT` mounted; `$HOME` is not visible from inside the VM.
+- After `start-agent.sh` from a fresh sandbox, `colima ssh -p claude-agent -- mount | grep virtiofs` shows only `$SANDBOX_ROOT` mounted; `$HOME` is not visible from inside the VM.
+- After switching to a second sandbox, the VM restart picks up the new mount and the previous sandbox's path is no longer visible inside the VM. Running `start-agent.sh` again from inside the first sandbox flips back, with another VM restart.
 
 ---
 
@@ -201,12 +201,12 @@ Per-sandbox VMs mean one image build per sandbox (each VM has its own docker dae
 ### Steps
 
 1. CLAUDE.md "start-agent.sh key decisions" block (`CLAUDE.md:69-89`):
-   - Replace the "Colima, one shared VM + one shared container" line with the per-sandbox model.
+   - Update the "Colima, one shared VM + one shared container" line: still a single shared `claude-agent` profile, but the VM is now launched with `--mount $SANDBOX_ROOT:w` per active sandbox, replacing the default `$HOME` mount. Only one sandbox can be active at a time; switching restarts the VM with the new mount.
    - Replace the "Allowlist file on the host, not in the repo" line; the allowlist now lives in `$SANDBOX_ROOT/state/allowlist.txt` and is RO from inside the container.
    - Replace the "Shared `~/.claude` state with `start-claude.sh`" line; sandboxes have their own `state/claude/` and there is no longer cross-script sharing. Note this is a deliberate trade-off (lose shared auth, gain trust boundary).
    - Add a one-liner for the `--init-sandbox` UX. Reference the new ADR.
 
-2. Add ADR-033 to `ADR.md`. Title: "Per-sandbox VM and one-directory trust boundary for start-agent.sh". Body covers: the threat model (Colima default `$HOME` mount, scattered state, RW allowlist); the design (marker file, per-sandbox profile, `--mount $SANDBOX:w`, granular bind-mounts with `:ro` allowlist); rejected alternatives (per-project state under `$HOME`, sandbox-as-single-mount, dedicated macOS user); the cost (per-sandbox image rebuild, manual migration). Cross-link from ADR-006 and ADR-014 if relevant.
+2. Add ADR-033 to `ADR.md`. Title: "One-directory trust boundary for start-agent.sh". Body covers: the threat model (Colima default `$HOME` mount, scattered state, RW allowlist); the design (marker file, single shared profile with per-sandbox narrow `--mount`, granular bind-mounts with `:ro` allowlist); rejected alternatives (per-sandbox Colima profile — adds image-rebuild cost and Colima namespacing for a use case (simultaneous sandboxes) that isn't required; per-project state under `$HOME`; sandbox-as-single-mount; dedicated macOS user); the cost (only one sandbox active at a time, ~10s VM restart on switch, manual migration). Cross-link from ADR-006 and ADR-014 if relevant.
 
 3. Add a short migration recipe to CLAUDE.md (under start-agent.sh's "Making changes" section, or a new "Migrating from legacy state" subsection):
    ```
@@ -238,7 +238,7 @@ Per-sandbox VMs mean one image build per sandbox (each VM has its own docker dae
    - A short tree diagram of `~/sandboxes/default/` with `.sandbox`, `state/`, `repos/`.
    - The expected workflow: `cd ~/sandboxes/default/repos && git clone <repo> && cd <repo> && start-agent.sh`.
 
-3. If the README has a "Multiple projects" or "Per-project" subsection, replace it with a "Multiple sandboxes" note: each sandbox is its own VM, run one at a time, projects within a sandbox share auth/memory.
+3. If the README has a "Multiple projects" or "Per-project" subsection, replace it with a "Multiple sandboxes" note: only one sandbox active at a time; switching restarts the shared `claude-agent` VM with the new `--mount`; projects within a sandbox share auth/memory.
 
 ### Acceptance criteria
 
@@ -262,25 +262,25 @@ Per-sandbox VMs mean one image build per sandbox (each VM has its own docker dae
 5. End-to-end smoke test (manual, requires macOS host with Colima):
    - `start-agent.sh --init-sandbox /tmp/sb-test`.
    - `cd /tmp/sb-test/repos && git clone https://github.com/aryehj/start-claude.git && cd start-claude`.
-   - `start-agent.sh` — VM comes up, image builds, container launches.
-   - Inside the container: `cat /etc/claude-agent/allowlist.txt` (works), `echo x >> /etc/claude-agent/allowlist.txt` (fails EROFS), `ls $SANDBOX_ROOT` (only `repos/` visible), `ls $HOME` from outside the sandbox (host) is invisible from VM perspective via `colima ssh -p sandbox-sb-test -- ls $HOME` (path missing or empty).
+   - `start-agent.sh` — VM comes up with `--mount /tmp/sb-test:w`, image builds, container launches.
+   - Inside the container: `cat /etc/claude-agent/allowlist.txt` (works), `echo x >> /etc/claude-agent/allowlist.txt` (fails EROFS), `ls $SANDBOX_ROOT` (only `repos/` visible).
+   - From the host: `colima ssh -p claude-agent -- mount | grep virtiofs` lists only `/tmp/sb-test`; `colima ssh -p claude-agent -- ls $HOME` returns missing/empty.
+   - Sandbox-switch test: `start-agent.sh --init-sandbox /tmp/sb-test-2`, `cd /tmp/sb-test-2/repos && git clone …`, `start-agent.sh` — script detects the active mount is `/tmp/sb-test`, stops and restarts the VM with `--mount /tmp/sb-test-2:w`. `colima ssh -p claude-agent -- mount` confirms only the new path is visible.
    - `start-agent.sh --reload-allowlist` from the host updates tinyproxy without restarting the container.
-   - `start-agent.sh --rebuild` from the host removes the per-sandbox VM with the updated prompt copy.
+   - `start-agent.sh --rebuild` removes the `claude-agent` VM with the existing prompt copy.
 
 ### Acceptance criteria
 
 - All static checks pass.
-- The smoke test confirms (a) VM mount narrowing actually narrows, (b) allowlist is RO from inside, (c) per-sandbox VM is independent of any other Colima profile on the box.
+- The smoke test confirms (a) VM mount narrowing actually narrows, (b) allowlist is RO from inside, (c) sandbox-switch correctly stops and restarts the shared `claude-agent` VM with the new mount.
 
 ---
 
 ## Notes
 
-- **Sandbox name collisions are user responsibility.** Two sandboxes with `basename` `personal` would resolve to the same Colima profile (`sandbox-personal`). Detection of "different `$SANDBOX_ROOT` for an existing profile" would require parsing Colima's per-profile config; deferring it. Document the constraint in the ADR.
+- **Sandbox switching cost.** Switching from one sandbox to another requires `colima stop && colima start --mount $NEW:w` because the VM's mount config has to change. Roughly a 10-second restart on a warm host. Acceptable for coarse-grained sandboxes you switch between rarely. If switching becomes friction in practice, a follow-up plan could re-introduce per-sandbox Colima profiles to enable simultaneous use — but that brings back per-sandbox image-rebuild cost and Colima-namespacing complexity, so it's deliberately deferred.
 
-- **Per-sandbox image rebuild cost.** Each sandbox VM has its own docker daemon, so `claude-dev:latest` is built once per sandbox. Acceptable; sandboxes are coarse-grained. If this becomes friction, a follow-up plan could `docker save | docker load` an image tarball cached at a known host path (outside any sandbox) — but that re-introduces a host path the VM mounts, so the design needs care.
-
-- **start-claude.sh and research.py are out of scope.** `start-claude.sh` has a similar shared-`$HOME`-state pattern and could benefit from the same redesign; deferring. `research.py` already has its own Colima profile (`research`) but inherits the default `$HOME` mount; same redesign applies in principle. Both are separate plans.
+- **start-claude.sh and research.py are out of scope.** `start-claude.sh` shares the same `$HOME`-scattered-state pattern but uses Apple Containers, which has no default `$HOME` VM mount, so only the state-sharing half of this redesign would apply there. `research.py` already has its own Colima profile (`research`) but inherits the default `$HOME` mount; the full redesign applies in principle. Both are separate plans.
 
 - **No backwards-compatibility shim for `~/.claude-containers/` or `~/.claude-agent/`.** The script does not detect or migrate from those paths automatically. If a user runs the new script with the old paths still present, they're simply ignored; the manual migration recipe in CLAUDE.md is the supported path.
 
