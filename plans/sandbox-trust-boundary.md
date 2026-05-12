@@ -2,14 +2,9 @@
 
 ## Status
 
-- [ ] Phase 1: Sandbox detection + `--init-sandbox PATH`
-- [ ] Phase 2: Repoint host-state constants under `$SANDBOX/state/`
-- [ ] Phase 3: Narrow VM mount per active sandbox
-- [ ] Phase 4: Restructure `docker run` bind-mounts (allowlist `:ro`)
-- [ ] Phase 5: Help text, log messages, `--rebuild` prompt
-- [ ] Phase 6: Update CLAUDE.md + add ADR-033
-- [ ] Phase 7: Update README user walkthrough
-- [ ] Phase 8: Validate (syntax, static test, reference sweep)
+- [ ] Phase 1: Implementation (script changes in `start-agent.sh`)
+- [ ] Phase 2: Documentation (CLAUDE.md, ADR-033, README)
+- [ ] Phase 3: Validate (syntax, static test, reference sweep, smoke test)
 
 ## Context
 
@@ -52,19 +47,23 @@ Switching sandboxes requires `colima stop && colima start --mount $NEW_SANDBOX_R
 
 ## Unknowns / To Verify
 
-1. **Does `colima start --mount` replace or augment the default `$HOME` mount?** The whole "narrow trust surface" claim depends on `--mount` being a replacement, not additive. If it augments, we'd need an explicit way to suppress defaults. Verify by reading `colima start --help` output for the version on the user's machine, or by post-launch inspection: `colima ssh -p claude-agent -- mount | grep virtiofs` should show only `$SANDBOX_ROOT`, not `$HOME` or `/Users/...`. *Affects: Phase 3 step 2; if defaults are additive, the phase needs an extra `--mount-inherit=false` (or equivalent) flag, which may not exist on all Colima versions.*
+1. **Does `colima start --mount` replace or augment the default `$HOME` mount?** The whole "narrow trust surface" claim depends on `--mount` being a replacement, not additive. If it augments, we'd need an explicit way to suppress defaults. Verify by reading `colima start --help` output for the version on the user's machine, or by post-launch inspection: `colima ssh -p claude-agent -- mount | grep virtiofs` should show only `$SANDBOX_ROOT`, not `$HOME` or `/Users/...`. *Affects: Phase 1, "Narrow VM mount" subsection; if defaults are additive, that subsection needs an extra `--mount-inherit=false` (or equivalent) flag, which may not exist on all Colima versions.*
 
-2. **Does `docker run -v $SANDBOX/repos:$SANDBOX/repos` work without `$SANDBOX` itself being a mount target?** Docker normally creates intermediate parent dirs for mount targets, but verify behavior on Colima's daemon version specifically. Quick check: launch a throwaway container with `-v /a/b:/a/b` where `/a` doesn't exist on the host and is a fresh path; confirm `ls /a` inside the container shows only `b/`. *Affects: Phase 4 step 1.*
+2. **Does `docker run -v $SANDBOX/repos:$SANDBOX/repos` work without `$SANDBOX` itself being a mount target?** Docker normally creates intermediate parent dirs for mount targets, but verify behavior on Colima's daemon version specifically. Quick check: launch a throwaway container with `-v /a/b:/a/b` where `/a` doesn't exist on the host and is a fresh path; confirm `ls /a` inside the container shows only `b/`. *Affects: Phase 1, "Restructure docker run bind-mounts" subsection.*
 
-3. **Is `/etc/claude-agent/` writable in the image as it stands?** The Dockerfile at `dockerfiles/claude-agent.Dockerfile` may or may not create this directory. Bind-mounting a file at `/etc/claude-agent/allowlist.txt` requires the parent dir to be writable enough that docker can create the mount point — usually fine on `tmpfs`-style overlays but worth checking. If not, add a `RUN mkdir -p /etc/claude-agent` to the Dockerfile. *Affects: Phase 4 step 1; possibly Dockerfile.*
+3. **Is `/etc/claude-agent/` writable in the image as it stands?** The Dockerfile at `dockerfiles/claude-agent.Dockerfile` may or may not create this directory. Bind-mounting a file at `/etc/claude-agent/allowlist.txt` requires the parent dir to be writable enough that docker can create the mount point — usually fine on `tmpfs`-style overlays but worth checking. If not, add a `RUN mkdir -p /etc/claude-agent` to the Dockerfile. *Affects: Phase 1, "Restructure docker run bind-mounts" subsection; possibly Dockerfile.*
 
 4. **Does OpenCode tolerate `state/opencode/config` being writable but containing a host-side path that may have been edited mid-session?** Pre-redesign behavior is identical (RW), so the answer is "yes, this is current behavior." Not a real unknown — flagged only to confirm we're not regressing anything. No verification needed.
 
 ---
 
-## Phase 1: Sandbox detection + `--init-sandbox PATH`
+## Phase 1: Implementation
 
-### Steps
+All script changes in `start-agent.sh`. Five subsections grouped under one phase because they're inseparable — none ships independently of the others.
+
+### Sandbox detection + `--init-sandbox PATH`
+
+**Steps:**
 
 1. Add `--init-sandbox PATH` to the argparse loop at `start-agent.sh:92-120`. Treat it as a one-shot operation: when set, perform the init and `exit 0` before any VM/container logic runs.
 
@@ -75,7 +74,7 @@ Switching sandboxes requires `colima stop && colima start --mount $NEW_SANDBOX_R
    - `touch "$target_path/.sandbox"` (empty marker file).
    - Print a "next step" message: `cd "$target_path/repos" && git clone <repo>`, then `start-agent.sh` from inside the cloned repo.
 
-   Init does **not** seed `state/allowlist.txt` or `state/claude.json`. After Phase 2 repoints `ALLOWLIST_FILE` and `CLAUDE_JSON_FILE`, the existing idempotent seed code at `start-agent.sh:234-236` (allowlist heredoc) and `start-agent.sh:928` (`echo '{}' > "$CLAUDE_JSON_FILE"`) seeds them on the first `start-agent.sh` invocation inside the sandbox. No helper extraction needed.
+   Init does **not** seed `state/allowlist.txt` or `state/claude.json`. After the repointing step below, the existing idempotent seed code at `start-agent.sh:234-236` (allowlist heredoc) and `start-agent.sh:928` (`echo '{}' > "$CLAUDE_JSON_FILE"`) seeds them on the first `start-agent.sh` invocation inside the sandbox. No helper extraction needed.
 
 3. Implement `find_sandbox_root()`:
    - Walk up from `$(pwd)`: at each level, test for `-f .sandbox`. Stop at `/`.
@@ -85,16 +84,14 @@ Switching sandboxes requires `colima stop && colima start --mount $NEW_SANDBOX_R
 
 5. Set `SANDBOX_ROOT` and `SANDBOX_NAME=$(basename "$SANDBOX_ROOT")`. `SANDBOX_NAME` is used only in log messages, so no name-validation regex is needed.
 
-### Acceptance criteria
+**Acceptance:**
 
 - Running `start-agent.sh` outside any sandbox prints the remediation message and exits non-zero, without starting Colima.
-- `start-agent.sh --init-sandbox /tmp/sb-test` creates the directory tree, marker, and seed files; running `start-agent.sh --init-sandbox /tmp/sb-test` again refuses (path exists).
+- `start-agent.sh --init-sandbox /tmp/sb-test` creates the directory tree and marker file; running it again refuses (path exists).
 
----
+### Repoint host-state constants under `$SANDBOX/state/`
 
-## Phase 2: Repoint host-state constants under `$SANDBOX/state/`
-
-### Steps
+**Steps:**
 
 1. In the constants block at `start-agent.sh:185-201`, replace:
    - `CLAUDE_CONFIG_DIR` → `$SANDBOX_ROOT/state/claude`
@@ -108,22 +105,20 @@ Switching sandboxes requires `colima stop && colima start --mount $NEW_SANDBOX_R
 
 2. Audit downstream uses of these constants (state-dir creation at `start-agent.sh:907`, `mkdir -p` calls, the SearXNG seed at `start-agent.sh:695-728`, the global CLAUDE.md / AGENTS.md seed at `start-agent.sh:910-949`, the OpenCode config write at `start-agent.sh:978-1116`, the skills-sync `dest=$CLAUDE_CONFIG_DIR/skills` at `start-agent.sh:1121`). All should still resolve correctly with the new values; no logic changes needed beyond confirming the path strings.
 
-3. Replace the old `mkdir -p "$ALLOWLIST_DIR"` at `start-agent.sh:222` with the new state-dir-creation block (most of which moves to `init_sandbox` from Phase 1; the runtime path can assume the dirs already exist and just `mkdir -p` defensively).
+3. Replace the old `mkdir -p "$ALLOWLIST_DIR"` at `start-agent.sh:222` with the new state-dir-creation block (most of which moves to `init_sandbox`; the runtime path can assume the dirs already exist and just `mkdir -p` defensively).
 
 4. Validate `PROJECT_DIR` (resolved at `start-agent.sh:122-123` from `${POSITIONAL[0]:-$(pwd)}`):
    - After resolving to an absolute path, require `$PROJECT_DIR` to be inside `$SANDBOX_ROOT/repos/` (string-prefix check). Reject otherwise with: "PROJECT_DIR ($PROJECT_DIR) must be a subdirectory of $SANDBOX_ROOT/repos/."
    - This forecloses running from `$SANDBOX_ROOT` itself, from `$SANDBOX_ROOT/state/`, or from anywhere outside the sandbox tree.
 
-### Acceptance criteria
+**Acceptance:**
 
 - All `$HOME/.claude-containers/` and `$HOME/.claude-agent/` references in `start-agent.sh` are gone (verify by grep).
 - Running `start-agent.sh` from `$SANDBOX_ROOT/state/` rejects with a clear message; running from `$SANDBOX_ROOT/repos/foo` proceeds.
 
----
+### Narrow VM mount per active sandbox
 
-## Phase 3: Narrow VM mount per active sandbox
-
-### Steps
+**Steps:**
 
 1. `COLIMA_PROFILE` stays at `claude-agent` (`start-agent.sh:186`). Single shared profile. `CONTAINER_NAME` and `docker context use "colima-$COLIMA_PROFILE"` at `start-agent.sh:622` are unchanged.
 
@@ -131,18 +126,16 @@ Switching sandboxes requires `colima stop && colima start --mount $NEW_SANDBOX_R
 
 3. Detect sandbox-switch on entry. Before the existing "VM already running, no-op" path, query the active VM's mount config via `colima list -j claude-agent | jq …` (verify the JSON shape against the user's Colima version). If the active mount is anything other than `$SANDBOX_ROOT`, log "switching from <old> to $SANDBOX_ROOT", `colima stop`, then fall through to the start path with the new `--mount`. If the active mount already equals `$SANDBOX_ROOT`, keep the existing no-op behavior. If the VM isn't running, just start with the new `--mount`.
 
-4. The `--rebuild` VM-deletion prompt at `start-agent.sh:618` already reads "Also delete and recreate the Colima VM '$COLIMA_PROFILE'?" which still describes the right action under single-profile. No copy change required. (The plan's earlier reference to `start-agent.sh:594-601` for this prompt was an off-by-some line miss; the live prompt is at 618.)
+4. The `--rebuild` VM-deletion prompt at `start-agent.sh:618` already reads "Also delete and recreate the Colima VM '$COLIMA_PROFILE'?" which still describes the right action under single-profile. No copy change required.
 
-### Acceptance criteria
+**Acceptance:**
 
 - After `start-agent.sh` from a fresh sandbox, `colima ssh -p claude-agent -- mount | grep virtiofs` shows only `$SANDBOX_ROOT` mounted; `$HOME` is not visible from inside the VM.
 - After switching to a second sandbox, the VM restart picks up the new mount and the previous sandbox's path is no longer visible inside the VM. Running `start-agent.sh` again from inside the first sandbox flips back, with another VM restart.
 
----
+### Restructure `docker run` bind-mounts (allowlist `:ro`)
 
-## Phase 4: Restructure `docker run` bind-mounts (allowlist `:ro`)
-
-### Steps
+**Steps:**
 
 1. Replace the mount block at `start-agent.sh:1267-1271` with:
    ```
@@ -159,16 +152,14 @@ Switching sandboxes requires `colima stop && colima start --mount $NEW_SANDBOX_R
 
 3. If Unknown #3 confirms `/etc/claude-agent/` does not exist in the image, add `RUN mkdir -p /etc/claude-agent` to `dockerfiles/claude-agent.Dockerfile`. Otherwise leave the Dockerfile untouched.
 
-### Acceptance criteria
+**Acceptance:**
 
 - Inside the running container, `cat /etc/claude-agent/allowlist.txt` succeeds; `echo x >> /etc/claude-agent/allowlist.txt` fails with EROFS.
 - Inside the running container, `ls $SANDBOX_ROOT` shows only `repos/` (not `state/` or `.sandbox`).
 
----
+### Help text, log messages, `--rebuild` prompt
 
-## Phase 5: Help text, log messages, `--rebuild` prompt
-
-### Steps
+**Steps:**
 
 1. Rewrite the `usage()` block at `start-agent.sh:37-90`:
    - Top-of-file comment: replace the "shared VM + shared container" framing with the per-sandbox model. Note the trust boundary explicitly.
@@ -189,16 +180,18 @@ Switching sandboxes requires `colima stop && colima start --mount $NEW_SANDBOX_R
 
 4. Update the seed/reseed messages around `start-agent.sh:512-517` (allowlist seed) — paths in the messages now reference the sandbox.
 
-### Acceptance criteria
+**Acceptance:**
 
 - `start-agent.sh --help` mentions `--init-sandbox`, the trust boundary, and `$SANDBOX_ROOT/state/allowlist.txt`.
 - No help text or log message references `~/.claude-containers/` or `~/.claude-agent/`.
 
 ---
 
-## Phase 6: Update CLAUDE.md + add ADR-033
+## Phase 2: Documentation
 
-### Steps
+### CLAUDE.md decisions block + ADR-033
+
+**Steps:**
 
 1. CLAUDE.md "start-agent.sh key decisions" block (`CLAUDE.md:69-89`):
    - Update the "Colima, one shared VM + one shared container" line: still a single shared `claude-agent` profile, but the VM is now launched with `--mount $SANDBOX_ROOT:w` per active sandbox, replacing the default `$HOME` mount. Only one sandbox can be active at a time; switching restarts the VM with the new mount.
@@ -220,16 +213,14 @@ Switching sandboxes requires `colima stop && colima start --mount $NEW_SANDBOX_R
    # Once verified:   rm -rf ~/.claude-containers ~/.claude-agent
    ```
 
-### Acceptance criteria
+**Acceptance:**
 
 - CLAUDE.md no longer claims state is shared with `start-claude.sh` from `start-agent.sh`'s perspective.
 - ADR-033 exists and is the highest-numbered ADR.
 
----
+### README user walkthrough
 
-## Phase 7: Update README user walkthrough
-
-### Steps
+**Steps:**
 
 1. Skim the existing README sections that reference start-agent.sh (search for "start-agent" and the legacy paths). Update any path references to be sandbox-relative.
 
@@ -240,16 +231,16 @@ Switching sandboxes requires `colima stop && colima start --mount $NEW_SANDBOX_R
 
 3. If the README has a "Multiple projects" or "Per-project" subsection, replace it with a "Multiple sandboxes" note: only one sandbox active at a time; switching restarts the shared `claude-agent` VM with the new `--mount`; projects within a sandbox share auth/memory.
 
-### Acceptance criteria
+**Acceptance:**
 
 - README's start-agent.sh walkthrough starts with `--init-sandbox`.
 - No README path references `~/.claude-containers/` or `~/.claude-agent/`.
 
 ---
 
-## Phase 8: Validate (syntax, static test, reference sweep)
+## Phase 3: Validate
 
-### Steps
+**Steps:**
 
 1. `bash -n start-agent.sh` — must pass.
 
@@ -269,7 +260,7 @@ Switching sandboxes requires `colima stop && colima start --mount $NEW_SANDBOX_R
    - `start-agent.sh --reload-allowlist` from the host updates tinyproxy without restarting the container.
    - `start-agent.sh --rebuild` removes the `claude-agent` VM with the existing prompt copy.
 
-### Acceptance criteria
+**Acceptance:**
 
 - All static checks pass.
 - The smoke test confirms (a) VM mount narrowing actually narrows, (b) allowlist is RO from inside, (c) sandbox-switch correctly stops and restarts the shared `claude-agent` VM with the new mount.
