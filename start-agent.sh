@@ -866,7 +866,12 @@ fi
 if ! vm_ssh dpkg-query -W -f='${Status}' tinyproxy 2>/dev/null | grep -q "install ok installed"; then
   echo "==> Installing tinyproxy in Colima VM"
   vm_ssh sudo apt-get update -qq
-  vm_ssh sudo apt-get install -y tinyproxy
+  # DEBIAN_FRONTEND=noninteractive + --force-confnew handles the case where a
+  # previous run wrote /etc/tinyproxy/tinyproxy.conf before the package was
+  # installed: dpkg would otherwise prompt about the existing conffile and
+  # fail over non-interactive ssh. We rewrite the conffile below anyway.
+  vm_ssh sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    -o Dpkg::Options::=--force-confnew tinyproxy
   vm_ssh sudo systemctl daemon-reload
 fi
 
@@ -1326,10 +1331,6 @@ path = sys.argv[1]
 with open(path) as f:
     data = json.load(f)
 changed = False
-if 'theme' not in data:
-    data['theme'] = 'light'
-    changed = True
-    print(f"==> Added theme:light to {path}")
 sb = data.setdefault('sandbox', {})
 if sb.get('enabled') is not False:
     sb['enabled'] = False
@@ -1349,7 +1350,6 @@ else
   mkdir -p "$PROJECT_DIR/.claude"
   cat > "$PROJECT_SETTINGS_FILE" << 'JSONEOF'
 {
-  "theme": "light",
   "sandbox": {
     "enabled": false
   }

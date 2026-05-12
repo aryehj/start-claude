@@ -93,10 +93,6 @@ path = sys.argv[1]
 with open(path) as f:
     data = json.load(f)
 changed = False
-if 'theme' not in data:
-    data['theme'] = 'light'
-    changed = True
-    print(f"==> Added theme:light to {path}")
 if isinstance(data.get('sandbox'), bool):
     data['sandbox'] = {"enabled": True, "autoAllowBashIfSandboxed": True}
     changed = True
@@ -126,7 +122,6 @@ else
   mkdir -p "$PROJECT_DIR/.claude"
   cat > "$PROJECT_SETTINGS_FILE" << 'JSONEOF'
 {
-  "theme": "light",
   "sandbox": {
     "enabled": true,
     "autoAllowBashIfSandboxed": true,

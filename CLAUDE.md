@@ -63,7 +63,7 @@ If the named container already exists, it just starts and re-attaches it.
 - **`showThinkingSummaries` is enabled in global user settings.** Merged into `~/.claude/settings.json` on startup; makes Claude Code's thinking visible in the transcript.
 - **`effortLevel` is intentionally unpinned.** Use `/effort` or project-level `settings.local.json` for situational overrides. See ADR-017.
 - **Sandbox is configured in strict mode.** `sandbox.failIfUnavailable: true` and `sandbox.allowUnsandboxedCommands: false` in project `settings.local.json`; migration block adds these to existing files.
-- **Theme is set at the project level, not globally.** Light theme in `settings.local.json` avoids needing to merge `.claude.json` across container lifecycles. See ADR-003.
+- **Theme is not set by the script.** Claude Code prompts on first run and persists the choice to `~/.claude.json` (shared across containers via the bind-mount). See ADR-003.
 
 ## start-agent.sh key decisions
 
