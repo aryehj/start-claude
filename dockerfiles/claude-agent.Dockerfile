@@ -44,18 +44,11 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
  && ln -sf /root/.local/bin/claude /usr/local/bin/claude \
  && echo 'export PATH="$HOME/.local/bin:$PATH"' >> /root/.bashrc
 
-# ── OpenCode CLI ─────────────────────────────────────────────────────────────
-# Installed via the official npm package (opencode-ai). Keeps the install in
-# lockstep with the npm version the user would get on the host and avoids a
-# separate curl-pipe installer. The binary is named `opencode`.
-RUN npm install -g opencode-ai@latest
-
-# ── Pi CLI ───────────────────────────────────────────────────────────────────
-# Pi (pi.dev) is a Node-based agentic coding CLI from the pi-mono repo.
-# Installed via the canonical npm package (@earendil-works/pi-coding-agent).
-# The binary is named `pi`. Requires Node >=22.19.0; setup_lts.x installs
-# Node 22.x LTS which satisfies this floor.
-RUN npm install -g @earendil-works/pi-coding-agent@latest
+# ── OpenCode + Pi CLIs ───────────────────────────────────────────────────────
+# Both shipped as canonical npm packages: opencode-ai (binary `opencode`) and
+# @earendil-works/pi-coding-agent (binary `pi`, requires Node >=22.19.0 which
+# setup_lts.x satisfies). Installed in one layer so npm bootstraps once.
+RUN npm install -g opencode-ai@latest @earendil-works/pi-coding-agent@latest
 
 # ── SearXNG MCP shim ─────────────────────────────────────────────────────────
 # ~40-line FastMCP wrapper that exposes a single `websearch` tool backed by a

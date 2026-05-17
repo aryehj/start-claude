@@ -189,6 +189,7 @@ start-agent.sh
     opencode/
       config/        — OpenCode config (/root/.config/opencode)
       data/          — OpenCode data (/root/.local/share/opencode)
+    pi/              — Pi state (/root/.pi): auth, models, settings
     allowlist.txt    — egress domain allowlist (read-only inside the container)
     searxng/         — SearXNG config
   projects/          — your repos go here

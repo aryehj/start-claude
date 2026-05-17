@@ -1259,11 +1259,8 @@ with open(path, 'w') as f:
 PYEOF
 
 # ── inject pi config (inference provider) ────────────────────────────────────
-# Writes $PI_CONFIG_DIR/agent/models.json  — providers map with a "local"
-# entry pointing at the active Ollama/omlx backend, with discovered models.
-# Writes $PI_CONFIG_DIR/agent/settings.json — defaultProvider + defaultModel.
-# Like the opencode block above, re-runs every invocation so model lists stay
-# fresh and existing sandboxes get the pi dir backfilled automatically.
+# Re-runs every invocation so model lists stay fresh and existing sandboxes
+# get backfilled without --init-sandbox.
 PI_MODELS_FILE="$PI_CONFIG_DIR/agent/models.json"
 PI_SETTINGS_FILE="$PI_CONFIG_DIR/agent/settings.json"
 python3 - \
@@ -1356,13 +1353,12 @@ else:
     print(f"[pi-config] no {backend} models discovered; preserving existing models list "
           f"({len(entry.get('models', []))} entries)", file=sys.stderr)
 
-os.makedirs(os.path.dirname(models_path), exist_ok=True)
 with open(models_path, 'w') as f:
     json.dump(models_data, f, indent=2)
     f.write('\n')
 
-# Select default model: env override wins; otherwise reset to local when the
-# persisted selection isn't from the active local provider (stale cloud choice).
+# Env override wins; otherwise reset to local when the persisted selection
+# isn't from the active local provider (stale cloud choice).
 existing_provider = settings_data.get("defaultProvider", "")
 existing_model    = settings_data.get("defaultModel", "")
 current_model_ids = [m["id"] for m in entry.get("models", [])]

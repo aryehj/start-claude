@@ -6,9 +6,9 @@ _TEXT = DOCKERFILE.read_text()
 
 
 def test_pi_installed_via_npm():
-    assert "npm install -g @earendil-works/pi-coding-agent" in _TEXT, (
-        "pi CLI not installed in Dockerfile; expected: "
-        "npm install -g @earendil-works/pi-coding-agent@latest"
+    assert "@earendil-works/pi-coding-agent@latest" in _TEXT, (
+        "pi CLI not installed in Dockerfile; expected "
+        "@earendil-works/pi-coding-agent@latest in an `npm install -g` line"
     )
 
 

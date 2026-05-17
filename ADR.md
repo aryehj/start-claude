@@ -2153,3 +2153,55 @@ both the new and existing plan formats.
   load-bearing, a path the implementer cannot derive) are decisions
   disguised as artifacts. The Rule is applied per-block via the
   "implementer could derive it" test; expect judgment calls at the edges.
+
+## ADR-036: Pi CLI integration in `start-agent.sh`
+
+**Date:** 2026-05-17
+**Status:** Accepted
+
+### Context
+
+`start-agent.sh` already provisions OpenCode alongside Claude Code. Pi
+(`@earendil-works/pi-coding-agent`) is a second agentic coding CLI with a
+different config schema: providers live in `~/.pi/agent/models.json` and the
+active default is a separate `~/.pi/agent/settings.json`. Adding Pi follows
+the same multi-CLI pattern established for OpenCode but requires adapting the
+probe-and-discover injection to the split-file config layout.
+
+### Decision
+
+1. **Install via npm in `claude-agent.Dockerfile`.** Same layer as OpenCode
+   (`npm install -g @earendil-works/pi-coding-agent@latest`); binary is `pi`.
+
+2. **State at `$SANDBOX_ROOT/.sandbox_config/pi/`, bind-mounted to `/root/.pi`.**
+   Mirrors the OpenCode mount pattern. `init_sandbox()` creates `pi/` on
+   `--init-sandbox`; the per-invocation `mkdir -p` line backfills existing
+   sandboxes automatically.
+
+3. **Config injection rewrites both `models.json` and `settings.json`.**
+   A separate Python heredoc (not merged into the OpenCode block) writes a
+   `local` provider entry into `models.json` using the same probe-and-discover
+   logic, then writes `defaultProvider`/`defaultModel` to `settings.json`.
+   The split is necessary because Pi separates provider definitions from the
+   active selection across two files.
+
+4. **`CLAUDE_AGENT_DEFAULT_MODEL` drives Pi's default model; plan/exec/small
+   vars remain OpenCode-only.** Pi has no multi-mode agent split, so a single
+   default-model env var is sufficient. Reusing the existing variable keeps the
+   surface area minimal.
+
+5. **Cloud provider auth via env forwarding only.** Pi reads `ANTHROPIC_API_KEY`,
+   `OPENAI_API_KEY`, etc. directly from process env. The script already forwards
+   these from the host; no additional plumbing is needed for cloud providers.
+
+### Consequences
+
+- `pi` is on `$PATH` inside the container; first-run fresh sandboxes are
+  pre-configured with a local provider pointing at the active backend.
+- Existing sandboxes pick up `.sandbox_config/pi/` on next invocation without
+  any user action.
+- Pi's compat block (`supportsDeveloperRole: false`, `supportsReasoningEffort:
+  false`) is hardcoded for OpenAI-compatible endpoints — if Pi's schema evolves,
+  the injection script must be updated.
+- MCP / SearXNG integration with Pi is out of scope; Pi gets local inference
+  and auth-state persistence only.

@@ -169,30 +169,53 @@ def test_init_sandbox_creates_pi_dir():
 def test_pi_dir_created_every_invocation():
     # PI_CONFIG_DIR/agent must be in the mkdir -p that runs on every invocation
     # so existing sandboxes are backfilled without --init-sandbox.
-    assert "PI_CONFIG_DIR/agent" in _SCRIPT_TEXT or '"$PI_CONFIG_DIR/agent"' in _SCRIPT_TEXT, (
-        "$PI_CONFIG_DIR/agent not in the every-invocation mkdir -p block; "
+    import re
+    mkdir_lines = [
+        line for line in _SCRIPT_TEXT.splitlines()
+        if re.match(r"\s*mkdir -p ", line) and "PI_CONFIG_DIR/agent" in line
+    ]
+    assert mkdir_lines, (
+        "$PI_CONFIG_DIR/agent not in any every-invocation `mkdir -p` line; "
         "existing sandboxes won't get the pi dir automatically"
     )
 
 
+# The pi-config injection lives in a single python3 heredoc. Scoping the
+# write-side assertions to that heredoc prevents them from passing on
+# unrelated mentions of "models.json" / "settings.json" elsewhere in the script.
+def _pi_inject_block():
+    marker = "inject pi config"
+    start = _SCRIPT_TEXT.find(marker)
+    assert start != -1, "pi config injection block not found"
+    # Skip the opening "<< 'PYEOF'" tag and locate the closing PYEOF on its own line.
+    open_tag = _SCRIPT_TEXT.find("<< 'PYEOF'", start)
+    assert open_tag != -1, "pi config injection heredoc opener not found"
+    end = _SCRIPT_TEXT.find("\nPYEOF", open_tag)
+    assert end != -1, "pi config injection block not terminated"
+    return _SCRIPT_TEXT[start:end]
+
+
 def test_pi_config_injection_writes_models_json():
-    assert "models.json" in _SCRIPT_TEXT, (
-        "pi config injection does not write models.json"
+    block = _pi_inject_block()
+    assert "models_path" in block and "open(models_path, 'w')" in block, (
+        "pi config injection does not open models.json for write"
     )
 
 
 def test_pi_config_injection_writes_settings_json():
-    assert "settings.json" in _SCRIPT_TEXT, (
-        "pi config injection does not write settings.json"
+    block = _pi_inject_block()
+    assert "settings_path" in block and "open(settings_path, 'w')" in block, (
+        "pi config injection does not open settings.json for write"
     )
 
 
 def test_pi_config_injection_uses_correct_settings_keys():
-    assert "defaultProvider" in _SCRIPT_TEXT, (
-        "pi config injection missing 'defaultProvider' key in settings.json"
+    block = _pi_inject_block()
+    assert '"defaultProvider"' in block, (
+        "pi config injection missing 'defaultProvider' key write"
     )
-    assert "defaultModel" in _SCRIPT_TEXT, (
-        "pi config injection missing 'defaultModel' key in settings.json"
+    assert '"defaultModel"' in block, (
+        "pi config injection missing 'defaultModel' key write"
     )
 
 
