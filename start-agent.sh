@@ -95,6 +95,7 @@ SANDBOX LAYOUT:
       claude/                 — ~/.claude state (auth, settings, memory)
       claude.json             — ~/.claude.json OAuth state
       opencode/{config,data}/ — OpenCode config and data dirs
+      pi/                     — Pi (~/.pi) state (auth, models, settings)
       searxng/                — SearXNG settings
     projects/                 — your work (the only RW path visible inside the container)
 
@@ -186,6 +187,7 @@ init_sandbox() {
     "$target/.sandbox_config/claude" \
     "$target/.sandbox_config/opencode/config" \
     "$target/.sandbox_config/opencode/data" \
+    "$target/.sandbox_config/pi" \
     "$target/.sandbox_config/searxng" \
     "$target/projects"
   echo "==> Sandbox created at $target"
@@ -306,6 +308,7 @@ CLAUDE_CONFIG_DIR="$SANDBOX_ROOT/.sandbox_config/claude"
 CLAUDE_JSON_FILE="$SANDBOX_ROOT/.sandbox_config/claude.json"
 OPENCODE_CONFIG_DIR="$SANDBOX_ROOT/.sandbox_config/opencode/config"
 OPENCODE_DATA_DIR="$SANDBOX_ROOT/.sandbox_config/opencode/data"
+PI_CONFIG_DIR="$SANDBOX_ROOT/.sandbox_config/pi"
 ALLOWLIST_FILE="$SANDBOX_ROOT/.sandbox_config/allowlist.txt"
 TINYPROXY_PORT=8888
 SEARXNG_CONTAINER="searxng"
@@ -1044,7 +1047,7 @@ else
 fi
 
 # ── host-side persistent state dirs ──────────────────────────────────────────
-mkdir -p "$CLAUDE_CONFIG_DIR" "$OPENCODE_CONFIG_DIR" "$OPENCODE_DATA_DIR"
+mkdir -p "$CLAUDE_CONFIG_DIR" "$OPENCODE_CONFIG_DIR" "$OPENCODE_DATA_DIR" "$PI_CONFIG_DIR/agent"
 [[ -f "$CLAUDE_JSON_FILE" ]] || echo '{}' > "$CLAUDE_JSON_FILE"
 
 # ── seed global container CLAUDE.md ──────────────────────────────────────────
@@ -1255,6 +1258,133 @@ with open(path, 'w') as f:
     f.write('\n')
 PYEOF
 
+# ── inject pi config (inference provider) ────────────────────────────────────
+# Writes $PI_CONFIG_DIR/agent/models.json  — providers map with a "local"
+# entry pointing at the active Ollama/omlx backend, with discovered models.
+# Writes $PI_CONFIG_DIR/agent/settings.json — defaultProvider + defaultModel.
+# Like the opencode block above, re-runs every invocation so model lists stay
+# fresh and existing sandboxes get the pi dir backfilled automatically.
+PI_MODELS_FILE="$PI_CONFIG_DIR/agent/models.json"
+PI_SETTINGS_FILE="$PI_CONFIG_DIR/agent/settings.json"
+python3 - \
+  "$PI_MODELS_FILE" \
+  "$PI_SETTINGS_FILE" \
+  "$BACKEND" \
+  "http://$HOST_IP:$INFERENCE_PORT/v1" \
+  "http://127.0.0.1:$INFERENCE_PORT/v1,http://$HOST_IP:$INFERENCE_PORT/v1" \
+  "${OMLX_API_KEY:-}" \
+  "${CLAUDE_AGENT_DEFAULT_MODEL:-}" \
+  << 'PYEOF'
+import json, os, sys, urllib.request, urllib.error
+models_path   = sys.argv[1]
+settings_path = sys.argv[2]
+backend       = sys.argv[3]
+runtime_url   = sys.argv[4]
+probe_urls    = [u for u in sys.argv[5].split(',') if u]
+api_key       = sys.argv[6] if len(sys.argv) > 6 else ""
+default_model_override = sys.argv[7] if len(sys.argv) > 7 else ""
+
+if os.path.exists(models_path):
+    with open(models_path) as f:
+        try:
+            models_data = json.load(f)
+        except json.JSONDecodeError:
+            models_data = {}
+else:
+    models_data = {}
+
+if os.path.exists(settings_path):
+    with open(settings_path) as f:
+        try:
+            settings_data = json.load(f)
+        except json.JSONDecodeError:
+            settings_data = {}
+else:
+    settings_data = {}
+
+def discover_models():
+    """Try each probe URL in order; return (list_of_model_ids, working_url) or ([], None)."""
+    last_err = None
+    for base in probe_urls:
+        try:
+            if backend == "omlx":
+                url = base + "/models"
+                req = urllib.request.Request(url)
+                if api_key:
+                    req.add_header("Authorization", f"Bearer {api_key}")
+            elif backend == "ollama":
+                url = base.replace("/v1", "/api/tags")
+                req = urllib.request.Request(url)
+            else:
+                return [], None
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                body = json.loads(resp.read())
+                if backend == "omlx":
+                    return ([m["id"] for m in body.get("data", [])], base)
+                if backend == "ollama":
+                    return ([m["name"] for m in body.get("models", [])], base)
+        except Exception as e:
+            last_err = e
+            continue
+    if last_err is not None:
+        print(f"[pi-config] discovery failed across {probe_urls}: {last_err}", file=sys.stderr)
+    return [], None
+
+providers = models_data.setdefault("providers", {})
+provider_key = "local"
+
+entry = providers.setdefault(provider_key, {})
+entry["name"] = "Local (Ollama)" if backend == "ollama" else "Local (omlx)"
+entry["baseUrl"] = runtime_url
+entry["api"] = "openai-completions"
+if backend == "ollama":
+    entry["apiKey"] = "ollama"
+elif backend == "omlx" and api_key:
+    entry["apiKey"] = api_key
+else:
+    entry.setdefault("apiKey", "omlx")
+entry["compat"] = {
+    "supportsDeveloperRole": False,
+    "supportsReasoningEffort": False,
+}
+
+discovered, working_url = discover_models()
+if discovered:
+    entry["models"] = [{"id": m} for m in discovered]
+    print(f"[pi-config] discovered {len(discovered)} {backend} models via {working_url}", file=sys.stderr)
+else:
+    print(f"[pi-config] no {backend} models discovered; preserving existing models list "
+          f"({len(entry.get('models', []))} entries)", file=sys.stderr)
+
+os.makedirs(os.path.dirname(models_path), exist_ok=True)
+with open(models_path, 'w') as f:
+    json.dump(models_data, f, indent=2)
+    f.write('\n')
+
+# Select default model: env override wins; otherwise reset to local when the
+# persisted selection isn't from the active local provider (stale cloud choice).
+existing_provider = settings_data.get("defaultProvider", "")
+existing_model    = settings_data.get("defaultModel", "")
+current_model_ids = [m["id"] for m in entry.get("models", [])]
+
+if default_model_override:
+    chosen_provider = provider_key
+    chosen_model    = default_model_override
+elif current_model_ids and (not existing_model or existing_provider != provider_key):
+    chosen_provider = provider_key
+    chosen_model    = current_model_ids[0]
+else:
+    chosen_provider = existing_provider
+    chosen_model    = existing_model
+
+if chosen_provider or chosen_model:
+    settings_data["defaultProvider"] = chosen_provider
+    settings_data["defaultModel"]    = chosen_model
+    with open(settings_path, 'w') as f:
+        json.dump(settings_data, f, indent=2)
+        f.write('\n')
+PYEOF
+
 # ── skills sync (new-container path only) ────────────────────────────────────
 sync_skills() {
   local url="${CLAUDE_SKILLS_ARCHIVE_URL:-https://github.com/aryehj/start-claude/archive/refs/heads/main.tar.gz}"
@@ -1414,6 +1544,7 @@ exec docker run \
   -v "$CLAUDE_JSON_FILE:/root/.claude.json" \
   -v "$OPENCODE_CONFIG_DIR:/root/.config/opencode" \
   -v "$OPENCODE_DATA_DIR:/root/.local/share/opencode" \
+  -v "$PI_CONFIG_DIR:/root/.pi" \
   -v "$ALLOWLIST_FILE:/etc/claude-agent/allowlist.txt:ro" \
   -w "$PROJECT_DIR" \
   "${DOCKER_ENV_ARGS[@]}" \

@@ -136,3 +136,69 @@ def test_allowlist_mounted_ro():
     assert "/etc/claude-agent/allowlist.txt" in agent_block, (
         "allowlist not mounted at /etc/claude-agent/allowlist.txt in docker run block"
     )
+
+
+# ── pi integration invariants ─────────────────────────────────────────────────
+
+def test_pi_config_dir_variable_present():
+    assert "PI_CONFIG_DIR" in _SCRIPT_TEXT, (
+        "PI_CONFIG_DIR variable missing from start-agent.sh"
+    )
+
+
+def test_init_sandbox_creates_pi_dir():
+    # init_sandbox() must create the pi state directory so fresh sandboxes
+    # get the directory without needing --init-sandbox to be re-run.
+    lines = _SCRIPT_TEXT.splitlines()
+    in_init_sandbox = False
+    found = False
+    for line in lines:
+        if "init_sandbox()" in line:
+            in_init_sandbox = True
+        if in_init_sandbox and "sandbox_config/pi" in line:
+            found = True
+            break
+        if in_init_sandbox and line.strip().startswith("}") and found is False:
+            break
+    assert found, (
+        ".sandbox_config/pi not created in init_sandbox(); "
+        "fresh sandboxes won't have the pi state dir"
+    )
+
+
+def test_pi_dir_created_every_invocation():
+    # PI_CONFIG_DIR/agent must be in the mkdir -p that runs on every invocation
+    # so existing sandboxes are backfilled without --init-sandbox.
+    assert "PI_CONFIG_DIR/agent" in _SCRIPT_TEXT or '"$PI_CONFIG_DIR/agent"' in _SCRIPT_TEXT, (
+        "$PI_CONFIG_DIR/agent not in the every-invocation mkdir -p block; "
+        "existing sandboxes won't get the pi dir automatically"
+    )
+
+
+def test_pi_config_injection_writes_models_json():
+    assert "models.json" in _SCRIPT_TEXT, (
+        "pi config injection does not write models.json"
+    )
+
+
+def test_pi_config_injection_writes_settings_json():
+    assert "settings.json" in _SCRIPT_TEXT, (
+        "pi config injection does not write settings.json"
+    )
+
+
+def test_pi_config_injection_uses_correct_settings_keys():
+    assert "defaultProvider" in _SCRIPT_TEXT, (
+        "pi config injection missing 'defaultProvider' key in settings.json"
+    )
+    assert "defaultModel" in _SCRIPT_TEXT, (
+        "pi config injection missing 'defaultModel' key in settings.json"
+    )
+
+
+def test_pi_mounted_in_docker_run():
+    agent_block = next((b for b in _BLOCKS if "IMAGE_TAG" in b), None)
+    assert agent_block is not None, "claude-agent docker run block not found"
+    assert "/root/.pi" in agent_block, (
+        "PI_CONFIG_DIR not mounted at /root/.pi in docker run block"
+    )
