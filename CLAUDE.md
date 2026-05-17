@@ -7,7 +7,7 @@ using Apple Containers. One script, one container per project.
 
 ```
 start-claude.sh              — Apple Containers path; per-project microVM with Claude Code
-start-agent.sh               — Colima path; shared VM + container with Claude Code + OpenCode + VM-level egress allowlist
+start-agent.sh               — Colima path; shared VM + container with Claude Code + OpenCode + Pi + VM-level egress allowlist
 research.py                  — Python script; isolated Colima VM + Vane + SearXNG research environment
 dockerfiles/                 — Dockerfiles built by start-agent.sh (claude-agent.Dockerfile)
 templates/                   — seed templates copied to host state dirs on first run
@@ -19,7 +19,8 @@ plans/                       — implementation plans written by /plan skill
 tests/                       — unit tests and infra smoke tests
   test-agent-firewall.sh               — in-container firewall smoke tests for start-agent.sh (5 of 6 README cases + inter-container port isolation)
   test-cross-vm-isolation.sh           — host-driven cross-VM isolation test: claude-agent ↔ research cannot reach each other
-  test_agent_sh.py                     — static check that no docker run in start-agent.sh publishes a host port
+  test_agent_sh.py                     — static checks: no host-port publish, pi integration invariants, sandbox trust-boundary
+  test_dockerfile.py                   — static checks: pi and opencode CLI install lines in claude-agent.Dockerfile
   test_research.py                     — unit tests for research.py pure helpers
   probe-denylist.sh                    — host-driven Squid denylist end-to-end probe (allow + deny URLs)
   probe-vane-egress.sh                 — smoke test for research-vane egress env vars and sidecar HTTPS round-trip
@@ -67,7 +68,7 @@ If the named container already exists, it just starts and re-attaches it.
 
 ## start-agent.sh key decisions
 
-`start-agent.sh` is a sibling to `start-claude.sh`, not a replacement. It runs both Claude Code and OpenCode on top of a single shared Colima VM and a single shared docker container, with a VM-level egress allowlist the in-container LLM cannot modify, and routes local inference to Ollama or omlx on the macOS host.
+`start-agent.sh` is a sibling to `start-claude.sh`, not a replacement. It runs Claude Code, OpenCode, and Pi on top of a single shared Colima VM and a single shared docker container, with a VM-level egress allowlist the in-container LLM cannot modify, and routes local inference to Ollama or omlx on the macOS host.
 
 - **Colima, one shared VM + one sandbox active at a time.** Single `claude-agent` Colima profile; VM launched with `--mount $SANDBOX_ROOT:w` so only the active sandbox is visible inside the VM. Switching sandboxes stops and restarts the VM with the new mount (~10s). Default 8 GiB / 6 CPUs (overridable via `CLAUDE_AGENT_MEMORY` / `CLAUDE_AGENT_CPUS`). See ADR-034.
 - **Dockerfile, not an inline heredoc.** Image built from `dockerfiles/claude-agent.Dockerfile` via `docker build` — more readable and cacheable than the `start-claude.sh` inline approach.
@@ -77,6 +78,7 @@ If the named container already exists, it just starts and re-attaches it.
 - **Ollama via host networking.** `HOST_IP` from the VM's default route; container pointed at `http://$HOST_IP:11434` via `OLLAMA_HOST`; iptables RETURN rule carves out that destination.
 - **OpenCode inference provider via `opencode.json` injection.** Script writes/migrates a provider entry using `@ai-sdk/openai-compatible`; `ollama` and `omlx` entries coexist; config and data dirs bind-mounted for persistence.
 - **Per-mode OpenCode models via `--plan-model`, `--exec-model`, `--small-model`.** Bare IDs prefixed with the active provider key; full `provider/model` strings used as-is.
+- **Pi inference provider via `models.json` + `settings.json` injection.** Script writes a `local` provider entry in `$PI_CONFIG_DIR/agent/models.json` (same probe-and-discover logic as opencode) and writes `defaultProvider`/`defaultModel` to `settings.json`. `CLAUDE_AGENT_DEFAULT_MODEL` controls the Pi default; the plan/exec/small env vars are opencode-only. Pi state (auth, model config) is bind-mounted at `/root/.pi`. Cloud providers (Anthropic, OpenAI) are accessed via env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) forwarded from the host — no additional plumbing required.
 - **`--backend=omlx` selects omlx as the local inference server.** MLX-based Apple Silicon inference on port 8000 with API-key auth. See ADR-012.
 - **Per-sandbox auth and memory state; no cross-script sharing.** Each sandbox's `.sandbox_config/claude/` and `.sandbox_config/claude.json` hold its own Claude Code auth and memory. There is no shared state with `start-claude.sh`; `claude login` must be run once per sandbox. See ADR-034.
 - **`--init-sandbox PATH` creates a sandbox directory tree.** Creates `.sandbox_config/`, `projects/`, and all required subdirs at `PATH`; refuses if `.sandbox_config/` already exists. Running `start-agent.sh` outside any sandbox root is a hard error with a remediation message pointing at `--init-sandbox`. See ADR-034.

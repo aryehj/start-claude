@@ -142,7 +142,7 @@ Invoke a synced skill inside any Claude Code session with its slash name, e.g.
 Sibling script to `start-claude.sh`. Instead of one Apple Containers microVM
 per project, it runs a single shared [Colima](https://github.com/abiosoft/colima)
 VM with a single shared docker container that includes both the **Claude Code**
-and **OpenCode** CLIs, and enforces a network egress allowlist at the VM level
+and **OpenCode** and **Pi** CLIs, and enforces a network egress allowlist at the VM level
 that the in-container LLM cannot modify. Local inference is routed to an
 [Ollama](https://ollama.com) or [omlx](https://github.com/jundot/omlx) instance
 running on the macOS host.
@@ -154,7 +154,7 @@ State is organized around **sandboxes** — a single directory tree rooted at
 
 Use `start-agent.sh` when you want:
 
-- Both agents (Claude Code + OpenCode) in the same environment
+- Claude Code, OpenCode, and Pi in the same environment
 - A hard, LLM-uneditable egress allowlist (tinyproxy + iptables in the VM)
 - Local 30B-class model inference via host Ollama or omlx
 - A single VM to manage rather than one per project
@@ -276,6 +276,7 @@ to a different sandbox restarts the VM with the new `--mount` (~10s).
 |------|-------|
 | `claude` | Claude Code CLI |
 | `opencode` | [OpenCode](https://opencode.ai) CLI (installed via `opencode-ai` npm) |
+| `pi` | [Pi](https://pi.dev) CLI (installed via `@earendil-works/pi-coding-agent` npm) |
 | `uv` / `uvx` | Python package manager |
 | `node` / `npm` | Node.js LTS |
 | `git`, `ripgrep`, `fd`, `jq` | Dev tooling |
@@ -289,6 +290,7 @@ to a different sandbox restarts the VM with the new `--mount` (~10s).
 | `$SANDBOX_ROOT/.sandbox_config/claude.json` | `/root/.claude.json` | RW |
 | `$SANDBOX_ROOT/.sandbox_config/opencode/config/` | `/root/.config/opencode` | RW |
 | `$SANDBOX_ROOT/.sandbox_config/opencode/data/` | `/root/.local/share/opencode` | RW |
+| `$SANDBOX_ROOT/.sandbox_config/pi/` | `/root/.pi` | RW |
 | `$SANDBOX_ROOT/.sandbox_config/allowlist.txt` | `/etc/claude-agent/allowlist.txt` | **RO** |
 
 Auth and memory state are per-sandbox; there is no shared state with
@@ -406,6 +408,14 @@ OpenAI-compatible endpoint. Edit the same file to add model entries:
 }
 ```
 
+Pi is pre-configured with a `local` provider in `~/.pi/agent/models.json`
+pointing at the same Ollama endpoint. Model discovery runs automatically on
+each `start-agent.sh` invocation; the first discovered model is written to
+`~/.pi/agent/settings.json` as the default. To use a cloud provider with pi
+(e.g. Anthropic or OpenAI), set the relevant API key env var
+(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) on the host before launching — pi
+reads provider API keys directly from process env.
+
 ### omlx (`--backend=omlx`)
 
 ```bash
@@ -427,6 +437,10 @@ entries the same way:
   }
 }
 ```
+
+Pi is pre-configured with a `local` provider in `~/.pi/agent/models.json`
+pointing at the omlx endpoint, with the same auto-discovery behaviour as the
+Ollama case above.
 
 ## Local websearch (SearXNG)
 
@@ -635,7 +649,7 @@ uv run --with pytest pytest tests/test_agent_sh.py tests/test_research.py
 | `CLAUDE_AGENT_CPUS` | `6` | VM CPU count (overridden by `--cpus`) |
 | `OMLX_API_KEY` | *(unset)* | API key for omlx; passed into the container when `--backend=omlx` |
 | `CLAUDE_AGENT_DISABLE_SEARCH` | *(unset)* | Set to `1` to disable SearXNG (also disables OpenCode websearch; overridden by `--disable-search`) |
-| `CLAUDE_AGENT_DEFAULT_MODEL` | *(unset)* | Default OpenCode model written to `opencode.json` (env var only — no CLI flag). Use `provider/model` or a bare ID that matches the active provider |
+| `CLAUDE_AGENT_DEFAULT_MODEL` | *(unset)* | Default model for both OpenCode and Pi (env var only — no CLI flag). Written to `opencode.json` and `~/.pi/agent/settings.json` on each run |
 | `CLAUDE_AGENT_PLAN_MODEL` | *(unset)* | OpenCode model for plan-mode agent (overridden by `--plan-model`) |
 | `CLAUDE_AGENT_EXEC_MODEL` | *(unset)* | OpenCode model for execution/build agent (overridden by `--exec-model`) |
 | `CLAUDE_AGENT_SMALL_MODEL` | *(unset)* | OpenCode small model (overridden by `--small-model`) |
