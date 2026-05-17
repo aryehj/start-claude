@@ -2,7 +2,7 @@
 
 ## Status
 
-- [ ] Install `pi` in `dockerfiles/claude-agent.Dockerfile`
+- [x] Install `pi` in `dockerfiles/claude-agent.Dockerfile`
 - [ ] Add `.sandbox_config/pi/` to `init_sandbox()` and document it in the help/sandbox-layout sections of `start-agent.sh`
 - [ ] Export `PI_CONFIG_DIR` alongside `OPENCODE_CONFIG_DIR` and ensure the directory exists during the per-sandbox seed step
 - [ ] Generate `models.json` + `settings.json` under `$PI_CONFIG_DIR/agent/` using the same probe-and-discover logic that drives opencode
