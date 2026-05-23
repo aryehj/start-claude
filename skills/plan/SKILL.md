@@ -28,9 +28,11 @@
 
   4. **Ground unknowns.** For any factual unknowns still unresolved after steps 2 and 3, actively resolve them: WebFetch for documentation and READMEs, WebSearch for release status and current versions, Bash for package-registry probes, Read/Grep for local conventions. Do just enough to avoid fabricating specifics – you are trying to build something effectively, not get a PhD. If an unknown can't be resolved pre-plan and can't be deferred safely, either ask the user or represent it in the plan as an explicit verification step rather than a fabricated specific.
 
-  5. **Write the plan.** Create a single markdown file in the `plans/` directory at the project root (create the directory if it doesn't exist). Name the file with a short kebab-case slug describing the work (e.g., `add-caching.md`, `fix-auth-race-condition.md`). Before writing, apply the phase test (see Phases below) — most plans do not need phase-level structure. If $ARGUMENTS describes multiple independent concerns, organize them as separate phases within this one file; do not create multiple files.
+  5. **Draft the plan.** Write a first pass to a single markdown file in the `plans/` directory at the project root (create the directory if it doesn't exist). Name the file with a short kebab-case slug describing the work (e.g., `add-caching.md`, `fix-auth-race-condition.md`). If $ARGUMENTS describes multiple independent concerns, organize them within this one file; do not create multiple files. Don't agonize over phase structure on the first pass — just get the steps down.
 
-  6. **Commit the plan.** Atomic commit, just the plan file, current branch.
+  6. **Restructure around uncertainty.** Identify the most consequential assumptions or open questions in the draft — the ones whose resolution would change how later work looks. Rewrite so those uncertainties are tested as early as practical, and mark any phase that benefits significantly from human testing or interaction. Each surviving phase boundary must name the uncertainty it resolves or the human gate it represents — if it can't, collapse it. Do not manufacture uncertainties to justify phases; if nothing consequential is uncertain, the right answer is a flat Status checklist.
+
+  7. **Commit the plan.** Atomic commit, just the plan file, current branch.
 
   ## Plan format
 
@@ -44,9 +46,9 @@
   - [ ] <step>
   - [ ] <step>
 
-  <!-- Phase-level checkboxes — only when phases are warranted (see Phases): -->
-  - [ ] Phase 1: <short label>
-  - [ ] Phase 2: <short label>
+  <!-- Phase-level checkboxes — only when phases are warranted (see Phases). Label names the uncertainty resolved or the human gate: -->
+  - [ ] Phase 1: <names the uncertainty or gate>
+  - [ ] Phase 2: <names the uncertainty or gate>
 
   <!-- Mark [x] as work completes. Append `(Haiku ok)` for mechanical entries or `(Opus recommended)` for entries heavy with judgment calls; otherwise no annotation. -->
 
@@ -69,19 +71,15 @@
 
   ## Phases
 
-  A phase is a unit of work that **changes what the next phase looks like**. If the next phase's steps would be written identically whether or not this phase happened, there is no phase boundary — collapse the work into a single Status list with step-level checkboxes.
+  A phase exists for one reason: to resolve a consequential uncertainty before later work commits to assumptions that depend on it. A human review or testing gate is a special case — the uncertainty being resolved is "does the human accept this output before we continue."
 
-  Three legitimate reasons a phase earns its place:
+  Each phase boundary must name the uncertainty it resolves or the human gate it represents. If a phase can't be labeled that way, it isn't a phase — collapse it into a flat Status checklist with step-level checkboxes. "Five subsections that are inseparable" is a section break inside one phase, not five phases. A plan that openly admits its phases ship together is mis-phased.
 
-  - **Uncertainty resolution.** The phase resolves a load-bearing unknown; the next phase plans against the finding rather than against the guess.
-  - **Shipping checkpoint.** The phase produces a coherent, revertible artifact that could be paused on, reviewed, or shipped before the next phase starts.
-  - **Context-window scoping.** The phase is sized to one `/implement` session; the next phase starts from a clean handoff state.
-
-  If none of these apply, drop the phase boundary. "Five subsections that are inseparable" is a section break inside one phase, not five phases. A plan that openly admits its phases ship together is mis-phased.
-
-  Default is step-level checkboxes. Reach for phase-level only when the work clearly fits one of the three reasons above.
+  Default is step-level checkboxes. Reach for phase-level only when one or more uncertainties or human gates earn their place by the rule above.
 
   ### Per-phase template (when phases are warranted)
+
+  The label should name the uncertainty resolved or the human gate (e.g., "Validate omlx port compatibility", "Human review of allowlist semantics") — not the activity ("Add constants", "Update docs").
 
   ```markdown
   ## Phase 1: <Label>
