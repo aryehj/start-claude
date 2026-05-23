@@ -12,7 +12,7 @@ allowed-tools:
   - Bash
 ---
 
-You have just finished implementing a major change. Perform the following housekeeping steps. Read every file before editing it. Do all four steps — do not skip any.
+You have just finished implementing a major change. Perform the following housekeeping steps. Read every file before editing it. Do all five steps — do not skip any.
 
 ## 1. Update CLAUDE.md
 
@@ -54,6 +54,19 @@ Search for plan files that were used in this session. Look in:
 - Any path matching `**/plan/**/*.md` or `**/plans/**/*.md`
 
 If any plan file was the basis for the work just completed, rename it to prefix the filename with `implemented - `. For example: `add-caching.md` → `implemented - add-caching.md`. Only rename plans that were actually implemented in this session. If no plan files exist or none were implemented, skip this step.
+
+## 5. Review the implementation
+
+Identify the changes made implementing the plan — typically the commits since the plan file was added, or the diff against the base branch. Read the diff (or at least the touched files) and evaluate:
+
+- **Obvious bugs.** Off-by-one, missed cases, wrong variable, race conditions, resource leaks — things a careful second reader catches that the tests didn't.
+- **Code legibility.** Confusing names, oversized functions, deep nesting, comments that explain *what* instead of *why*.
+- **Reasonable test coverage.** Did the meaningful new behavior get tests? Are tests exercising real behavior, not just structure? You are not running a coverage tool — you are spotting critical paths that slipped through untested.
+- **Maintainability.** Tight coupling, premature abstraction, magic numbers, undocumented invariants future contributors will trip on.
+
+**Report, don't auto-fix.** Surface findings as a short list (file:line — what's wrong — what you'd change). Apply only trivial corrections directly (a typo, an obvious dead variable); judgment calls, actual bug fixes, or anything more than a few lines belongs in the user's hands. If there are no concerns, say so in one line — don't pad the report.
+
+This is a quick pass, not a full review. If the diff is large or findings are dense, suggest the user run `/code-review` for depth.
 
 ## General rules
 
