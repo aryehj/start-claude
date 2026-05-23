@@ -55,7 +55,13 @@ The user wants you to implement a plan previously written by `/plan`. $ARGUMENTS
 
 ## Rules
 
-- One phase per invocation. Do not silently steamroll into the next phase. If the user wants the next phase, they will invoke `/implement` again.
+- **Stop between phases. Don't stop between steps unless something forces it.** A phase boundary is a hard stop — finish the active phase, run the final test, report, and end the turn. Do not roll into the next phase even if it looks quick; if the user wants it, they'll invoke `/implement` again. Between steps *within* the active phase, keep going. Stop only when:
+  - You hit a major problem (the plan is wrong, a load-bearing assumption broke, the work is not implementable as written).
+  - You need to surface a consequential question — one whose answer changes how the rest of the phase looks, not a cosmetic preference.
+  - You need the user to do something (interactive login, paste a credential, manually verify a UI flow, decide a tradeoff).
+  - You are at meaningful risk of running out of context before the phase completes.
+
+  Routine task transitions, normal test runs, intermediate commits, and "this turned out trickier than I thought" don't count. Pushing through mechanical steps without checking in is the whole point of a phase.
 - Respect the plan. The plan is the source of truth for what to build. If you disagree with it, say so and ask — don't quietly deviate.
 - Don't over-scope. Resist bundling in unrelated cleanup, refactors, or "while I'm here" changes. Those belong in `/cleanup` or a separate task.
 - Ground before guessing. When a step depends on external facts (library versions, API shapes), verify with Read/Grep/Bash/WebFetch rather than writing confident-looking placeholder code.
