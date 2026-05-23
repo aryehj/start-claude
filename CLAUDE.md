@@ -15,7 +15,7 @@ templates/                   — seed templates copied to host state dirs on fir
   research-denylist-sources.txt       — seeded to ~/.research/denylist-sources.txt by research.py
   research-denylist-additions.txt     — seeded to ~/.research/denylist-additions.txt by research.py
 skills/                      — reusable Claude Code skills (back up of ~/.claude/skills/)
-plans/                       — implementation plans written by /plan skill
+plans/                       — implementation plans written by /scope skill
 tests/                       — unit tests and infra smoke tests
   test-agent-firewall.sh               — in-container firewall smoke tests for start-agent.sh (5 of 6 README cases + inter-container port isolation)
   test-cross-vm-isolation.sh           — host-driven cross-VM isolation test: claude-agent ↔ research cannot reach each other

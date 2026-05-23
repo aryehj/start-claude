@@ -2205,3 +2205,57 @@ probe-and-discover injection to the split-file config layout.
   the injection script must be updated.
 - MCP / SearXNG integration with Pi is out of scope; Pi gets local inference
   and auth-state persistence only.
+
+## ADR-037: Rename core development skills to `/scope`, `/build`, `/wrap`
+
+**Date:** 2026-05-23
+**Status:** Accepted
+
+### Context
+
+The three core development skills were originally named `/plan`, `/implement`,
+and `/cleanup`. Two problems with that set:
+
+1. **`/plan` collides with harness builtins.** Multiple coding-agent harnesses
+   (Claude Code included) reserve "plan mode" as a first-class concept;
+   `/plan` was overloaded in user mental models and command discovery.
+2. **`/implement` and `/cleanup` are longer than they need to be** for skills
+   invoked at the end of nearly every session.
+
+Skills do not support aliases in SKILL.md frontmatter (verified against the
+published frontmatter reference at code.claude.com/docs/en/skills.md), so the
+fix was a rename rather than an alias.
+
+### Decision
+
+1. **`skills/plan/` → `skills/scope/`.** "Scope" captures the
+   decision-making and boundary-setting nature of the skill better than
+   "plan" did, and removes the harness collision.
+
+2. **`skills/implement/` → `skills/build/`.** Plain, unambiguous, single
+   syllable.
+
+3. **`skills/cleanup/` → `skills/wrap/`.** Matches the skill's current
+   housekeeping + light review scope (ADR-adjacent change: review pass
+   added in the same session) and reads as the natural end-cap of the
+   lifecycle ("scope, build, wrap").
+
+The `name:` field in each SKILL.md frontmatter was updated to match.
+Internal cross-references between the three skills were rewritten.
+README.md and CLAUDE.md updated. The `plans/` directory itself was not
+renamed; only skill names changed.
+
+### Consequences
+
+- Earlier ADRs (ADR-032, ADR-035, others) reference `/plan`, `/implement`,
+  `/cleanup` and paths like `skills/plan/SKILL.md`. These were left
+  unchanged — they describe decisions as they were made, and rewriting the
+  historical record would muddy provenance. Read references to those
+  names in earlier ADRs as the current `/scope`, `/build`, `/wrap`.
+- Plan files in `plans/_implemented/` likewise retain original
+  slash-command references.
+- No alias / fallback for the old names. Typing `/plan` will not invoke
+  `/scope`; users must learn the new triple.
+- Filesystem path patterns in `/wrap`'s plan-file search
+  (`**/plan/**/*.md`, `**/plans/**/*.md`) remain correct — those refer
+  to directories named `plan`/`plans`, not to the skill name.

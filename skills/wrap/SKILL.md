@@ -1,6 +1,6 @@
 ---
-name: cleanup
-description: Post-implementation housekeeping — update CLAUDE.md, README.md, append ADR.md, and mark completed plans
+name: wrap
+description: Post-implementation housekeeping and a light review pass — update CLAUDE.md, README.md, append ADR.md, mark completed plans, and evaluate the diff for obvious bugs / legibility / coverage / maintainability
 disable-model-invocation: true
 argument-hint: "[optional notes]"
 model: sonnet

@@ -1,5 +1,5 @@
 ---
-  name: plan
+  name: scope
   description: Explore the codebase and write implementation plans to /plans as markdown files
   disable-model-invocation: true
   argument-hint: "<what to plan>"
@@ -90,7 +90,7 @@
 
   ### Acceptance criteria
 
-  Optional. Bulleted list of what "done" means for *this phase* when distinct from plan-level Goals. Frame as outcomes, not test mechanism — `/implement` owns how to verify. **Omit by default.** Include only when there are phase-specific edge cases worth guarding, manual-verification surface that automated tests won't reach, or the phase has no testable behavior at all (e.g., "docs only — no code-level assertions"). If your AC restates a Step or a plan-level Goal, delete it.
+  Optional. Bulleted list of what "done" means for *this phase* when distinct from plan-level Goals. Frame as outcomes, not test mechanism — `/build` owns how to verify. **Omit by default.** Include only when there are phase-specific edge cases worth guarding, manual-verification surface that automated tests won't reach, or the phase has no testable behavior at all (e.g., "docs only — no code-level assertions"). If your AC restates a Step or a plan-level Goal, delete it.
   ```
 
   Optional `## Notes` at end of plan for caveats, risks, open questions, or alternatives considered.
@@ -101,7 +101,7 @@
   - **Write for a capable implementer.** Assume whoever implements this plan has the plan itself, the working directory (CLAUDE.md, README, ADR, source code, recent git history), the project's conventions visible in that tree, and standard knowledge of the tools in play. They do not have memory of this conversation. Include file paths, function names, and concrete descriptions of changes where grounded — but do not restate context the implementer can read for themselves. If a fact is in CLAUDE.md or trivially greppable, citing it once (or not at all) beats re-narrating it.
   - **Match plan length to task size.** Optional sections (Approach, per-phase Acceptance criteria) and phases themselves are *opt-in*, not default-on. Include them only when they carry signal the implementer can't get from the working directory or plan-level Goals. A small task should produce a small plan; a one-line config change does not need a phase, a multi-paragraph Goals section, or an Approach.
   - **State decisions, not artifacts.** The plan records *what was chosen and why*. The shape of the artifact the decision implies — the literal config block, the exact rename table, the helper-function pseudocode, the diff — is the implementer's to produce. Test for each concrete block: *if a competent implementer could produce something equivalent from the surrounding decisions alone, drop it.* Grounding via file paths and line numbers is encouraged; transcribing the code at those paths is not.
-  - **One file, always.** All concerns go in a single plan file, organized as phases (or as one Status list). Never create multiple plan files for one `/plan` invocation.
+  - **One file, always.** All concerns go in a single plan file, organized as phases (or as one Status list). Never create multiple plan files for one `/scope` invocation.
   - **Don't over-explore.** Read what you need to write a good plan, then write it. This is not a research task.
   - **Don't implement.** You are writing a plan, not code. Do not edit any source files outside of plans/.
   - **Reference the current state.** Ground the plan in what actually exists — cite files, line numbers, existing patterns. Don't plan against an imagined codebase.

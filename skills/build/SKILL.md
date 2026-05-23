@@ -1,6 +1,6 @@
 ---
-name: implement
-description: Execute a plan written by /plan — work through the active phase with tasks, atomic commits, and test suggestions
+name: build
+description: Execute a plan written by /scope — work through the active phase with tasks, atomic commits, and test suggestions
 disable-model-invocation: true
 argument-hint: "<plan file path or slug>"
 allowed-tools:
@@ -20,7 +20,7 @@ allowed-tools:
   - WebFetch
 ---
 
-The user wants you to implement a plan previously written by `/plan`. $ARGUMENTS points to the plan — a path, filename, or slug under `plans/`. Your job is to execute the *active phase* (the first unchecked entry in the plan's Status checklist) carefully, with appropriate task tracking and commits.
+The user wants you to implement a plan previously written by `/scope`. $ARGUMENTS points to the plan — a path, filename, or slug under `plans/`. Your job is to execute the *active phase* (the first unchecked entry in the plan's Status checklist) carefully, with appropriate task tracking and commits.
 
 ## Process
 
@@ -49,13 +49,13 @@ The user wants you to implement a plan previously written by `/plan`. $ARGUMENTS
 
 8. **Before declaring the phase done, the working tree must be clean — or every dirty file explicitly accounted for.** Run `git status` at the end. Either commit the remaining changes, or in your final report list every uncommitted file with a one-line reason for leaving it (e.g., "unrelated to this phase, found incidentally", "needs user decision before commit"). Do not silently end with a dirty tree.
 
-9. **Update the plan's Status checklist.** When the active phase is complete, mark its checkbox `[x]` in the plan file. Do not mark later phases. Do not rename the plan file — that's `/cleanup`'s job.
+9. **Update the plan's Status checklist.** When the active phase is complete, mark its checkbox `[x]` in the plan file. Do not mark later phases. Do not rename the plan file — that's `/wrap`'s job.
 
 10. **Final test run, then report.** Before ending the session, run the full test suite one more time and confirm it is green. Then end your turn with a short summary of what changed, the exact test command that was run and its result (e.g., "`uv run pytest tests/` — 14 passed"), and a **Manual verification** section for anything the automated tests cannot cover (dev-server flows, UI clicks, external services, credential-gated paths). For each such behavior, give the user a concrete way to check it: exact command, URL, UI flow, or log line.
 
 ## Rules
 
-- **Stop between phases. Don't stop between steps unless something forces it.** A phase boundary is a hard stop — finish the active phase, run the final test, report, and end the turn. Do not roll into the next phase even if it looks quick; if the user wants it, they'll invoke `/implement` again. Between steps *within* the active phase, keep going. Stop only when:
+- **Stop between phases. Don't stop between steps unless something forces it.** A phase boundary is a hard stop — finish the active phase, run the final test, report, and end the turn. Do not roll into the next phase even if it looks quick; if the user wants it, they'll invoke `/build` again. Between steps *within* the active phase, keep going. Stop only when:
   - You hit a major problem (the plan is wrong, a load-bearing assumption broke, the work is not implementable as written).
   - You need to surface a consequential question — one whose answer changes how the rest of the phase looks, not a cosmetic preference.
   - You need the user to do something (interactive login, paste a credential, manually verify a UI flow, decide a tradeoff).
@@ -63,7 +63,7 @@ The user wants you to implement a plan previously written by `/plan`. $ARGUMENTS
 
   Routine task transitions, normal test runs, intermediate commits, and "this turned out trickier than I thought" don't count. Pushing through mechanical steps without checking in is the whole point of a phase.
 - Respect the plan. The plan is the source of truth for what to build. If you disagree with it, say so and ask — don't quietly deviate.
-- Don't over-scope. Resist bundling in unrelated cleanup, refactors, or "while I'm here" changes. Those belong in `/cleanup` or a separate task.
+- Don't over-scope. Resist bundling in unrelated cleanup, refactors, or "while I'm here" changes. Those belong in `/wrap` or a separate task.
 - Ground before guessing. When a step depends on external facts (library versions, API shapes), verify with Read/Grep/Bash/WebFetch rather than writing confident-looking placeholder code.
 - Surface blockers early. If a task reveals that the plan is wrong or a phase is not implementable as written, stop and tell the user before writing code against a broken premise.
-- Do not run `/cleanup`. Housekeeping (CLAUDE.md, README.md, ADR.md, renaming the plan file) is a separate skill the user invokes when the whole plan is done.
+- Do not run `/wrap`. Housekeeping (CLAUDE.md, README.md, ADR.md, renaming the plan file) is a separate skill the user invokes when the whole plan is done.

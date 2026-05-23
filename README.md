@@ -115,13 +115,13 @@ branch tarball, or any `*.tar.gz` whose top-level has a `skills/` directory).
 If the fetch fails, the warning is printed and the container starts anyway.
 
 Invoke a synced skill inside any Claude Code session with its slash name, e.g.
-`/cleanup`.
+`/wrap`.
 
 | Skill | What it does |
 |-------|-------------|
-| `cleanup` | Post-implementation housekeeping — updates CLAUDE.md, README.md, appends ADR.md, and renames completed plan files |
-| `plan` | Explores the codebase and writes implementation plans to `plans/` as markdown files (runs on Opus) |
-| `implement` | Executes the active phase of a plan file, with task tracking and checkpoint commits |
+| `scope` | Explores the codebase and writes implementation plans to `plans/` as markdown files (runs on Opus) |
+| `build` | Executes the active phase of a plan file, with task tracking and checkpoint commits |
+| `wrap` | Post-implementation housekeeping plus a light review pass — updates CLAUDE.md, README.md, appends ADR.md, renames completed plan files, and evaluates the diff for obvious bugs / legibility / coverage / maintainability |
 
 ## Environment variable reference
 

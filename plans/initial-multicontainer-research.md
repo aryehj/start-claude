@@ -3,7 +3,7 @@
 > **Status:** Research / design notes, not an implementation plan.
 > Captures the architectural exploration before committing to a direction.
 > Pick this up by re-reading, picking the open questions below, and then
-> spawning a real `/plan` with the chosen design.
+> spawning a real `/scope` with the chosen design.
 
 ## Why this exists
 
@@ -185,7 +185,7 @@ services), 2B alone is enough. Two microVMs to do what 2B does in one
 isn't worth it. The decision pivot is: **are SearXNG / other services
 expected to live in separate Apple Containers in the future setup?**
 
-## Open questions for the user (resolve before `/plan`)
+## Open questions for the user (resolve before `/scope`)
 
 1. **Multi-container scope.** Are we planning around N=1 (single
    microVM), single-microVM-with-egress-sidecar (N=2), or full
