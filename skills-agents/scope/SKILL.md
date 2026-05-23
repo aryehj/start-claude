@@ -15,9 +15,9 @@ The user wants you to create an implementation plan. Explore just enough to writ
 
 3. **Light exploration.** Read relevant files, grep for key patterns, understand current state. Keep it focused — you are planning, not implementing. Do not modify any source files.
 
-4. **Draft the plan.** Write to a single markdown file in `plans/` at the project root (create the directory if it doesn't exist). Use a short kebab-case slug as the filename. Use the template below.
+4. **Draft the plan.** Use the write tool to create `plans/<slug>.md` at the project root (create the `plans/` directory first if it doesn't exist). Use a short kebab-case slug. Use the template below. Do not output the plan as a response — write it to the file.
 
-5. **Commit the plan.** One atomic commit, just the plan file, on the current branch.
+5. **Commit the plan.** Use bash to run: `git add plans/<slug>.md && git commit -m "plan: <slug>"`. Verify the bash output shows a new commit hash. Do not claim the commit is done without running this command and seeing a commit hash in the output.
 
 ## Plan template
 
@@ -51,7 +51,7 @@ Use a flat Status checklist (step-level checkboxes) by default. Add phases only 
 
 ## Rules
 
-- **Output only questions or a plan file.** The only visible result at the end of your turn should be clarifying questions OR a new .md file in `plans/`. Not both in the same turn.
+- **Write the plan file, don't output it.** Use the write tool to save the plan to `plans/<slug>.md`. Do not paste the plan content into your response — that defeats the purpose. The only visible text in your response should be a one-line confirmation that the file was written and committed.
 - **Write for a capable implementer.** They have the plan, the working directory (CLAUDE.md, README, source), and standard tool knowledge. Do not restate what they can read for themselves.
 - **Match length to task size.** A small task produces a small plan. One-line config changes do not need phases or a multi-paragraph Goals section.
 - **Don't confabulate.** If you don't know whether a package, file, or API exists, verify it or mark it as an unknown. Do not write confident-sounding specifics you haven't checked.
