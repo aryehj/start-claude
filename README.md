@@ -190,6 +190,8 @@ start-agent.sh
       config/        — OpenCode config (/root/.config/opencode)
       data/          — OpenCode data (/root/.local/share/opencode)
     pi/              — Pi state (/root/.pi): auth, models, settings
+    agents/
+      skills/        — small-model skills for Pi and OpenCode (/root/.agents/skills)
     allowlist.txt    — egress domain allowlist (read-only inside the container)
     searxng/         — SearXNG config
   projects/          — your repos go here
@@ -292,6 +294,7 @@ to a different sandbox restarts the VM with the new `--mount` (~10s).
 | `$SANDBOX_ROOT/.sandbox_config/opencode/config/` | `/root/.config/opencode` | RW |
 | `$SANDBOX_ROOT/.sandbox_config/opencode/data/` | `/root/.local/share/opencode` | RW |
 | `$SANDBOX_ROOT/.sandbox_config/pi/` | `/root/.pi` | RW |
+| `$SANDBOX_ROOT/.sandbox_config/agents/skills/` | `/root/.agents/skills` | RW |
 | `$SANDBOX_ROOT/.sandbox_config/allowlist.txt` | `/etc/claude-agent/allowlist.txt` | **RO** |
 
 Auth and memory state are per-sandbox; there is no shared state with
