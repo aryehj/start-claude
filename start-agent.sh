@@ -24,6 +24,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # ── args ──────────────────────────────────────────────────────────────────────
 REBUILD=false
 RESET_CONTAINER=false
@@ -188,8 +190,23 @@ init_sandbox() {
     "$target/.sandbox_config/opencode/config" \
     "$target/.sandbox_config/opencode/data" \
     "$target/.sandbox_config/pi" \
+    "$target/.sandbox_config/agents/skills" \
     "$target/.sandbox_config/searxng" \
     "$target/projects"
+  local agents_skills_src="$SCRIPT_DIR/skills-agents"
+  local agents_skills_dest="$target/.sandbox_config/agents/skills"
+  if [[ -d "$agents_skills_src" ]]; then
+    for skill_path in "$agents_skills_src"/*/; do
+      [[ -d "$skill_path" ]] || continue
+      local skill_name
+      skill_name=$(basename "$skill_path")
+      rm -rf "$agents_skills_dest/$skill_name"
+      cp -R "$skill_path" "$agents_skills_dest/$skill_name"
+      echo "    seeded agent skill: $skill_name"
+    done
+  else
+    echo "    warning: $agents_skills_src not found; skipping agent skill seeding" >&2
+  fi
   echo "==> Sandbox created at $target"
   echo ""
   echo "Next steps:"
@@ -309,6 +326,7 @@ CLAUDE_JSON_FILE="$SANDBOX_ROOT/.sandbox_config/claude.json"
 OPENCODE_CONFIG_DIR="$SANDBOX_ROOT/.sandbox_config/opencode/config"
 OPENCODE_DATA_DIR="$SANDBOX_ROOT/.sandbox_config/opencode/data"
 PI_CONFIG_DIR="$SANDBOX_ROOT/.sandbox_config/pi"
+AGENTS_SKILLS_DIR="$SANDBOX_ROOT/.sandbox_config/agents/skills"
 ALLOWLIST_FILE="$SANDBOX_ROOT/.sandbox_config/allowlist.txt"
 TINYPROXY_PORT=8888
 SEARXNG_CONTAINER="searxng"
@@ -1047,7 +1065,7 @@ else
 fi
 
 # ── host-side persistent state dirs ──────────────────────────────────────────
-mkdir -p "$CLAUDE_CONFIG_DIR" "$OPENCODE_CONFIG_DIR" "$OPENCODE_DATA_DIR" "$PI_CONFIG_DIR/agent"
+mkdir -p "$CLAUDE_CONFIG_DIR" "$OPENCODE_CONFIG_DIR" "$OPENCODE_DATA_DIR" "$PI_CONFIG_DIR/agent" "$AGENTS_SKILLS_DIR"
 [[ -f "$CLAUDE_JSON_FILE" ]] || echo '{}' > "$CLAUDE_JSON_FILE"
 
 # ── seed global container CLAUDE.md ──────────────────────────────────────────
@@ -1541,6 +1559,7 @@ exec docker run \
   -v "$OPENCODE_CONFIG_DIR:/root/.config/opencode" \
   -v "$OPENCODE_DATA_DIR:/root/.local/share/opencode" \
   -v "$PI_CONFIG_DIR:/root/.pi" \
+  -v "$AGENTS_SKILLS_DIR:/root/.agents/skills" \
   -v "$ALLOWLIST_FILE:/etc/claude-agent/allowlist.txt:ro" \
   -w "$PROJECT_DIR" \
   "${DOCKER_ENV_ARGS[@]}" \

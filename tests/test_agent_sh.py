@@ -225,3 +225,56 @@ def test_pi_mounted_in_docker_run():
     assert "/root/.pi" in agent_block, (
         "PI_CONFIG_DIR not mounted at /root/.pi in docker run block"
     )
+
+
+# ── agents/skills seeding invariants (Phase 3) ───────────────────────────────
+
+def _init_sandbox_body() -> str:
+    start = _SCRIPT_TEXT.find("init_sandbox()")
+    assert start != -1, "init_sandbox() function not found"
+    brace_open = _SCRIPT_TEXT.find("{", start)
+    assert brace_open != -1, "init_sandbox() opening brace not found"
+    depth = 0
+    for i, ch in enumerate(_SCRIPT_TEXT[brace_open:], start=brace_open):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return _SCRIPT_TEXT[brace_open : i + 1]
+    raise AssertionError("init_sandbox() closing brace not found")
+
+
+def test_init_sandbox_creates_agents_skills_dir():
+    body = _init_sandbox_body()
+    assert "sandbox_config/agents/skills" in body, (
+        ".sandbox_config/agents/skills not created in init_sandbox(); "
+        "fresh sandboxes won't have the agents skills dir"
+    )
+
+
+def test_init_sandbox_seeds_agents_skills_from_repo():
+    body = _init_sandbox_body()
+    assert "skills-agents" in body, (
+        "init_sandbox() does not copy skills-agents/ into the new sandbox; "
+        "Pi/OpenCode won't find the small-model skills at first launch"
+    )
+
+
+def test_agents_skills_dir_created_every_invocation():
+    mkdir_lines = [
+        line for line in _SCRIPT_TEXT.splitlines()
+        if re.match(r"\s*mkdir -p ", line) and "AGENTS_SKILLS_DIR" in line
+    ]
+    assert mkdir_lines, (
+        "AGENTS_SKILLS_DIR not in any every-invocation `mkdir -p` line; "
+        "existing sandboxes won't have the dir and the bind-mount will fail"
+    )
+
+
+def test_agents_skills_mounted_in_docker_run():
+    agent_block = next((b for b in _BLOCKS if "IMAGE_TAG" in b), None)
+    assert agent_block is not None, "claude-agent docker run block not found"
+    assert "/root/.agents/skills" in agent_block, (
+        "AGENTS_SKILLS_DIR not mounted at /root/.agents/skills in docker run block"
+    )
