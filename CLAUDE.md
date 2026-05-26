@@ -15,6 +15,7 @@ templates/                   — seed templates copied to host state dirs on fir
   research-denylist-sources.txt       — seeded to ~/.research/denylist-sources.txt by research.py
   research-denylist-additions.txt     — seeded to ~/.research/denylist-additions.txt by research.py
 skills/                      — reusable Claude Code skills (back up of ~/.claude/skills/)
+skills-agents/               — small-model ports of scope/build/wrap for Pi and OpenCode (seeded to ~/.agents/skills/)
 plans/                       — implementation plans written by /scope skill
 tests/                       — unit tests and infra smoke tests
   test-agent-firewall.sh               — in-container firewall smoke tests for start-agent.sh (5 of 6 README cases + inter-container port isolation)
@@ -82,6 +83,7 @@ If the named container already exists, it just starts and re-attaches it.
 - **`--backend=omlx` selects omlx as the local inference server.** MLX-based Apple Silicon inference on port 8000 with API-key auth. See ADR-012.
 - **Per-sandbox auth and memory state; no cross-script sharing.** Each sandbox's `.sandbox_config/claude/` and `.sandbox_config/claude.json` hold its own Claude Code auth and memory. There is no shared state with `start-claude.sh`; `claude login` must be run once per sandbox. See ADR-034.
 - **`--init-sandbox PATH` creates a sandbox directory tree.** Creates `.sandbox_config/`, `projects/`, and all required subdirs at `PATH`; refuses if `.sandbox_config/` already exists. Running `start-agent.sh` outside any sandbox root is a hard error with a remediation message pointing at `--init-sandbox`. See ADR-034.
+- **Small-model skill ports seeded at `~/.agents/skills/` via `--init-sandbox`.** `skills-agents/{scope,build,wrap}/` are copied into `$SANDBOX/.sandbox_config/agents/skills/` on init and bind-mounted to `/root/.agents/skills/` in the container. Both Pi and OpenCode read this path; one shared variant covers both tools. Local-only skill dirs are left untouched; copy failures warn but do not abort. See ADR-038.
 - **`--rebuild` semantics.** Removes image + container non-interactively; Colima VM deletion requires an extra `y` because it wipes the entire VM runtime.
 - **`--reset-container` semantics.** Removes the container (and SearXNG container) but keeps the image and VM intact; mutually exclusive with `--rebuild`. Use when only container state needs resetting — avoids network egress for a full image rebuild.
 - **`NODE_USE_ENV_PROXY=1` makes Node honor the proxy natively.** Node 24 undici reads `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` when this flag is set — no shim packages needed. See ADR-013.

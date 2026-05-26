@@ -4,7 +4,7 @@
 
 - [x] Phase 1: Validate that an adapted SKILL.md actually works on Gemma-class models via Pi
 - [x] Phase 2: Port the remaining two skills using the validated pattern
-- [ ] Phase 3: Seed the ports into new sandboxes via `start-agent.sh`
+- [x] Phase 3: Seed the ports into new sandboxes via `start-agent.sh`
 
 ## Context
 

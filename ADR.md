@@ -2259,3 +2259,57 @@ renamed; only skill names changed.
 - Filesystem path patterns in `/wrap`'s plan-file search
   (`**/plan/**/*.md`, `**/plans/**/*.md`) remain correct — those refer
   to directories named `plan`/`plans`, not to the skill name.
+
+## ADR-038: Small-model skill ports seeded into new sandboxes via `~/.agents/skills/`
+
+**Date:** 2026-05-26
+**Status:** Accepted
+
+### Context
+
+The three core dev skills (`scope`, `build`, `wrap`) in `skills/` are written
+for Claude Code + Sonnet/Opus: they rely on `AskUserQuestion`, `Agent`,
+`TaskCreate`/`TaskUpdate`, and assume strong meta-cognition from the model.
+Pi and OpenCode both implement the Agent Skills standard and read `SKILL.md`
+files from `~/.agents/skills/` (a path both tools share). Gemma-class models
+running in `claude-agent` sandboxes cannot reliably execute the full-fat
+skills, so a set of adapted, smaller versions lives at `skills-agents/` in
+the repo.
+
+### Decision
+
+1. **`skills-agents/{scope,build,wrap}/SKILL.md` are the small-model variants.**
+   Content-adapted from the full-fat skills: meta-reasoning steps cut, judgment
+   branches collapsed to literal rules, Claude-Code-only tools replaced with
+   file-based equivalents (`AskUserQuestion` → plain-text prompt; `TaskCreate`
+   → `plans/<slug>.todo.md`). Target ~50–80 lines per skill.
+
+2. **`--init-sandbox` seeds these into `$SANDBOX/.sandbox_config/agents/skills/`.**
+   Per-skill-directory clobber semantics (same as ADR-005 for Claude Code
+   skills): each repo skill dir replaces its counterpart wholesale;
+   local-only skill dirs in the sandbox are left untouched; copy failures
+   warn but do not abort init.
+
+3. **`AGENTS_SKILLS_DIR` is bind-mounted to `/root/.agents/skills/` in `docker run`.**
+   This is the path both Pi (`/skill:scope`) and OpenCode (`skill` tool) read
+   from. One shared variant covers both tools; per-tool one-liners handle any
+   behavioral differences. A `mkdir -p` on every invocation ensures existing
+   sandboxes get the directory without needing `--init-sandbox` to be re-run.
+
+4. **`~/.claude/skills/` (Claude Code) is untouched.** The full-fat skills
+   continue to be synced there per ADR-005. Claude Code runs via its own
+   bind-mount at `/root/.claude`; it does not read `/root/.agents/skills/`.
+
+### Consequences
+
+- New sandboxes created with `--init-sandbox` get the small-model skills
+  pre-loaded; existing sandboxes pick up the mount automatically but require
+  a manual copy or a new `--init-sandbox` to populate the skill content.
+- Skill updates in the repo require `--init-sandbox` to be re-run (or a
+  manual `cp -R`) to propagate; there is no live-sync from the repo into
+  existing sandboxes.
+- OpenCode reads both `~/.claude/skills/` and `~/.agents/skills/`. If both
+  contain a skill of the same name, OpenCode may list it twice. Validation
+  on a live sandbox is required to confirm deduplication behavior; if OpenCode
+  lists both, rename the small-model variants (e.g., `scope-small`) or gate
+  OpenCode away from `~/.claude/skills/` via `opencode.json`.
