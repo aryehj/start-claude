@@ -193,20 +193,6 @@ init_sandbox() {
     "$target/.sandbox_config/agents/skills" \
     "$target/.sandbox_config/searxng" \
     "$target/projects"
-  local agents_skills_src="$SCRIPT_DIR/skills-agents"
-  local agents_skills_dest="$target/.sandbox_config/agents/skills"
-  if [[ -d "$agents_skills_src" ]]; then
-    for skill_path in "$agents_skills_src"/*/; do
-      [[ -d "$skill_path" ]] || continue
-      local skill_name
-      skill_name=$(basename "$skill_path")
-      rm -rf "$agents_skills_dest/$skill_name"
-      cp -R "$skill_path" "$agents_skills_dest/$skill_name"
-      echo "    seeded agent skill: $skill_name"
-    done
-  else
-    echo "    warning: $agents_skills_src not found; skipping agent skill seeding" >&2
-  fi
   echo "==> Sandbox created at $target"
   echo ""
   echo "Next steps:"
@@ -1399,6 +1385,24 @@ if chosen_provider or chosen_model:
         f.write('\n')
 PYEOF
 
+# ── agent skills seed (new-container path only) ──────────────────────────────
+seed_agent_skills() {
+  local src="$SCRIPT_DIR/skills-agents"
+  local dest="$AGENTS_SKILLS_DIR"
+  if [[ -d "$src" ]]; then
+    for skill_path in "$src"/*/; do
+      [[ -d "$skill_path" ]] || continue
+      local name
+      name=$(basename "$skill_path")
+      rm -rf "$dest/$name"
+      cp -R "$skill_path" "$dest/$name"
+      echo "    seeded agent skill: $name"
+    done
+  else
+    echo "    warning: $src not found; skipping agent skill seeding" >&2
+  fi
+}
+
 # ── skills sync (new-container path only) ────────────────────────────────────
 sync_skills() {
   local url="${CLAUDE_SKILLS_ARCHIVE_URL:-https://github.com/aryehj/start-claude/archive/refs/heads/main.tar.gz}"
@@ -1531,6 +1535,7 @@ fi
 
 # Fresh container: sync skills first.
 sync_skills
+seed_agent_skills
 
 NETWORK_ARGS=()
 if $LOCAL_SEARCH_ENABLED; then

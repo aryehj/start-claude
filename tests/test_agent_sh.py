@@ -227,13 +227,14 @@ def test_pi_mounted_in_docker_run():
     )
 
 
-# ── agents/skills seeding invariants (Phase 3) ───────────────────────────────
+# ── agents/skills seeding invariants ─────────────────────────────────────────
 
-def _init_sandbox_body() -> str:
-    start = _SCRIPT_TEXT.find("init_sandbox()")
-    assert start != -1, "init_sandbox() function not found"
+def _function_body(name: str) -> str:
+    """Extract the shell function body for a function named `name`."""
+    start = _SCRIPT_TEXT.find(f"{name}()")
+    assert start != -1, f"{name}() function not found"
     brace_open = _SCRIPT_TEXT.find("{", start)
-    assert brace_open != -1, "init_sandbox() opening brace not found"
+    assert brace_open != -1, f"{name}() opening brace not found"
     depth = 0
     for i, ch in enumerate(_SCRIPT_TEXT[brace_open:], start=brace_open):
         if ch == "{":
@@ -242,22 +243,52 @@ def _init_sandbox_body() -> str:
             depth -= 1
             if depth == 0:
                 return _SCRIPT_TEXT[brace_open : i + 1]
-    raise AssertionError("init_sandbox() closing brace not found")
+    raise AssertionError(f"{name}() closing brace not found")
 
 
 def test_init_sandbox_creates_agents_skills_dir():
-    body = _init_sandbox_body()
+    body = _function_body("init_sandbox")
     assert "sandbox_config/agents/skills" in body, (
         ".sandbox_config/agents/skills not created in init_sandbox(); "
         "fresh sandboxes won't have the agents skills dir"
     )
 
 
-def test_init_sandbox_seeds_agents_skills_from_repo():
-    body = _init_sandbox_body()
+def test_init_sandbox_does_not_seed_agent_skills():
+    body = _function_body("init_sandbox")
+    assert "skills-agents" not in body, (
+        "init_sandbox() still contains the skills-agents copy loop; "
+        "seeding should live in seed_agent_skills() called on fresh-container path"
+    )
+
+
+def test_seed_agent_skills_function_exists():
+    _function_body("seed_agent_skills")
+
+
+def test_seed_agent_skills_copies_from_skills_agents():
+    body = _function_body("seed_agent_skills")
     assert "skills-agents" in body, (
-        "init_sandbox() does not copy skills-agents/ into the new sandbox; "
-        "Pi/OpenCode won't find the small-model skills at first launch"
+        "seed_agent_skills() does not reference skills-agents/; "
+        "Pi/OpenCode won't find the small-model skills"
+    )
+
+
+def _fresh_container_section() -> str:
+    """Text from the fresh-container sync comment through the exec docker run."""
+    marker = "# Fresh container:"
+    start = _SCRIPT_TEXT.find(marker)
+    assert start != -1, "'# Fresh container:' comment not found"
+    end = _SCRIPT_TEXT.find("exec docker run", start)
+    assert end != -1, "exec docker run not found after fresh-container marker"
+    return _SCRIPT_TEXT[start:end]
+
+
+def test_seed_agent_skills_called_on_fresh_container():
+    section = _fresh_container_section()
+    assert "seed_agent_skills" in section, (
+        "seed_agent_skills not called in the fresh-container section; "
+        "--rebuild and --reset-container won't repopulate agent skills"
     )
 
 
