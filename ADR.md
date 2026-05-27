@@ -2284,11 +2284,15 @@ the repo.
    file-based equivalents (`AskUserQuestion` → plain-text prompt; `TaskCreate`
    → `plans/<slug>.todo.md`). Target ~50–80 lines per skill.
 
-2. **`--init-sandbox` seeds these into `$SANDBOX/.sandbox_config/agents/skills/`.**
-   Per-skill-directory clobber semantics (same as ADR-005 for Claude Code
-   skills): each repo skill dir replaces its counterpart wholesale;
-   local-only skill dirs in the sandbox are left untouched; copy failures
-   warn but do not abort init.
+2. **`seed_agent_skills()` seeds these into `$SANDBOX/.sandbox_config/agents/skills/` on every fresh container.**
+   Called from the fresh-container path alongside `sync_skills()` — triggers
+   on `--rebuild` and `--reset-container`; skipped on bare reattach.
+   `--init-sandbox` creates the bind-mount target directory only; the first
+   `start-agent.sh` run seeds the skills as a side effect of creating the
+   container. Per-skill-directory clobber semantics (same as ADR-005 for
+   Claude Code skills): each repo skill dir replaces its counterpart
+   wholesale; local-only skill dirs in the sandbox are left untouched;
+   copy failures warn but do not abort.
 
 3. **`AGENTS_SKILLS_DIR` is bind-mounted to `/root/.agents/skills/` in `docker run`.**
    This is the path both Pi (`/skill:scope`) and OpenCode (`skill` tool) read

@@ -191,7 +191,7 @@ start-agent.sh
       data/          — OpenCode data (/root/.local/share/opencode)
     pi/              — Pi state (/root/.pi): auth, models, settings
     agents/
-      skills/        — small-model skills for Pi and OpenCode (/root/.agents/skills)
+      skills/        — small-model skills for Pi and OpenCode (/root/.agents/skills); populated on first start-agent.sh run
     allowlist.txt    — egress domain allowlist (read-only inside the container)
     searxng/         — SearXNG config
   projects/          — your repos go here
