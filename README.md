@@ -101,6 +101,18 @@ regardless of the project it's opened in. Your edits are preserved across
 subsequent runs. Pass `--reseed-global-claudemd` to overwrite with the current
 template.
 
+## Claude Code permission allowlist
+
+On first run, `start-claude.sh` copies `templates/global-claude-settings.json`
+into `~/.claude-containers/shared/settings.json`. The template pre-approves
+common dev-loop operations (file reads/edits, git status/add/commit, build and
+test commands, standard shell utilities) and explicitly denies remote-affecting
+ops (`git push`, `npm publish`, etc.).
+
+On subsequent runs, the script merges `showThinkingSummaries`, `coauthorTag`,
+and `permissions` non-destructively into the existing file — any key already
+present is left unchanged. Your customizations survive `--rebuild`.
+
 ## Included skills
 
 The `skills/` directory holds reusable Claude Code skills. Whenever
@@ -319,6 +331,20 @@ the `instructions` field in `opencode.json`, so OpenCode picks up the same
 environment context. The `claude-dev` exceptions block at the end of the
 template is stripped on the OpenCode copy since it doesn't apply inside
 `claude-agent`. `--reseed-global-claudemd` reseeds this file too.
+
+## Claude Code permission allowlist
+
+`--init-sandbox` writes `templates/global-claude-settings.json` into
+`$SANDBOX_ROOT/.sandbox_config/claude/settings.json` alongside the rest of the
+directory tree. The template pre-approves common dev-loop operations (file
+reads/edits, git status/add/commit, build and test commands, standard shell
+utilities) and explicitly denies remote-affecting ops (`git push`, `npm publish`,
+etc.).
+
+On each subsequent run, the always-run injection block merges `showThinkingSummaries`,
+`coauthorTag`, and `permissions` non-destructively — any key already present is
+left unchanged. User customizations survive `--rebuild` and `--reset-container`
+because those flags do not touch existing files in `.sandbox_config/claude/`.
 
 ## Egress allowlist
 

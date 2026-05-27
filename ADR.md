@@ -2317,3 +2317,70 @@ the repo.
   on a live sandbox is required to confirm deduplication behavior; if OpenCode
   lists both, rename the small-model variants (e.g., `scope-small`) or gate
   OpenCode away from `~/.claude/skills/` via `opencode.json`.
+
+## ADR-039: Curated Claude Code permissions allowlist seeded from template
+
+**Date:** 2026-05-27
+**Status:** Accepted
+
+### Context
+
+Both scripts managed `settings.json` non-destructively — merging
+`showThinkingSummaries: true` and `coauthorTag: "none"` on every run, writing
+a fresh inline JSON when no file existed. Neither script seeded a `permissions`
+block, leaving Claude Code with its default per-operation prompt behavior.
+
+Inside the container the tool is already sandboxed: `start-claude.sh` runs in
+a per-project microVM with no host filesystem access beyond the project mount;
+`start-agent.sh` sits behind a VM-level tinyproxy allowlist. Pre-approving
+read-only and safe-local-mutation commands is therefore low-risk and eliminates
+noisy prompts for routine dev-loop operations.
+
+### Decision
+
+1. **Single source of truth in `templates/global-claude-settings.json`.** The
+   template carries `showThinkingSummaries`, `coauthorTag`, and a `permissions`
+   block with `allow` / `deny` arrays. The inline JSON fallbacks in both scripts
+   are replaced with `cp` of this file when no `settings.json` exists yet.
+
+2. **Seed on `--init-sandbox`, not on container create.** `init_sandbox()` in
+   `start-agent.sh` copies the template to `.sandbox_config/claude/settings.json`
+   immediately after the directory tree is created. This is the right moment:
+   the file doesn't exist yet, so no merge logic is needed and the user gets the
+   curated defaults from the first `start-agent.sh` run.
+
+3. **Non-destructive merge for existing files.** The always-run Python block in
+   both scripts gains a `permissions` branch that fires only when `permissions`
+   is absent from the existing file. This is identical semantics to the
+   `showThinkingSummaries` and `coauthorTag` merge: user edits are never
+   clobbered, and the merge happens at every run so even very old files
+   eventually pick up the key.
+
+4. **Allow list: dev-loop operations only.** The allow list covers file
+   read/edit/write, git status/diff/log/add/commit/stash/branch/checkout and
+   other local git ops, common shell utilities (ls, find, grep, rg, fd, jq,
+   cat, sed, awk, etc.), build and test runners (uv, pip, python, pytest, npm,
+   cargo, go, make), and docker management commands.
+
+5. **Deny list: remote-affecting and publish ops.** `Bash(git push*)` covers
+   all push variants (including `--force`, `-f`, `--force-with-lease`).
+   `Bash(npm publish*)`, `Bash(yarn publish*)`, and `Bash(pnpm publish*)` cover
+   package publication. The deny list is intentionally short; deny wins over
+   allow when both match.
+
+6. **No `--reseed-settings` flag.** If users want to refresh the allowlist from
+   the template, they can delete the `permissions` key (or the whole file) and
+   re-run. A dedicated flag can be added later if needed, symmetric to
+   `--reseed-allowlist`.
+
+### Consequences
+
+- New sandboxes and fresh `start-claude.sh` containers get the curated
+  permissions from the first run; no interactive prompt for routine operations.
+- Existing sandboxes pick up the `permissions` key on the next script run
+  (always-run merge), without losing any existing customizations.
+- `--rebuild` and `--reset-container` do not touch `.sandbox_config/claude/`
+  so the permissions survive a full image rebuild.
+- Users who want stricter or looser defaults can edit `settings.json` in the
+  sandbox (or the shared dir for `start-claude.sh`) — subsequent runs will not
+  overwrite the `permissions` key they've already set.

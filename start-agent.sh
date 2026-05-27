@@ -193,6 +193,12 @@ init_sandbox() {
     "$target/.sandbox_config/agents/skills" \
     "$target/.sandbox_config/searxng" \
     "$target/projects"
+  local settings_tmpl="$SCRIPT_DIR/templates/global-claude-settings.json"
+  local settings_dest="$target/.sandbox_config/claude/settings.json"
+  if [[ -f "$settings_tmpl" ]] && [[ ! -f "$settings_dest" ]]; then
+    cp "$settings_tmpl" "$settings_dest"
+    echo "==> Seeded $settings_dest from template"
+  fi
   echo "==> Sandbox created at $target"
   echo ""
   echo "Next steps:"
@@ -1100,10 +1106,12 @@ fi
 
 # ── inject global ~/.claude/settings.json ────────────────────────────────────
 GLOBAL_SETTINGS_FILE="$CLAUDE_CONFIG_DIR/settings.json"
+GLOBAL_SETTINGS_TEMPLATE="$SCRIPT_DIR/templates/global-claude-settings.json"
 if [[ -f "$GLOBAL_SETTINGS_FILE" ]]; then
-  python3 - "$GLOBAL_SETTINGS_FILE" << 'PYEOF'
+  python3 - "$GLOBAL_SETTINGS_FILE" "$GLOBAL_SETTINGS_TEMPLATE" << 'PYEOF'
 import json, sys
 path = sys.argv[1]
+tmpl_path = sys.argv[2] if len(sys.argv) > 2 else None
 with open(path) as f:
     data = json.load(f)
 changed = False
@@ -1116,13 +1124,25 @@ if data.get('coauthorTag') != 'none':
 if 'effortLevel' in data:
     del data['effortLevel']
     changed = True
+if 'permissions' not in data and tmpl_path:
+    import os
+    if os.path.exists(tmpl_path):
+        with open(tmpl_path) as tf:
+            tmpl = json.load(tf)
+        if 'permissions' in tmpl:
+            data['permissions'] = tmpl['permissions']
+            changed = True
 if changed:
     with open(path, 'w') as f:
         json.dump(data, f, indent=2)
         f.write('\n')
 PYEOF
 else
-  echo '{"showThinkingSummaries": true, "coauthorTag": "none"}' > "$GLOBAL_SETTINGS_FILE"
+  if [[ -f "$GLOBAL_SETTINGS_TEMPLATE" ]]; then
+    cp "$GLOBAL_SETTINGS_TEMPLATE" "$GLOBAL_SETTINGS_FILE"
+  else
+    echo '{"showThinkingSummaries": true, "coauthorTag": "none"}' > "$GLOBAL_SETTINGS_FILE"
+  fi
 fi
 
 # ── inject OpenCode config (inference provider) ─────────────────────────────

@@ -63,6 +63,7 @@ If the named container already exists, it just starts and re-attaches it.
 - **Global container CLAUDE.md is seeded from `templates/global-claude.md`.** Gives every session shared environment context; in `start-agent.sh`, also seeded to `AGENTS.md` for OpenCode (trailing start-claude section stripped). See ADR-015.
 - **Git identity is set via both `~/.gitconfig` and environment variables.** Env vars override gitconfig and work regardless of sandbox mount topology. See ADR-009.
 - **`showThinkingSummaries` is enabled in global user settings.** Merged into `~/.claude/settings.json` on startup; makes Claude Code's thinking visible in the transcript.
+- **A curated `permissions` allowlist is seeded into fresh settings.json files.** `templates/global-claude-settings.json` carries the full template (showThinkingSummaries, coauthorTag, permissions.allow/deny). Both scripts copy the template when no settings.json exists yet, and add `permissions` non-destructively to existing files that lack it. User edits are never clobbered. See ADR-039.
 - **`effortLevel` is intentionally unpinned.** Use `/effort` or project-level `settings.local.json` for situational overrides. See ADR-017.
 - **Sandbox is configured in strict mode.** `sandbox.failIfUnavailable: true` and `sandbox.allowUnsandboxedCommands: false` in project `settings.local.json`; migration block adds these to existing files.
 - **Theme is not set by the script.** Claude Code prompts on first run and persists the choice to `~/.claude.json` (shared across containers via the bind-mount). See ADR-003.

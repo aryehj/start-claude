@@ -2,12 +2,12 @@
 
 ## Status
 
-- [ ] Add `templates/global-claude-settings.json` with the curated defaults (showThinkingSummaries, coauthorTag, permissions.allow / permissions.deny)
-- [ ] Update `start-claude.sh` settings injection (around `start-claude.sh:297-326`) to also seed `permissions` when absent
-- [ ] Update `start-agent.sh` `init_sandbox()` (around `start-agent.sh:179-216`) to write the curated settings.json into `.sandbox_config/claude/settings.json` at init time
-- [ ] Update `start-agent.sh` always-run injection (around `start-agent.sh:1112-1140`) to seed `permissions` only when absent, matching the showThinkingSummaries pattern
-- [ ] Document the new behavior in `README.md` and add an ADR entry in `ADR.md`
-- [ ] Add a test under `tests/` asserting the template is well-formed JSON and that `git push` is *not* in the allow list
+- [x] Add `templates/global-claude-settings.json` with the curated defaults (showThinkingSummaries, coauthorTag, permissions.allow / permissions.deny)
+- [x] Update `start-claude.sh` settings injection (around `start-claude.sh:297-326`) to also seed `permissions` when absent
+- [x] Update `start-agent.sh` `init_sandbox()` (around `start-agent.sh:179-216`) to write the curated settings.json into `.sandbox_config/claude/settings.json` at init time
+- [x] Update `start-agent.sh` always-run injection (around `start-agent.sh:1112-1140`) to seed `permissions` only when absent, matching the showThinkingSummaries pattern
+- [x] Document the new behavior in `README.md` and add an ADR entry in `ADR.md`
+- [x] Add a test under `tests/` asserting the template is well-formed JSON and that `git push` is *not* in the allow list
 
 ## Context
 
