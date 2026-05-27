@@ -110,8 +110,10 @@ test commands, standard shell utilities) and explicitly denies remote-affecting
 ops (`git push`, `npm publish`, etc.).
 
 On subsequent runs, the script merges `showThinkingSummaries`, `coauthorTag`,
-and `permissions` non-destructively into the existing file — any key already
-present is left unchanged. Your customizations survive `--rebuild`.
+`theme`, and `permissions` non-destructively into the existing file — any key
+already present is left unchanged (except `theme: "auto"`, which is promoted to
+`dark-ansi` to avoid OSC 11 background-detection misreads). Your customizations
+survive `--rebuild`.
 
 ## Included skills
 
@@ -342,8 +344,9 @@ utilities) and explicitly denies remote-affecting ops (`git push`, `npm publish`
 etc.).
 
 On each subsequent run, the always-run injection block merges `showThinkingSummaries`,
-`coauthorTag`, and `permissions` non-destructively — any key already present is
-left unchanged. User customizations survive `--rebuild` and `--reset-container`
+`coauthorTag`, `theme`, and `permissions` non-destructively — any key already
+present is left unchanged (except `theme: "auto"`, which is promoted to
+`dark-ansi`). User customizations survive `--rebuild` and `--reset-container`
 because those flags do not touch existing files in `.sandbox_config/claude/`.
 
 ## Egress allowlist
@@ -650,13 +653,14 @@ noted.
 | `test-cross-vm-isolation.sh` | Cross-VM isolation: `claude-agent` and `research` containers cannot reach each other by name, port, or via `host.docker.internal:3000`. Positive test confirms inference carve-out still works. Skips if either VM is not running. | `./tests/test-cross-vm-isolation.sh` |
 | `test_agent_sh.py` | Static check: no `docker run` in `start-agent.sh` publishes a host port | `uv run --with pytest pytest tests/test_agent_sh.py` |
 | `test_research.py` | Unit tests for `research.py` pure helpers (`compose_denylist`, `denylist_to_squid_acl`, `_prune_subdomains`, etc.) | `uv run --with pytest pytest tests/test_research.py` |
+| `test_settings_template.py` | Validates `templates/global-claude-settings.json` is well-formed JSON, has required keys, and `git push` is absent from the allow list | `uv run --with pytest pytest tests/test_settings_template.py` |
 | `probe-denylist.sh` | End-to-end Squid denylist probe (allow and deny URLs) from inside `research-searxng` | `bash tests/probe-denylist.sh` |
 | `probe-vane-egress.sh` | Verifies `research-vane` has correct `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars and that a sidecar HTTPS round-trip through Squid succeeds | `bash tests/probe-vane-egress.sh` |
 
 The pytest suites can be run together:
 
 ```bash
-uv run --with pytest pytest tests/test_agent_sh.py tests/test_research.py
+uv run --with pytest pytest tests/test_agent_sh.py tests/test_research.py tests/test_settings_template.py
 ```
 
 ## Environment variable reference (research.py)

@@ -12,6 +12,7 @@ research.py                  — Python script; isolated Colima VM + Vane + Sear
 dockerfiles/                 — Dockerfiles built by start-agent.sh (claude-agent.Dockerfile)
 templates/                   — seed templates copied to host state dirs on first run
   global-claude.md                    — seeded to ~/.claude-containers/shared/CLAUDE.md
+  global-claude-settings.json         — seeded to settings.json (showThinkingSummaries, coauthorTag, theme, permissions)
   research-denylist-sources.txt       — seeded to ~/.research/denylist-sources.txt by research.py
   research-denylist-additions.txt     — seeded to ~/.research/denylist-additions.txt by research.py
 skills/                      — reusable Claude Code skills (back up of ~/.claude/skills/)
@@ -23,6 +24,7 @@ tests/                       — unit tests and infra smoke tests
   test_agent_sh.py                     — static checks: no host-port publish, pi integration invariants, sandbox trust-boundary
   test_dockerfile.py                   — static checks: pi and opencode CLI install lines in claude-agent.Dockerfile
   test_research.py                     — unit tests for research.py pure helpers
+  test_settings_template.py           — validates global-claude-settings.json is well-formed and git push is absent from allow list
   probe-denylist.sh                    — host-driven Squid denylist end-to-end probe (allow + deny URLs)
   probe-vane-egress.sh                 — smoke test for research-vane egress env vars and sidecar HTTPS round-trip
 experiments/                 — archived experiments (not part of CI)
@@ -63,10 +65,10 @@ If the named container already exists, it just starts and re-attaches it.
 - **Global container CLAUDE.md is seeded from `templates/global-claude.md`.** Gives every session shared environment context; in `start-agent.sh`, also seeded to `AGENTS.md` for OpenCode (trailing start-claude section stripped). See ADR-015.
 - **Git identity is set via both `~/.gitconfig` and environment variables.** Env vars override gitconfig and work regardless of sandbox mount topology. See ADR-009.
 - **`showThinkingSummaries` is enabled in global user settings.** Merged into `~/.claude/settings.json` on startup; makes Claude Code's thinking visible in the transcript.
-- **A curated `permissions` allowlist is seeded into fresh settings.json files.** `templates/global-claude-settings.json` carries the full template (showThinkingSummaries, coauthorTag, permissions.allow/deny). Both scripts copy the template when no settings.json exists yet, and add `permissions` non-destructively to existing files that lack it. User edits are never clobbered. See ADR-039.
+- **A curated `permissions` allowlist is seeded into fresh settings.json files.** `templates/global-claude-settings.json` carries the full template (showThinkingSummaries, coauthorTag, theme, permissions.allow/deny). Both scripts copy the template when no settings.json exists yet, and add `permissions` non-destructively to existing files that lack it. User edits are never clobbered. See ADR-039.
 - **`effortLevel` is intentionally unpinned.** Use `/effort` or project-level `settings.local.json` for situational overrides. See ADR-017.
 - **Sandbox is configured in strict mode.** `sandbox.failIfUnavailable: true` and `sandbox.allowUnsandboxedCommands: false` in project `settings.local.json`; migration block adds these to existing files.
-- **Theme is not set by the script.** Claude Code prompts on first run and persists the choice to `~/.claude.json` (shared across containers via the bind-mount). See ADR-003.
+- **Theme defaults to `dark-ansi`.** Seeded into fresh settings.json files; existing files with `theme: "auto"` or no `theme` key get promoted to `dark-ansi` by the migration block. Explicit user choices (`dark`, `light`, `dark-daltonized`, etc.) are preserved. `auto` is avoided because OSC 11 background detection misreads Ghostty's mid-gray background as light. See ADR-040.
 
 ## start-agent.sh key decisions
 

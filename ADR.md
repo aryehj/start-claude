@@ -128,7 +128,7 @@ this instead of hardcoding `/tmp` resolves both issues.
 ## ADR-003: Set theme in project-level settings, not global `.claude.json`
 
 **Date:** 2026-04-03
-**Status:** Superseded (theme injection removed 2026-05-12)
+**Status:** Superseded (theme injection removed 2026-05-12; partially reinstated by ADR-040)
 
 ### Context
 
@@ -2384,3 +2384,58 @@ noisy prompts for routine dev-loop operations.
 - Users who want stricter or looser defaults can edit `settings.json` in the
   sandbox (or the shared dir for `start-claude.sh`) — subsequent runs will not
   overwrite the `permissions` key they've already set.
+
+## ADR-040: Default `theme` to `dark-ansi`; promote `auto` on existing files
+
+**Date:** 2026-05-27
+**Status:** Accepted (partially supersedes ADR-003's supersession)
+
+### Context
+
+ADR-003 ended with "theme injection removed entirely; Claude Code prompts the
+user on first run and persists the choice." In practice, Claude Code defaults
+new installs to `theme: "auto"`, which uses OSC 11 to query the terminal's
+background color and pick `light` vs `dark` at runtime.
+
+That detection misbehaves in terminals with mid-luminance backgrounds. Ghostty's
+default gray reads as "light" on some runs and "dark" on others, depending on
+exact RGB and whatever heuristic Claude Code applies to the OSC 11 response.
+Observed symptom: a session that rendered as a dark theme yesterday renders as
+light today, with no config change in between, and the user perceives the
+script as having silently flipped the theme.
+
+`dark-ansi` sidesteps the detection entirely and pulls colors from the
+terminal's own ANSI palette, so syntax highlighting and diff colors inherit
+whatever Ghostty (or any other terminal) has been configured with — no
+hardcoded RGB collisions with the user's color scheme.
+
+### Decision
+
+1. **Template seeds `theme: "dark-ansi"`.** Added to
+   `templates/global-claude-settings.json` so fresh `settings.json` files
+   created via `cp` (in both scripts and in `--init-sandbox`) ship with it.
+
+2. **Migration promotes `auto` and missing keys.** The always-run Python block
+   in both `start-claude.sh` and `start-agent.sh` checks
+   `data.get('theme') in (None, 'auto')` and rewrites to `'dark-ansi'`. Any
+   other explicit value (`dark`, `light`, `dark-daltonized`, `light-ansi`,
+   etc.) is left alone — promoting only `auto` and missing-key is the narrow
+   intervention this ADR scopes itself to.
+
+3. **No `--reseed-theme` flag.** Same rationale as ADR-039 §6: users who want
+   to re-pick can `/theme` interactively, and the migration only fires on the
+   two values it considers "unset".
+
+### Consequences
+
+- New sandboxes and fresh `start-claude.sh` containers get `dark-ansi` from
+  the first run; no spurious light/dark flips between sessions in
+  mid-luminance terminals.
+- Existing users on `theme: "auto"` (the Claude Code default) get promoted
+  on their next script run. Users who picked `dark` or `light` explicitly via
+  `/theme` keep their choice.
+- This partially reverses ADR-003's supersession ("injecting a fixed theme is
+  unnecessary"). The narrower claim now: `auto` is broken enough in common
+  terminals that picking *a* sensible default beats letting OSC 11 guess.
+  Users with strong preferences override via `/theme` once; the script then
+  preserves that.

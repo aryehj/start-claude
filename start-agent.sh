@@ -1124,6 +1124,9 @@ if data.get('coauthorTag') != 'none':
 if 'effortLevel' in data:
     del data['effortLevel']
     changed = True
+if data.get('theme') in (None, 'auto'):
+    data['theme'] = 'dark-ansi'
+    changed = True
 if 'permissions' not in data and tmpl_path:
     import os
     if os.path.exists(tmpl_path):

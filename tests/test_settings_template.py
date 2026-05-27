@@ -20,6 +20,7 @@ def test_required_top_level_keys():
     data = _load()
     assert data.get("showThinkingSummaries") is True
     assert data.get("coauthorTag") == "none"
+    assert data.get("theme") == "dark-ansi"
 
 
 def test_permissions_structure():

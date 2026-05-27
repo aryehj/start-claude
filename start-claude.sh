@@ -317,6 +317,10 @@ if 'effortLevel' in data:
     del data['effortLevel']
     changed = True
     print(f"==> Removed effortLevel from {path}")
+if data.get('theme') in (None, 'auto'):
+    data['theme'] = 'dark-ansi'
+    changed = True
+    print(f"==> Set theme to dark-ansi in {path}")
 if 'permissions' not in data and tmpl_path:
     import os
     if os.path.exists(tmpl_path):

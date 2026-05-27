@@ -1,6 +1,7 @@
 {
   "showThinkingSummaries": true,
   "coauthorTag": "none",
+  "theme": "dark-ansi",
   "permissions": {
     "allow": [
       "Read",
