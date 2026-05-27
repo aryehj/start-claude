@@ -736,10 +736,13 @@ fi
 if ! colima_profile_running; then
   start_colima_vm
 else
-  # Detect sandbox switch by checking the active virtiofs mount inside the VM.
-  current_vm_mount=$(vm_sh 'mount -t virtiofs 2>/dev/null | awk "{print \$3}" | head -1' 2>/dev/null | tr -d '\r' || true)
-  if [[ -n "$current_vm_mount" && "$current_vm_mount" != "$SANDBOX_ROOT" ]]; then
-    echo "==> Sandbox changed from '$current_vm_mount' to '$SANDBOX_ROOT' — restarting VM with new mount"
+  # Detect sandbox switch by checking whether $SANDBOX_ROOT appears in the
+  # VM's virtiofs mount list. Colima mounts $HOME and /tmp/colima by default
+  # in addition to our --mount, so picking the first entry was wrong and
+  # caused a spurious VM restart on every re-attach.
+  current_vm_mounts=$(vm_sh 'mount -t virtiofs 2>/dev/null | awk "{print \$3}"' 2>/dev/null | tr -d '\r' || true)
+  if [[ -n "$current_vm_mounts" ]] && ! grep -Fxq "$SANDBOX_ROOT" <<<"$current_vm_mounts"; then
+    echo "==> Sandbox '$SANDBOX_ROOT' not mounted in running VM — restarting with new mount"
     colima stop -p "$COLIMA_PROFILE"
     start_colima_vm
   else
