@@ -2,11 +2,11 @@
 
 ## Status
 
-- [ ] Extract a `seed_agent_skills` helper from the inline block in `init_sandbox()` (`start-agent.sh:196-209`); keep the destination/source paths and the per-skill `rm -rf` + `cp -R` idempotency
-- [ ] Stop seeding inside `init_sandbox()` — leave only the `mkdir -p ".../agents/skills"` (line 193) so the bind-mount target exists; the next container creation does the seeding
-- [ ] Call `seed_agent_skills` from the fresh-container path next to `sync_skills` (`start-agent.sh:1533`). Both `--rebuild` and `--reset-container` remove the container, which routes execution through this path; reattach skips both (matches Claude Code skills' behavior — that's the intent)
-- [ ] Update CLAUDE.md ADR-038 bullet ("`--init-sandbox` seeds these into …") and the "small-model skill ports seeded … via `--init-sandbox`" line in the `start-agent.sh key decisions` section to reflect: seeding now runs on every fresh container, identical trigger surface as Claude Code skills
-- [ ] Update README.md where it describes when skills appear (if any prose currently ties seeding to init time)
+- [x] Extract a `seed_agent_skills` helper from the inline block in `init_sandbox()` (`start-agent.sh:196-209`); keep the destination/source paths and the per-skill `rm -rf` + `cp -R` idempotency
+- [x] Stop seeding inside `init_sandbox()` — leave only the `mkdir -p ".../agents/skills"` (line 193) so the bind-mount target exists; the next container creation does the seeding
+- [x] Call `seed_agent_skills` from the fresh-container path next to `sync_skills` (`start-agent.sh:1533`). Both `--rebuild` and `--reset-container` remove the container, which routes execution through this path; reattach skips both (matches Claude Code skills' behavior — that's the intent)
+- [x] Update CLAUDE.md ADR-038 bullet ("`--init-sandbox` seeds these into …") and the "small-model skill ports seeded … via `--init-sandbox`" line in the `start-agent.sh key decisions` section to reflect: seeding now runs on every fresh container, identical trigger surface as Claude Code skills
+- [x] Update README.md where it describes when skills appear (if any prose currently ties seeding to init time)
 
 ## Context
 
