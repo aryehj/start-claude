@@ -91,6 +91,10 @@ class Paths:
     def vane_data_dir(self) -> Path:
         return self.base / "vane-data"
 
+    @property
+    def vane_config_file(self) -> Path:
+        return self.vane_data_dir / "data" / "config.json"
+
 
 # ── VmConfig ───────────────────────────────────────────────────────────────────
 
@@ -549,6 +553,26 @@ iptables -A RESEARCH -s {research_net_cidr} -d {research_net_cidr} -p tcp --dpor
 """
 
 
+def patch_vane_searxng_url(config_text: str, desired: str) -> Optional[str]:
+    """Return patched config JSON if search.searxngURL differs from desired, else None.
+
+    Returns None on JSONDecodeError (caller should warn and leave file untouched).
+    Idempotent: returns None when the value is already correct.
+    """
+    import json as _json
+    try:
+        config = _json.loads(config_text)
+    except _json.JSONDecodeError:
+        return None
+    if not isinstance(config.get("search"), dict):
+        config["search"] = {}
+    search = config["search"]
+    if search.get("searxngURL") == desired:
+        return None
+    search["searxngURL"] = desired
+    return _json.dumps(config, indent=2)
+
+
 def vm_has_hashlimit(profile: str = COLIMA_PROFILE) -> bool:
     """Probe the VM for xt_hashlimit availability. Best-effort; default True on error.
 
@@ -921,6 +945,42 @@ def ensure_searxng_container(paths: Paths, config: VmConfig) -> bool:
     return start_or_recreate(CONTAINER_SEARXNG, _create)
 
 
+def ensure_vane_searxng_url(paths: Paths) -> bool:
+    """Ensure Vane's config.json points at the correct SearXNG container URL.
+
+    Reads config.json, patches search.searxngURL if wrong, writes back.
+    Returns True if the file was changed.
+    Does nothing (returns False) if the file does not exist yet — correct-only-if-exists
+    is the safe default for first-run installs where config.json isn't created until
+    after the user completes UI setup.
+    """
+    import json as _json
+    desired = f"http://{CONTAINER_SEARXNG}:8080"
+    cfg_file = paths.vane_config_file
+    if not cfg_file.exists():
+        return False
+    text = cfg_file.read_text()
+    patched = patch_vane_searxng_url(text, desired)
+    if patched is None:
+        # Either already correct (silent) or parse error (warn).
+        try:
+            _json.loads(text)
+        except _json.JSONDecodeError:
+            print(
+                f"warning: could not parse {cfg_file}; SearXNG URL may be wrong.\n"
+                f"  Open http://localhost:3000 → Settings → SearXNG URL and set it to {desired}.",
+                file=sys.stderr,
+            )
+        return False
+    try:
+        old_url = _json.loads(text).get("search", {}).get("searxngURL", "(unset)")
+    except Exception:
+        old_url = "(unset)"
+    cfg_file.write_text(patched)
+    print(f"==> Vane SearXNG URL corrected: {old_url} → {desired}")
+    return True
+
+
 def ensure_vane_container(paths: Paths, config: VmConfig) -> bool:
     """Start or create the Vane container. Returns True if newly created."""
     paths.vane_data_dir.mkdir(parents=True, exist_ok=True)
@@ -1097,12 +1157,17 @@ def main() -> None:
     probe_inference(config)
 
     ensure_searxng_container(paths, config)
-    ensure_vane_container(paths, config)
+    url_changed = ensure_vane_searxng_url(paths)
+    vane_created = ensure_vane_container(paths, config)
+    if url_changed and not vane_created:
+        # Config was patched on an already-running container; restart so Vane re-reads it.
+        subprocess.run(["docker", "restart", CONTAINER_VANE], capture_output=True, check=True)
+        print(f"    {CONTAINER_VANE}: restarted to apply SearXNG URL")
 
     print()
     print("==> Research environment ready")
     print(f"    Vane    : http://localhost:{config.vane_port}")
-    print( "    SearXNG : http://localhost:8080 (internal to VM)")
+    print(f"    SearXNG : auto-wired to http://{CONTAINER_SEARXNG}:8080 (internal)")
     print(f"    LLM     : configure at http://localhost:{config.vane_port} → Settings → LLM")
     if config.backend == "ollama":
         print(f"              use http://host.docker.internal:{config.inference_port} (Ollama)")

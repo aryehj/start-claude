@@ -8,6 +8,7 @@ from research import (
     _prune_subdomains,
     compose_denylist,
     denylist_to_squid_acl,
+    patch_vane_searxng_url,
     prune_orphan_cache_files,
     render_iptables_apply_script,
     render_searxng_settings,
@@ -310,6 +311,65 @@ def test_compose_denylist_set_algebra_invariant(tmp_path):
     result = set(compose_denylist(p))
     expected = (cache | additions) - overrides
     assert result == expected
+
+
+# ── patch_vane_searxng_url ────────────────────────────────────────────────────
+
+DESIRED_URL = "http://research-searxng:8080"
+
+def test_patch_vane_searxng_url_already_correct_returns_none():
+    config = '{"search": {"searxngURL": "http://research-searxng:8080"}, "version": 1}'
+    assert patch_vane_searxng_url(config, DESIRED_URL) is None
+
+
+def test_patch_vane_searxng_url_wrong_host_corrected():
+    config = '{"search": {"searxngURL": "http://host.docker.internal:8080"}, "version": 1}'
+    result = patch_vane_searxng_url(config, DESIRED_URL)
+    assert result is not None
+    import json
+    parsed = json.loads(result)
+    assert parsed["search"]["searxngURL"] == DESIRED_URL
+    assert parsed["version"] == 1  # other keys preserved
+
+
+def test_patch_vane_searxng_url_preserves_other_keys():
+    config = '{"search": {"searxngURL": "http://wrong:8080", "otherSetting": true}, "modelProviders": ["openai"]}'
+    result = patch_vane_searxng_url(config, DESIRED_URL)
+    assert result is not None
+    import json
+    parsed = json.loads(result)
+    assert parsed["search"]["searxngURL"] == DESIRED_URL
+    assert parsed["search"]["otherSetting"] is True
+    assert parsed["modelProviders"] == ["openai"]
+
+
+def test_patch_vane_searxng_url_missing_search_key_adds_it():
+    config = '{"version": 1, "modelProviders": []}'
+    result = patch_vane_searxng_url(config, DESIRED_URL)
+    assert result is not None
+    import json
+    parsed = json.loads(result)
+    assert parsed["search"]["searxngURL"] == DESIRED_URL
+    assert parsed["version"] == 1
+
+
+def test_patch_vane_searxng_url_malformed_json_returns_none():
+    assert patch_vane_searxng_url("{not valid json", DESIRED_URL) is None
+
+
+def test_patch_vane_searxng_url_empty_string_returns_none():
+    assert patch_vane_searxng_url("", DESIRED_URL) is None
+
+
+def test_patch_vane_searxng_url_missing_searxng_url_key_in_search():
+    # search key exists but no searxngURL inside it
+    config = '{"search": {"someOtherKey": "val"}, "version": 2}'
+    result = patch_vane_searxng_url(config, DESIRED_URL)
+    assert result is not None
+    import json
+    parsed = json.loads(result)
+    assert parsed["search"]["searxngURL"] == DESIRED_URL
+    assert parsed["search"]["someOtherKey"] == "val"
 
 
 # ── prune_orphan_cache_files ─────────────────────────────────────────────────
