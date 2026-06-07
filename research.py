@@ -902,7 +902,12 @@ def ensure_vane_container(paths: Paths, config: VmConfig) -> None:
                 "docker", "run", "-d",
                 "--name", CONTAINER_VANE,
                 "--network", RESEARCH_NET_NAME,
-                "--add-host", "host.docker.internal:host-gateway",
+                # Point host.docker.internal at the VM's default-route gateway
+                # (the macOS host), NOT Docker's host-gateway alias — under
+                # Colima the latter resolves to the Linux VM's bridge gateway,
+                # one hop short of where Ollama/omlx actually listens. This is
+                # the same IP the firewall RETURN rule and probe_inference use.
+                "--add-host", f"host.docker.internal:{config.host_ip}",
                 "-p", f"{config.vane_port}:3000",
                 "-e", f"SEARXNG_API_URL=http://{CONTAINER_SEARXNG}:8080",
                 "-e", f"HTTP_PROXY=http://{config.bridge_ip}:{SQUID_PORT}",
