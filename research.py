@@ -38,7 +38,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -637,6 +637,39 @@ def docker_container_exists(name: str) -> bool:
     return result.returncode == 0
 
 
+def docker_container_running(name: str) -> bool:
+    """Return True only if the container exists AND its State.Running is true."""
+    result = subprocess.run(
+        ["docker", "inspect", "-f", "{{.State.Running}}", name],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def start_or_recreate(name: str, create: Callable[[], None]) -> bool:
+    """Start an existing container or recreate it if start fails. Returns True if newly created.
+
+    If the container doesn't exist, or if docker start fails / the container
+    isn't running after start (e.g. RWLayer nil, stale run config), the
+    container is removed and create() is called for a fresh docker run.
+    """
+    if docker_container_exists(name):
+        result = subprocess.run(
+            ["docker", "start", name],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and docker_container_running(name):
+            print(f"    {name}: started (existing container)")
+            return False
+        stderr = result.stderr.strip() or "(no stderr)"
+        print(f"warning: docker start {name} failed, recreating: {stderr}", file=sys.stderr)
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=True)
+    create()
+    return True
+
+
 def docker_network_exists(name: str) -> bool:
     result = subprocess.run(
         ["docker", "network", "inspect", name],
@@ -869,12 +902,14 @@ def seed_searxng_settings(paths: Paths, config: VmConfig) -> None:
 def ensure_searxng_container(paths: Paths, config: VmConfig) -> bool:
     """Start or create the SearXNG container. Returns True if newly created."""
     print("==> Starting SearXNG container")
-    if not docker_container_exists(CONTAINER_SEARXNG):
+
+    def _create() -> None:
         subprocess.run(
             [
                 "docker", "run", "-d",
                 "--name", CONTAINER_SEARXNG,
                 "--network", RESEARCH_NET_NAME,
+                "--restart", "unless-stopped",
                 "-v", f"{paths.searxng_settings}:/etc/searxng/settings.yml:ro",
                 "docker.io/searxng/searxng",
             ],
@@ -882,26 +917,22 @@ def ensure_searxng_container(paths: Paths, config: VmConfig) -> bool:
             check=True,
         )
         print(f"    {CONTAINER_SEARXNG}: created")
-        return True
-    else:
-        subprocess.run(
-            ["docker", "start", CONTAINER_SEARXNG],
-            capture_output=True,
-        )
-        print(f"    {CONTAINER_SEARXNG}: started (existing container)")
-        return False
+
+    return start_or_recreate(CONTAINER_SEARXNG, _create)
 
 
-def ensure_vane_container(paths: Paths, config: VmConfig) -> None:
-    """Start or create the Vane container."""
+def ensure_vane_container(paths: Paths, config: VmConfig) -> bool:
+    """Start or create the Vane container. Returns True if newly created."""
     paths.vane_data_dir.mkdir(parents=True, exist_ok=True)
     print("==> Starting Vane container")
-    if not docker_container_exists(CONTAINER_VANE):
+
+    def _create() -> None:
         subprocess.run(
             [
                 "docker", "run", "-d",
                 "--name", CONTAINER_VANE,
                 "--network", RESEARCH_NET_NAME,
+                "--restart", "unless-stopped",
                 # Point host.docker.internal at the VM's default-route gateway
                 # (the macOS host), NOT Docker's host-gateway alias — under
                 # Colima the latter resolves to the Linux VM's bridge gateway,
@@ -909,7 +940,6 @@ def ensure_vane_container(paths: Paths, config: VmConfig) -> None:
                 # the same IP the firewall RETURN rule and probe_inference use.
                 "--add-host", f"host.docker.internal:{config.host_ip}",
                 "-p", f"{config.vane_port}:3000",
-                "-e", f"SEARXNG_API_URL=http://{CONTAINER_SEARXNG}:8080",
                 "-e", f"HTTP_PROXY=http://{config.bridge_ip}:{SQUID_PORT}",
                 "-e", f"HTTPS_PROXY=http://{config.bridge_ip}:{SQUID_PORT}",
                 "-e", f"NO_PROXY={CONTAINER_SEARXNG},host.docker.internal,localhost,127.0.0.1",
@@ -921,12 +951,8 @@ def ensure_vane_container(paths: Paths, config: VmConfig) -> None:
         )
         print(f"    {CONTAINER_VANE}: created (http://localhost:{config.vane_port})")
         print(f"    note: configure LLM at http://localhost:{config.vane_port} on first access")
-    else:
-        subprocess.run(
-            ["docker", "start", CONTAINER_VANE],
-            capture_output=True,
-        )
-        print(f"    {CONTAINER_VANE}: started (existing container)")
+
+    return start_or_recreate(CONTAINER_VANE, _create)
 
 
 def probe_inference(config: VmConfig) -> None:
