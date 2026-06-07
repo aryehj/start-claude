@@ -111,6 +111,8 @@ If the named container already exists, it just starts and re-attaches it.
 - **Auto-prunes orphan files in `denylist-cache/`.** `prune_orphan_cache_files()` deletes stale `.txt` files left by URL or SHA changes in `denylist-sources.txt`. Called on every refresh and reload. See ADR-026.
 - **Hard-exits if `~/.research/allowlist.txt` is detected.** Legacy installations must `rm -rf ~/.research/` then `--rebuild`; no automatic migration. See ADR-022.
 - **Vane container wired through Squid via `HTTP_PROXY` and `HTTPS_PROXY`.** `NO_PROXY` exempts SearXNG and `host.docker.internal`. See ADR-029.
+- **Self-healing container start via `start_or_recreate`.** If `docker start` returns non-zero or the container is not `Running` immediately after, the script prints a visible warning (including captured stderr), `docker rm -f`s the broken container, and recreates it. Covers both the `RWLayer nil` dangling-layer case (hard non-zero exit) and crash-on-boot (zero exit but exits immediately). Both containers also get `--restart unless-stopped` so transient crashes self-recover; an explicit `docker stop` still sticks. See ADR-041.
+- **Script-controlled Vane SearXNG URL (config.json authority).** On every bring-up, `ensure_vane_searxng_url` patches `~/.research/vane-data/data/config.json`'s `search.searxngURL` to `http://research-searxng:8080` if it differs. Vane ignores the `SEARXNG_API_URL` env var (which is removed); config.json is the authoritative source. The patch preserves all other fields; parse failures warn rather than clobber. See ADR-041.
 
 ## Commit style
 

@@ -2439,3 +2439,40 @@ hardcoded RGB collisions with the user's color scheme.
   terminals that picking *a* sensible default beats letting OSC 11 guess.
   Users with strong preferences override via `/theme` once; the script then
   preserves that.
+
+## ADR-041: research.py self-heals container start and controls Vane's SearXNG URL
+
+**Date:** 2026-06-07
+**Status:** Accepted
+
+### Context
+
+A debugging session surfaced three distinct failures that all presented as "Vane can't reach SearXNG," none of which `research.py` detected or reported. All three trace to the same root: **the script trusted existing container and config state without validation.**
+
+**Failure 1 — Dead SearXNG container, silently.** `research-searxng` was `Exited (137)` with `err=RWLayer of container ... is unexpectedly nil` — a dangling Docker storage layer from an unclean Colima VM restart. `ensure_searxng_container` ran `docker start` with no `check=True` and printed "started (existing container)" regardless of outcome. The only repair for `RWLayer nil` is `docker rm -f` + recreate; `docker start` can never fix it.
+
+**Failure 2 — Stale `docker run` config on existing containers.** `ensure_vane_container` / `ensure_searxng_container` only `docker run` when the container is absent; otherwise they `docker start`. So `docker run`-time settings (e.g. `--add-host`) never refreshed on an existing container — every such fix required a manual `docker rm -f` to take effect.
+
+**Failure 3 — Wrong SearXNG URL, unvalidated.** Vane (`vane:slim-latest`) ignores the `SEARXNG_API_URL` env var and reads `search.searxngURL` from its persisted `~/.research/vane-data/data/config.json`. That field was set via the UI to `http://host.docker.internal:8080` (the macOS host, where SearXNG is not published) instead of the correct `http://research-searxng:8080` (the sibling container). The env var gave false confidence that the URL was wired correctly.
+
+### Decision
+
+**Self-healing container start.** Replace the bare `docker start` calls with a `start_or_recreate(name, create_fn)` helper:
+- Attempt `docker start`; if it returns non-zero **or** the container is not `Running` immediately after (`docker inspect -f '{{.State.Running}}'`), print a visible `warning:` including the captured stderr (so `RWLayer ... unexpectedly nil` surfaces), then `docker rm -f` and call `create_fn()` for a fresh `docker run`.
+- This covers both the hard-fail case (non-zero exit, `RWLayer nil`) and the crash-on-boot case (zero exit but the container exits immediately).
+
+**`--restart unless-stopped` on both containers.** Added to the `docker run` for `research-vane` and `research-searxng` so transient crashes and VM reboots self-recover without re-running the script. `unless-stopped` (not `always`) is chosen so an explicit `docker stop` sticks — the daemon does not restart what the user intentionally stopped.
+
+**Script-controlled SearXNG URL.** On every bring-up, `ensure_vane_searxng_url(paths)` reads `~/.research/vane-data/data/config.json`, checks `search.searxngURL`, and patches it to `http://research-searxng:8080` if needed (preserving all other fields). Implementation as a pure `patch_vane_searxng_url(config_text, desired) -> Optional[str]` helper so it is unit-testable without a Docker daemon — same split as `render_searxng_settings` / `denylist_to_squid_acl`. If the file does not exist (pre-first-run), the function returns `False` and no action is taken — correct-only-if-exists is the safe default. If the file cannot be parsed, a `warning:` is printed pointing the user at Settings → SearXNG URL; the file is never clobbered.
+
+The URL is corrected *before* `ensure_vane_container`. If the config changed and the container was already running, `docker restart research-vane` is issued so Vane re-reads config.json. A fresh `docker run` (from the self-heal path) reads the corrected file on first boot.
+
+**`SEARXNG_API_URL` env var removed.** Vane ignores it; keeping it implies the URL is wired when it isn't. `NO_PROXY=research-searxng,...` is retained (still required so SearXNG calls bypass Squid per ADR-029).
+
+### Consequences
+
+- A crashed or storage-corrupted container is auto-recreated on the next `research.py` run; the error is visible, not swallowed.
+- `docker run`-time changes (e.g. `--add-host` fixes) reach existing installs without a manual `docker rm` — the self-heal path fires on any start failure.
+- `config.json` is treated as user state: only `search.searxngURL` is rewritten; all other fields and the file itself are left untouched.
+- Users no longer need to configure SearXNG URL in the Vane UI; it is set correctly on every script run.
+- The `--restart unless-stopped` policy does not interfere with `rebuild_teardown` (which already uses `docker rm -f`) or `--reset-container`.

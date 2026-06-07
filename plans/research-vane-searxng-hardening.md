@@ -4,7 +4,7 @@
 
 - [x] Phase 1: self-healing container start + `--restart unless-stopped`
 - [x] Phase 2: script-controlled Vane SearXNG URL (config.json authority)
-- [ ] Phase 3: unit tests, ADR, docs + banner
+- [x] Phase 3: unit tests, ADR, docs + banner
 
 ## Context
 
