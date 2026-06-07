@@ -93,7 +93,9 @@ class Paths:
 
     @property
     def vane_config_file(self) -> Path:
-        return self.vane_data_dir / "data" / "config.json"
+        # Mount is {vane_data_dir}:/home/vane/data; Vane writes config.json
+        # to /home/vane/data/config.json → host path is vane_data_dir/config.json.
+        return self.vane_data_dir / "config.json"
 
 
 # ── VmConfig ───────────────────────────────────────────────────────────────────
