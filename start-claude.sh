@@ -271,8 +271,24 @@ GITEOF
   '
 
   echo "==> Exporting $IMAGE_TAG"
-  until container inspect "$SETUP_NAME" 2>/dev/null | grep -qE '"status"[[:space:]]*:[[:space:]]*"stopped"'; do
+  # Wait for the setup container to be fully stopped before exporting its
+  # filesystem. The inspect JSON nests run state as
+  #   "status" : { "state" : "stopped" }
+  # in current Apple Containers (older versions used a flat
+  # "status":"stopped"). Match the inner "state" field, tolerating
+  # whitespace. Bound the wait at 60s so a future format change surfaces a
+  # clear error instead of spinning forever.
+  _wait=0
+  until container inspect "$SETUP_NAME" 2>/dev/null \
+        | grep -qE '"state"[[:space:]]*:[[:space:]]*"stopped"'; do
     sleep 0.1
+    _wait=$((_wait + 1))
+    if (( _wait >= 600 )); then
+      echo "error: setup container '$SETUP_NAME' did not reach stopped state after 60s." >&2
+      echo "       Apple Containers inspect format may have changed again; raw output:" >&2
+      container inspect "$SETUP_NAME" >&2 2>/dev/null || true
+      exit 1
+    fi
   done
   BUILD_TMP=$(mktemp -d)
   container export --output "$BUILD_TMP/rootfs.tar" "$SETUP_NAME"
