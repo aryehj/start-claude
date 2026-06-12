@@ -2477,7 +2477,7 @@ The URL is corrected *before* `ensure_vane_container`. If the config changed and
 - Users no longer need to configure SearXNG URL in the Vane UI; it is set correctly on every script run.
 - The `--restart unless-stopped` policy does not interfere with `rebuild_teardown` (which already uses `docker rm -f`) or `--reset-container`.
 
-## ADR-042: Version-robust container existence check in start-claude.sh
+## ADR-042: Version-robust container existence check and inspect-status parsing in start-claude.sh
 
 **Date:** 2026-06-12
 **Status:** Accepted
@@ -2513,10 +2513,24 @@ container_exists() {
 
 A container counts as present only when inspect **succeeds** (`|| return 1` catches the new non-zero exit) **and** prints a non-empty payload that is not the empty-array sentinel (catches both the old `[]` and the new empty stdout).
 
-Also hardened the image-export wait loop's grep from `'"status":"stopped"'` to `'"status"[[:space:]]*:[[:space:]]*"stopped"'`, so a fresh build does not hang forever in the `until` loop if the new version pretty-prints inspect JSON with whitespace around the colon.
+**Image-export wait loop.** The same major-version bump also restructured the inspect JSON for a *stopped* container. The image build runs a setup container in the foreground, then waits for it to be stopped before `container export`s its filesystem. That wait greps the inspect output for the run state. The old format was a flat string:
+
+```json
+"status":"stopped"
+```
+
+The new format nests it as an object (and pretty-prints with whitespace around the colon):
+
+```json
+"status" : {
+  "state" : "stopped"
+}
+```
+
+So the original grep for `"status":"stopped"` never matched and the `until` loop spun forever at `==> Exporting` on a fresh build. The fix matches the inner `"state"` field, `grep -qE '"state"[[:space:]]*:[[:space:]]*"stopped"'`, and bounds the wait at 60s — on timeout it prints the raw inspect output and exits non-zero, so any further format drift fails loudly instead of hanging.
 
 ### Consequences
 
 - Both the `--rebuild` removal path and the attach path now branch correctly on a genuinely-missing container, regardless of Apple Containers version.
 - Future inspect-format drift is contained to one helper rather than two duplicated string comparisons.
-- The wait-loop grep tolerates whitespace, removing one latent hang on the fresh-build path. The `"stopped"` status *value* itself is still assumed unchanged — if a future version renames it, that loop is the next thing to revisit.
+- The export wait loop matches the new nested `"status": { "state": "stopped" }` shape, so fresh builds complete instead of hanging at `==> Exporting`. The 60s timeout backstop converts any future inspect-format drift into a clear error with the raw output, rather than an indefinite spin. The `"stopped"` state *value* itself is still assumed unchanged — if a future version renames it, that loop is the next thing to revisit.
