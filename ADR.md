@@ -2476,3 +2476,47 @@ The URL is corrected *before* `ensure_vane_container`. If the config changed and
 - `config.json` is treated as user state: only `search.searxngURL` is rewritten; all other fields and the file itself are left untouched.
 - Users no longer need to configure SearXNG URL in the Vane UI; it is set correctly on every script run.
 - The `--restart unless-stopped` policy does not interfere with `rebuild_teardown` (which already uses `docker rm -f`) or `--reset-container`.
+
+## ADR-042: Version-robust container existence check in start-claude.sh
+
+**Date:** 2026-06-12
+**Status:** Accepted
+
+### Context
+
+A major-version release of Apple Containers changed the `container inspect NAME` contract for a missing container. The earlier behavior — relied on throughout `start-claude.sh` — was **exit 0 with stdout `[]`**. The new release instead **exits non-zero, writes the error to stderr, and emits empty stdout**:
+
+```
+$ container inspect start-claude; echo "exit=$?"
+Error: container not found: start-claude
+exit=1
+```
+
+Both existence checks in `start-claude.sh` used `[[ "$(container inspect "$NAME" 2>/dev/null)" != "[]" ]]`. With stderr suppressed, a missing container now yields empty stdout, and `"" != "[]"` is **true** — so the script took the "container exists" branch and then failed on the follow-up command. This presented as two contradictory symptoms:
+
+- `--rebuild`: printed "removing existing container", then `container rm` failed with *"container with ID start-claude not found"*.
+- bare run: printed "already exists — attaching", then `container exec` failed with *"get failed: container start-claude not found"*.
+
+The string-comparison-not-exit-code approach was an explicit prior decision (it worked because the old CLI returned `[]` on success-with-no-match), so the regression was a contract change upstream, not a latent bug.
+
+### Decision
+
+Replace both inline checks with a single `container_exists()` helper that is robust to all observed forms — old `[]`-on-exit-0, new non-zero-exit, and new empty-stdout:
+
+```bash
+container_exists() {
+  local out
+  out="$(container inspect "$1" 2>/dev/null)" || return 1
+  [[ -n "$out" && "$out" != "[]" ]]
+}
+```
+
+A container counts as present only when inspect **succeeds** (`|| return 1` catches the new non-zero exit) **and** prints a non-empty payload that is not the empty-array sentinel (catches both the old `[]` and the new empty stdout).
+
+Also hardened the image-export wait loop's grep from `'"status":"stopped"'` to `'"status"[[:space:]]*:[[:space:]]*"stopped"'`, so a fresh build does not hang forever in the `until` loop if the new version pretty-prints inspect JSON with whitespace around the colon.
+
+### Consequences
+
+- Both the `--rebuild` removal path and the attach path now branch correctly on a genuinely-missing container, regardless of Apple Containers version.
+- Future inspect-format drift is contained to one helper rather than two duplicated string comparisons.
+- The wait-loop grep tolerates whitespace, removing one latent hang on the fresh-build path. The `"stopped"` status *value* itself is still assumed unchanged — if a future version renames it, that loop is the next thing to revisit.

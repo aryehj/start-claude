@@ -54,7 +54,7 @@ If the named container already exists, it just starts and re-attaches it.
 - **Single shared image, per-project containers.** One `claude-dev:latest` image built once; each project gets its own named container for state isolation.
 - **Image built via `container build` with inline setup.** Setup runs in a temporary `debian:bookworm-slim` container, exported as a tarball, then built via `FROM scratch + ADD rootfs.tar`. (The old `container export --image` flag was removed in v0.11.0.)
 - **`container system start` is idempotent.** Always called before any container operation; returns immediately if the service is already running.
-- **`container inspect` returns `[]` with exit 0 for missing containers.** Existence check uses string comparison, not exit code.
+- **Container existence is checked via a version-robust `container_exists()` helper.** `container inspect`'s missing-container contract changed across Apple Containers major versions: older builds exit 0 with stdout `[]`; the v-major release exits non-zero with the error on stderr and empty stdout. The helper treats a container as present only when inspect succeeds **and** prints a non-empty, non-`[]` payload — covering all three forms. See ADR-042.
 - **Claude Code installer binary is symlinked into `/usr/local/bin`.** The official installer places `claude` in `~/.local/bin` (not in PATH); the setup script symlinks it so `claude` is available in all shell modes.
 - **`UV_CACHE_DIR` resolves dynamically to `${TMPDIR:-/tmp}/uv-cache`.** Avoids the read-only `/root/.cache` and `/tmp` sandbox mounts. See ADR-001, ADR-004.
 - **`UV_PROJECT_ENVIRONMENT` redirects venvs to `${TMPDIR:-/tmp}/.venv`.** Prevents macOS-binary `.venv`s from leaking into the Linux container. See ADR-007.
