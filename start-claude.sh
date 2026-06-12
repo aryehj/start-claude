@@ -64,6 +64,18 @@ if [[ ! -d "$PROJECT_DIR" ]]; then
   exit 1
 fi
 
+# ── container existence check ─────────────────────────────────────────────────
+# `container inspect NAME` behaves differently across Apple Containers versions:
+#   - older: missing container → exit 0 with stdout "[]"
+#   - newer: missing container → non-zero exit, error on stderr, empty stdout
+# Treat the container as existing only when inspect succeeds AND prints a
+# non-empty payload that is not the empty-array sentinel. Robust to both.
+container_exists() {
+  local out
+  out="$(container inspect "$1" 2>/dev/null)" || return 1
+  [[ -n "$out" && "$out" != "[]" ]]
+}
+
 # ── ensure container service is running ───────────────────────────────────────
 echo "==> Starting container service (no-op if already running)"
 container system start
@@ -72,7 +84,7 @@ container system start
 IMAGE_TAG="claude-dev:latest"
 
 if $REBUILD; then
-  if [[ "$(container inspect "$CONTAINER_NAME" 2>/dev/null)" != "[]" ]]; then
+  if container_exists "$CONTAINER_NAME"; then
     echo "==> --rebuild requested — removing existing container '$CONTAINER_NAME'."
     container rm "$CONTAINER_NAME"
   fi
@@ -159,7 +171,7 @@ else
 fi
 
 # ── check for existing container ──────────────────────────────────────────────
-if [[ "$(container inspect "$CONTAINER_NAME" 2>/dev/null)" != "[]" ]]; then
+if container_exists "$CONTAINER_NAME"; then
   echo "Container '$CONTAINER_NAME' already exists — attaching."
   container start "$CONTAINER_NAME" 2>/dev/null || true
   container exec -it -w "$PROJECT_DIR" "${CONTAINER_ENV[@]}" "$CONTAINER_NAME" /bin/bash
@@ -259,7 +271,7 @@ GITEOF
   '
 
   echo "==> Exporting $IMAGE_TAG"
-  until container inspect "$SETUP_NAME" 2>/dev/null | grep -q '"status":"stopped"'; do
+  until container inspect "$SETUP_NAME" 2>/dev/null | grep -qE '"status"[[:space:]]*:[[:space:]]*"stopped"'; do
     sleep 0.1
   done
   BUILD_TMP=$(mktemp -d)
