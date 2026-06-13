@@ -3,7 +3,7 @@
 ## Status
 
 - [x] Phase 1: Validate `sandbox.network` enforcement and Claude Code connectivity in-container
-- [ ] Phase 2: Full list port, migration semantics, flag, docs/ADR/tests
+- [x] Phase 2: Full list port, migration semantics, flag, docs/ADR/tests
 
 ## Context
 

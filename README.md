@@ -689,13 +689,14 @@ noted.
 | `test_agent_sh.py` | Static check: no `docker run` in `start-agent.sh` publishes a host port | `uv run --with pytest pytest tests/test_agent_sh.py` |
 | `test_research.py` | Unit tests for `research.py` pure helpers (`compose_denylist`, `denylist_to_squid_acl`, `_prune_subdomains`, etc.) | `uv run --with pytest pytest tests/test_research.py` |
 | `test_settings_template.py` | Validates `templates/global-claude-settings.json` is well-formed JSON, has required keys, and `git push` is absent from the allow list | `uv run --with pytest pytest tests/test_settings_template.py` |
+| `test_sandbox_allowlist.py` | Validates `templates/sandbox-allowlist.txt` is well-formed and that `start-claude.sh` injects `sandbox.network.allowedDomains` with correct `*.d` expansion | `uv run --with pytest pytest tests/test_sandbox_allowlist.py` |
 | `probe-denylist.sh` | End-to-end Squid denylist probe (allow and deny URLs) from inside `research-searxng` | `bash tests/probe-denylist.sh` |
 | `probe-vane-egress.sh` | Verifies `research-vane` has correct `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars and that a sidecar HTTPS round-trip through Squid succeeds | `bash tests/probe-vane-egress.sh` |
 
 The pytest suites can be run together:
 
 ```bash
-uv run --with pytest pytest tests/test_agent_sh.py tests/test_research.py tests/test_settings_template.py
+uv run --with pytest pytest tests/test_agent_sh.py tests/test_research.py tests/test_settings_template.py tests/test_sandbox_allowlist.py
 ```
 
 ## Environment variable reference (research.py)

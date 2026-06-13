@@ -13,6 +13,7 @@ dockerfiles/                 — Dockerfiles built by start-agent.sh (claude-age
 templates/                   — seed templates copied to host state dirs on first run
   global-claude.md                    — seeded to ~/.claude-containers/shared/CLAUDE.md
   global-claude-settings.json         — seeded to settings.json (showThinkingSummaries, coauthorTag, theme, permissions)
+  sandbox-allowlist.txt               — seeded to sandbox.network.allowedDomains in .claude/settings.local.json by start-claude.sh
   research-denylist-sources.txt       — seeded to ~/.research/denylist-sources.txt by research.py
   research-denylist-additions.txt     — seeded to ~/.research/denylist-additions.txt by research.py
 skills/                      — reusable Claude Code skills (back up of ~/.claude/skills/)
@@ -25,6 +26,7 @@ tests/                       — unit tests and infra smoke tests
   test_dockerfile.py                   — static checks: pi and opencode CLI install lines in claude-agent.Dockerfile
   test_research.py                     — unit tests for research.py pure helpers
   test_settings_template.py           — validates global-claude-settings.json is well-formed and git push is absent from allow list
+  test_sandbox_allowlist.py           — validates sandbox-allowlist.txt is well-formed and that start-claude.sh injects allowedDomains with *.d expansion
   probe-denylist.sh                    — host-driven Squid denylist end-to-end probe (allow + deny URLs)
   probe-vane-egress.sh                 — smoke test for research-vane egress env vars and sidecar HTTPS round-trip
 experiments/                 — archived experiments (not part of CI)
