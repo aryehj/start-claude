@@ -125,6 +125,11 @@ if sb.get('allowUnsandboxedCommands') is not False:
     sb['allowUnsandboxedCommands'] = False
     changed = True
     print(f"==> Set sandbox.allowUnsandboxedCommands=false in {path}")
+for key in ('theme', 'spinnerTipsEnabled', 'prefersReducedMotion'):
+    if key in data:
+        del data[key]
+        changed = True
+        print(f"==> Removed {key} from {path} (belongs in global settings.json)")
 if changed:
     with open(path, 'w') as f:
         json.dump(data, f, indent=2)

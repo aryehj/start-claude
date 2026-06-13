@@ -1515,6 +1515,11 @@ for key in ('failIfUnavailable', 'allowUnsandboxedCommands'):
         del sb[key]
         changed = True
         print(f"==> Removed sandbox.{key} from {path}")
+for key in ('theme', 'spinnerTipsEnabled', 'prefersReducedMotion'):
+    if key in data:
+        del data[key]
+        changed = True
+        print(f"==> Removed {key} from {path} (belongs in global settings.json)")
 if changed:
     with open(path, 'w') as f:
         json.dump(data, f, indent=2)
