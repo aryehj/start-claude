@@ -2535,10 +2535,10 @@ So the original grep for `"status":"stopped"` never matched and the `until` loop
 - Future inspect-format drift is contained to one helper rather than two duplicated string comparisons.
 - The export wait loop matches the new nested `"status": { "state": "stopped" }` shape, so fresh builds complete instead of hanging at `==> Exporting`. The 60s timeout backstop converts any future inspect-format drift into a clear error with the raw output, rather than an indefinite spin. The `"stopped"` state *value* itself is still assumed unchanged — if a future version renames it, that loop is the next thing to revisit.
 
-## ADR-043: `start-claude.sh` grants `--cap-add SYS_ADMIN` to enable the bubblewrap sandbox
+## ADR-043: `start-claude.sh` grants `--cap-add SYS_ADMIN` and `--cap-add NET_ADMIN` to enable the bubblewrap sandbox
 
 **Date:** 2026-06-13
-**Status:** Accepted
+**Status:** Accepted (updated 2026-06-13: added NET_ADMIN)
 
 ### Context
 
@@ -2578,6 +2578,14 @@ Do **not** install `bwrap` setuid — the cap alone is sufficient, and a setuid
 binary would be a needless surface increase. Sandbox settings are unchanged
 (still enabled, still `failIfUnavailable: true`).
 
+**Update (2026-06-13):** After `SYS_ADMIN` was added, every sandboxed Bash
+command started failing with `bwrap: loopback: Failed RTM_NEWADDR: No child
+processes`. Bwrap can now create a new network namespace (`--unshare-net` is its
+default) but needs `CAP_NET_ADMIN` to bring up the loopback interface (`lo`)
+inside that namespace. Adding `--cap-add NET_ADMIN` resolves this. The same
+microVM-per-container safety argument from the original decision applies: the cap
+empowers only the guest-VM process, not the macOS host.
+
 ### Why this is safe here but rejected in ADR-033
 
 ADR-033 refused `CAP_SYS_ADMIN` for `start-agent.sh` because Colima runs **many
@@ -2605,5 +2613,8 @@ that protects the host is unchanged.
   script reattaches existing containers via `container start` + `container exec`
   without re-running `container run`. Recreate once — `container rm <name>` (or
   `--rebuild`) — so the next run creates it with the capability.
+- The container now holds both `CAP_SYS_ADMIN` and `CAP_NET_ADMIN`. NET_ADMIN
+  extends the guest-kernel surface slightly (network interface/route/iptables
+  ops); the same microVM boundary argument applies — no path to the macOS host.
 - ADR-033's claim that the sandbox already worked in the microVM is corrected by
   this record.
