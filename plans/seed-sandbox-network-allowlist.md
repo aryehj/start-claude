@@ -2,7 +2,7 @@
 
 ## Status
 
-- [ ] Phase 1: Validate `sandbox.network` enforcement and Claude Code connectivity in-container
+- [x] Phase 1: Validate `sandbox.network` enforcement and Claude Code connectivity in-container
 - [ ] Phase 2: Full list port, migration semantics, flag, docs/ADR/tests
 
 ## Context
@@ -187,13 +187,34 @@ container?) must be known before committing the full list and rewriting docs.
 
 ## Notes
 
+### Phase 1 Findings (2026-06-13)
+
+**Enforcement model on Linux (confirmed from source code — `@anthropic-ai/sandbox-runtime@2.1.177`):**
+- When `sandbox.network.allowedDomains` is set at session startup, the sandbox uses `bwrap --unshare-net` to fully isolate the network namespace, then routes all traffic through an HTTP proxy (port 3128 inside the namespace, forwarded via socat bridge to the host proxy). The proxy enforces domain filtering. Deny-by-default: when no pattern matches, the proxy rejects the connection. Enforcement is kernel-backed (network namespace isolation), not advisory — a process inside the sandbox cannot reach any network without going through the proxy.
+- Source: `sandbox/linux-sandbox-utils.js`, `sandbox/sandbox-manager.js` in the installed package.
+
+**Claude Code own API traffic unaffected (confirmed):**
+- Claude Code's Node process runs outside bwrap. The `HTTP_PROXY` / `HTTPS_PROXY` environment variables set inside the bwrap namespace are NOT present in the parent Node process. API calls to `api.anthropic.com` are completely unaffected by `sandbox.network` settings. Confirmed by live observation: the session was running normally with the proxy proxy vars visible only inside sandboxed bash.
+
+**Mid-session hot-reload: NOT supported.**
+- Adding `allowedDomains` to settings.local.json mid-session has no effect. The proxy is initialized at session startup; settings changes require a session restart to take effect. Live-tested: added `allowedDomains: ["pypi.org", "*.pypi.org"]` mid-session; both `pypi.org` and `example.com` (off-list) continued to succeed. No hot-reload path.
+
+**`*.d` wildcard matching — confirmed multi-level (confirmed by source code + JS test):**
+- `matchesDomainPattern` in `sandbox-manager.js` uses `.endsWith('.' + baseDomain)` for `*.`-prefixed patterns. This is MULTI-LEVEL: `*.foo.com` matches `bar.foo.com`, `a.b.foo.com`, `a.b.c.foo.com`. It does NOT match `foo.com` (the apex). Each apex domain `d` must appear twice: once as `d` (exact match for apex) and once as `*.d` (all subdomains at any depth). This is the correct expansion strategy.
+
+**SSH / git egress (confirmed):**
+- `ssh` binary is not installed in the container. SSH git push via `git@github.com` is therefore a non-issue in practice.
+- HTTPS git operations use `HTTP_PROXY=http://localhost:3128` inside the sandbox. The proxy enforces domain filtering. Under deny-by-default, `git push` to `github.com` via HTTPS is BLOCKED unless `github.com` and `*.github.com` are in `allowedDomains`.
+- `GIT_SSH_COMMAND` is configured (via `ssh -o ProxyCommand='socat - PROXY:localhost:%h:%p,proxyport=3128'`) to route SSH through the HTTP CONNECT proxy; same domain rules apply. Moot since `ssh` is absent, but the mechanism is wired.
+- Phase 2 should note that HTTPS git push to `github.com` is blocked under default config; user adds `github.com` + `*.github.com` to their project's settings.local.json to re-enable.
+
+**Schema (confirmed from source code):**
+- Key path in settings.local.json: `sandbox.network.allowedDomains` (array of strings).
+- `deniedDomains` is a required field in the Zod schema and should be included as `[]` if unused.
+- Patterns: bare domain (exact match) or `*.domain` (all subdomains, multi-level). No other wildcard forms supported.
+
 - **`github.com` / `git push` consequence.** The ported list omits `github.com`
-  (start-agent.sh's read-only stance). Under deny-by-default, `gh` and HTTPS
-  pushes to `github.com` will be blocked from sandboxed bash. Unlike
-  start-agent.sh, the user can fix this trivially by adding `github.com` /
-  `*.github.com` to their own writable `settings.local.json`. Surface this in
-  the global CLAUDE.md note. Phase 1 determines whether SSH push is also
-  affected.
+  (start-agent.sh's read-only stance). Under deny-by-default, HTTPS git pushes to `github.com` will be blocked from sandboxed bash. SSH git is moot (no `ssh` binary). Unlike start-agent.sh, the user can fix this trivially by adding `github.com` / `*.github.com` to their own writable `settings.local.json`. Surface this in the global CLAUDE.md note.
 - **Non-goal:** refactoring `start-agent.sh` to read the same template. Its
   enforcement (proxy + `:ro` mount) and matching (suffix) differ; unifying is a
   separate change.
