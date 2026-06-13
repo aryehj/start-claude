@@ -407,11 +407,18 @@ else
 fi
 rm -rf "$SKILLS_TMP"
 
+# --cap-add SYS_ADMIN lets Claude Code's bubblewrap sandbox create the nested
+# user+mount namespaces it wraps every Bash command in. Apple Containers'
+# default seccomp profile gates clone(CLONE_NEW*) on CAP_SYS_ADMIN (allowing
+# only userns-alone without it), so bwrap fails without this. Safe here because
+# each container is its own microVM — the cap empowers the process only within
+# its dedicated VM, not against the macOS host. See ADR-043.
 container run \
   --name "$CONTAINER_NAME" \
   -it \
   -m "$CONTAINER_MEMORY" \
   -c "$CONTAINER_CPUS" \
+  --cap-add SYS_ADMIN \
   -v "$PROJECT_DIR:$PROJECT_DIR" \
   -v "$CLAUDE_CONFIG_DIR:/root/.claude" \
   -v "$CLAUDE_JSON_FILE:/root/.claude.json" \

@@ -2534,3 +2534,76 @@ So the original grep for `"status":"stopped"` never matched and the `until` loop
 - Both the `--rebuild` removal path and the attach path now branch correctly on a genuinely-missing container, regardless of Apple Containers version.
 - Future inspect-format drift is contained to one helper rather than two duplicated string comparisons.
 - The export wait loop matches the new nested `"status": { "state": "stopped" }` shape, so fresh builds complete instead of hanging at `==> Exporting`. The 60s timeout backstop converts any future inspect-format drift into a clear error with the raw output, rather than an indefinite spin. The `"stopped"` state *value* itself is still assumed unchanged — if a future version renames it, that loop is the next thing to revisit.
+
+## ADR-043: `start-claude.sh` grants `--cap-add SYS_ADMIN` to enable the bubblewrap sandbox
+
+**Date:** 2026-06-13
+**Status:** Accepted
+
+### Context
+
+`start-claude.sh` ships the Claude Code sandbox deps (`bubblewrap`, `socat`,
+`libseccomp2`, `@anthropic-ai/sandbox-runtime`) and enables the sandbox in
+project `settings.local.json` with `failIfUnavailable: true`. ADR-033 asserted,
+in passing, that "the bubblewrap sandbox is the correct isolation mechanism
+inside an Apple Containers microVM" — implying it worked there. In practice it
+did **not**: every sandboxed Bash command failed at `bwrap: Creating new
+namespace failed: Operation not permitted`.
+
+Diagnosis inside the running container:
+
+- `unshare -Ur true` → **succeeds**. Unprivileged user namespaces are fully
+  permitted by the guest kernel (`/proc/sys/user/max_user_namespaces` = 16290).
+- `bwrap --ro-bind / / --dev /dev --proc /proc true` → **fails** with EPERM.
+- `bwrap` is stock `0755` (not setuid); `chmod u+s` did **not** help.
+
+The asymmetry — bare `unshare(CLONE_NEWUSER)` allowed, but `bwrap`'s
+`clone(CLONE_NEWUSER | CLONE_NEWNS)` denied — is the fingerprint of an
+OCI-style seccomp profile that gates `clone`/`unshare` with namespace flags on
+`CAP_SYS_ADMIN`, with a single carve-out permitting `CLONE_NEWUSER` *alone*
+without it. Setuid does not help because seccomp applies regardless of uid, and
+the container's capability bounding set lacks `CAP_SYS_ADMIN` to begin with.
+
+Apple's `container run` exposes no `--privileged` and no `--security-opt`
+seccomp override, but it does expose `--cap-add`. Empirically,
+`container run --rm --cap-add SYS_ADMIN claude-dev:latest bwrap …` succeeds with
+the stock non-setuid binary — adding the capability both puts it in the bounding
+set and satisfies the seccomp gate, so unprivileged userns + the cap carries
+`bwrap` with nothing else changed.
+
+### Decision
+
+Add `--cap-add SYS_ADMIN` to the `container run` invocation in `start-claude.sh`.
+Do **not** install `bwrap` setuid — the cap alone is sufficient, and a setuid
+binary would be a needless surface increase. Sandbox settings are unchanged
+(still enabled, still `failIfUnavailable: true`).
+
+### Why this is safe here but rejected in ADR-033
+
+ADR-033 refused `CAP_SYS_ADMIN` for `start-agent.sh` because Colima runs **many
+containers in one shared VM**: SYS_ADMIN on a container is an escape path into
+that shared VM, where it could attack sibling containers and the shared
+tinyproxy + iptables egress firewall — boundaries protecting *other things*.
+
+`start-claude.sh` runs **one microVM per container**. There are no siblings and
+no shared in-VM firewall. `CAP_SYS_ADMIN`'s escape primitives break a process
+out of a namespace into its host *kernel* — here the guest VM kernel, where the
+agent already runs as root. Reaching macOS requires breaking the
+Virtualization.framework hypervisor boundary, which capabilities do not affect.
+So the cap empowers the process only within its own disposable VM; the boundary
+that protects the host is unchanged.
+
+### Consequences
+
+- The in-container bubblewrap sandbox works: per-command filesystem/network
+  restriction (read-only `/root/.cache`, `/tmp`, `allowWrite` enforcement) is now
+  actually in force, rather than silently failing the preflight.
+- The container holds `CAP_SYS_ADMIN`. The marginal cost is a slightly larger
+  guest-kernel attack surface (mount, namespace ops); negligible given the agent
+  is already root-in-guest, and irrelevant to the host boundary.
+- Run-time flag: an **existing** container does not pick this up, because the
+  script reattaches existing containers via `container start` + `container exec`
+  without re-running `container run`. Recreate once — `container rm <name>` (or
+  `--rebuild`) — so the next run creates it with the capability.
+- ADR-033's claim that the sandbox already worked in the microVM is corrected by
+  this record.
