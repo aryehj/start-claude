@@ -115,6 +115,41 @@ already present is left unchanged (except `theme: "auto"`, which is promoted to
 `dark-ansi` to avoid OSC 11 background-detection misreads). Your customizations
 survive `--rebuild`.
 
+## Sandbox network allowlist
+
+On every run, `start-claude.sh` seeds `sandbox.network.allowedDomains` into the
+project's `.claude/settings.local.json`. The default list covers Anthropic,
+common package registries (npm, PyPI, crates.io, etc.), and a broad set of
+reference, research, and documentation hosts. It is sourced from
+`templates/sandbox-allowlist.txt` in this repo; each bare domain `d` is expanded
+to both `d` (exact) and `*.d` (all subdomains).
+
+**Sandboxed bash commands** (`curl`, `git`, `uv`, etc.) can only reach hosts on
+this list — all others are blocked at the kernel level (network namespace +
+proxy). The restriction does **not** affect Claude Code's own API traffic, which
+runs outside the sandbox.
+
+**`github.com` is omitted by default.** HTTPS `git push` (and other write
+operations) to GitHub are blocked in the default config. To re-enable for a
+project:
+
+```json
+// .claude/settings.local.json
+{
+  "sandbox": {
+    "network": {
+      "allowedDomains": ["github.com", "*.github.com", "...other entries..."],
+      "deniedDomains": []
+    }
+  }
+}
+```
+
+Or add just the hosts you need and re-run `start-claude.sh --reseed-sandbox-allowlist` only when you want to reset the whole list to the current template (this overwrites any per-project customizations to `allowedDomains`).
+
+This is a **guardrail, not a hard boundary**: `settings.local.json` is writable
+by the agent. The microVM itself has full unrestricted egress at the VM level.
+
 ## Included skills
 
 The `skills/` directory holds reusable Claude Code skills. Whenever

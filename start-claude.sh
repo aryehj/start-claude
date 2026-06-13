@@ -3,6 +3,7 @@
 #
 # Usage:
 #   start-claude.sh [--rebuild] [--reseed-global-claudemd]
+#                   [--reseed-sandbox-allowlist]
 #                   [--git-name=NAME] [--git-email=EMAIL]
 #                   [project-dir] [container-name]
 #
@@ -17,6 +18,7 @@ set -euo pipefail
 # ── args ──────────────────────────────────────────────────────────────────────
 REBUILD=false
 RESEED_GLOBAL_CLAUDEMD=false
+RESEED_SANDBOX_ALLOWLIST=false
 CLI_GIT_NAME=""
 CLI_GIT_EMAIL=""
 POSITIONAL=()
@@ -24,6 +26,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --rebuild) REBUILD=true ;;
     --reseed-global-claudemd) RESEED_GLOBAL_CLAUDEMD=true ;;
+    --reseed-sandbox-allowlist) RESEED_SANDBOX_ALLOWLIST=true ;;
     --git-name=*) CLI_GIT_NAME="${1#--git-name=}" ;;
     --git-email=*) CLI_GIT_EMAIL="${1#--git-email=}" ;;
     --git-name) CLI_GIT_NAME="${2:?--git-name requires a value}"; shift ;;
@@ -97,19 +100,48 @@ fi
 # ── inject project settings ───────────────────────────────────────────────────
 # settings.local.json is gitignored by Claude Code and project-specific.
 PROJECT_SETTINGS_FILE="$PROJECT_DIR/.claude/settings.local.json"
-if [[ -f "$PROJECT_SETTINGS_FILE" ]]; then
-  # Migrate sandbox settings: bool→object form, ensure filesystem.allowWrite, strict mode
-  python3 - "$PROJECT_SETTINGS_FILE" << 'PYEOF'
-import json, sys
+ALLOWLIST_TEMPLATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/templates/sandbox-allowlist.txt"
+mkdir -p "$PROJECT_DIR/.claude"
+python3 - "$PROJECT_SETTINGS_FILE" "$ALLOWLIST_TEMPLATE" "$RESEED_SANDBOX_ALLOWLIST" << 'PYEOF'
+import json, sys, os
 path = sys.argv[1]
-with open(path) as f:
-    data = json.load(f)
+allowlist_path = sys.argv[2]
+reseed_network = sys.argv[3] == 'true'
+
+# Parse allowlist: strip comments and blanks; expand each domain d to d and *.d
+allowed_domains = []
+with open(allowlist_path) as f:
+    for line in f:
+        line = line.strip()
+        if line and not line.startswith('#'):
+            allowed_domains.append(line)
+            allowed_domains.append('*.' + line)
+
+# Load or create settings
+if os.path.exists(path):
+    with open(path) as f:
+        data = json.load(f)
+    existed = True
+else:
+    data = {}
+    existed = False
+
 changed = False
+
+# Migrate sandbox boolean → object
 if isinstance(data.get('sandbox'), bool):
     data['sandbox'] = {"enabled": True, "autoAllowBashIfSandboxed": True}
     changed = True
     print(f"==> Migrated sandbox boolean→object in {path}")
+
 sb = data.setdefault('sandbox', {})
+
+# Ensure baseline sandbox fields
+if not existed:
+    sb.setdefault('enabled', True)
+    sb.setdefault('autoAllowBashIfSandboxed', True)
+    changed = True
+
 fs = sb.setdefault('filesystem', {})
 aw = fs.setdefault('allowWrite', [])
 for p in ['/tmp/uv-cache', '$TMPDIR/uv-cache', '/tmp/.venv', '$TMPDIR/.venv']:
@@ -117,41 +149,42 @@ for p in ['/tmp/uv-cache', '$TMPDIR/uv-cache', '/tmp/.venv', '$TMPDIR/.venv']:
         aw.append(p)
         changed = True
         print(f"==> Added {p} to sandbox.filesystem.allowWrite in {path}")
+
 if sb.get('failIfUnavailable') is not True:
     sb['failIfUnavailable'] = True
     changed = True
     print(f"==> Set sandbox.failIfUnavailable=true in {path}")
+
 if sb.get('allowUnsandboxedCommands') is not False:
     sb['allowUnsandboxedCommands'] = False
     changed = True
     print(f"==> Set sandbox.allowUnsandboxedCommands=false in {path}")
+
+# Remove stale UI keys that belong in global settings.json
 for key in ('theme', 'spinnerTipsEnabled', 'prefersReducedMotion'):
     if key in data:
         del data[key]
         changed = True
         print(f"==> Removed {key} from {path} (belongs in global settings.json)")
+
+# Seed sandbox.network.allowedDomains — seed-if-absent; reseed if flag set.
+# Deliberately does NOT reconcile per-entry: user-pruned entries stay pruned.
+if reseed_network or 'network' not in sb:
+    sb['network'] = {
+        'allowedDomains': allowed_domains,
+        'deniedDomains': []
+    }
+    changed = True
+    action = "Reseeded" if reseed_network else "Seeded"
+    print(f"==> {action} sandbox.network.allowedDomains ({len(allowed_domains)} entries) in {path}")
+
 if changed:
     with open(path, 'w') as f:
         json.dump(data, f, indent=2)
         f.write('\n')
+    if not existed:
+        print(f"==> Created {path}")
 PYEOF
-else
-  mkdir -p "$PROJECT_DIR/.claude"
-  cat > "$PROJECT_SETTINGS_FILE" << 'JSONEOF'
-{
-  "sandbox": {
-    "enabled": true,
-    "autoAllowBashIfSandboxed": true,
-    "failIfUnavailable": true,
-    "allowUnsandboxedCommands": false,
-    "filesystem": {
-      "allowWrite": ["/tmp/uv-cache", "$TMPDIR/uv-cache", "/tmp/.venv", "$TMPDIR/.venv"]
-    }
-  }
-}
-JSONEOF
-  echo "==> Created $PROJECT_SETTINGS_FILE"
-fi
 
 # Seed the global container CLAUDE.md from the repo template. Claude Code
 # auto-injects ~/.claude/CLAUDE.md into every session; the shared mount puts

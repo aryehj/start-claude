@@ -63,7 +63,23 @@ A local model server runs on the macOS host at `$OLLAMA_HOST` (Ollama, port 1143
 
 ## Differences in claude-dev (start-claude.sh)
 
-- **No network proxy or allowlist** — full outbound egress is available.
+- **Sandboxed bash egress is restricted to a default-deny allowlist.**
+  `start-claude.sh` seeds `sandbox.network.allowedDomains` in the project's
+  `.claude/settings.local.json`. Only hosts on that list (and their
+  subdomains) are reachable from sandboxed bash commands (`curl`, `git`,
+  `uv`, etc.); all others are blocked at the kernel level (network namespace
+  + proxy). The list covers Anthropic, common package registries, reference
+  sites, and major academic/government sources — see
+  `templates/sandbox-allowlist.txt` in the `start-claude` repo.
+  **`github.com` is omitted by default** (write-capable). HTTPS `git push`
+  is blocked under the default config; to re-enable it for a project, add
+  `github.com` and `*.github.com` to `sandbox.network.allowedDomains` in
+  `.claude/settings.local.json`. To add any other host, do the same. To
+  reset to the current template list, run
+  `start-claude.sh --reseed-sandbox-allowlist`.
+  Note: the microVM itself has full unrestricted egress at the VM level —
+  this is a guardrail against accidental off-list fetches, not a hard
+  security boundary (the settings file is writable by the agent).
 - **No local inference server** — `$OLLAMA_HOST` and `$OMLX_HOST` are unset.
 - **Bubblewrap sandbox is active** for bash commands. `/tmp` and
   `/root/.cache` are **read-only** at the sandbox mount layer. Use `$TMPDIR`

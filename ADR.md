@@ -2618,3 +2618,102 @@ that protects the host is unchanged.
   ops); the same microVM boundary argument applies — no path to the macOS host.
 - ADR-033's claim that the sandbox already worked in the microVM is corrected by
   this record.
+
+## ADR-044: Seed a default-deny `sandbox.network` allowlist in `start-claude.sh`
+
+**Date:** 2026-06-13
+**Status:** Accepted
+
+### Context
+
+`start-claude.sh` runs Claude Code's bubblewrap sandbox (`@anthropic-ai/sandbox-runtime`)
+in strict mode (`failIfUnavailable: true`). Until now there was no network restriction
+for sandboxed bash: the global `CLAUDE.md` told agents "full outbound egress is
+available" in `claude-dev` containers.
+
+`start-agent.sh` takes the opposite stance: a curated default-deny egress allowlist
+enforced at the VM layer via tinyproxy + iptables, with the allowlist file
+bind-mounted `:ro` so the agent cannot modify it.
+
+This change ports that allowlist philosophy into `start-claude.sh` via Claude Code's
+own `sandbox.network.allowedDomains` setting, which is enforced by the sandbox
+runtime via kernel-level network namespace isolation (not merely advisory — the
+network namespace makes any host unreachable unless it routes through the in-sandbox
+proxy, which enforces the domain list).
+
+### Decision
+
+1. **`templates/sandbox-allowlist.txt`** is the source of truth — a list of bare
+   domains with section comments, mirroring `start-agent.sh`'s allowlist in content
+   and philosophy (read-only hosts only; write-capable hosts omitted).
+
+2. **`start-claude.sh`** reads the template at runtime, strips comments and blank
+   lines, expands each bare domain `d` to both `d` (exact match) and `*.d` (all
+   subdomains, any depth), and writes the result to `sandbox.network.allowedDomains`
+   in the project's `.claude/settings.local.json`. `deniedDomains: []` is also
+   written (required by the Zod schema).
+
+3. **Suffix-vs-wildcard semantic difference.** `start-agent.sh`'s tinyproxy
+   allowlist uses suffix matching (`github.com` also matches `api.github.com`).
+   Claude Code's `allowedDomains` matches exactly: `github.com` matches only
+   `github.com`; `*.github.com` matches all subdomains at any depth. To preserve
+   the same effective coverage, each apex domain `d` is expanded to `[d, *.d]`.
+   The template stores bare domains only; expansion happens in the script.
+
+4. **Migration semantics — seed-if-absent, do not reconcile per-entry.** If
+   `sandbox.network` (or its `network` key) is absent from `settings.local.json`,
+   the whole block is seeded. If already present, it is left entirely untouched.
+   This deliberately differs from the `filesystem.allowWrite` append-each-missing
+   behavior: the network list is large and user-pruned entries must stay pruned.
+   `--reseed-sandbox-allowlist` forces overwrite.
+
+5. **`--reseed-sandbox-allowlist` flag** — overwrites the project's
+   `sandbox.network.allowedDomains` from the template. No "reload" analog exists —
+   Claude Code reads settings at session startup, so re-attach picks up changes.
+
+### Guardrail framing (not isolation parity with `start-agent.sh`)
+
+`start-agent.sh` enforces at the VM/proxy layer with a `:ro` mount — the agent
+cannot lift its own restriction. In `start-claude.sh`, `settings.local.json` lives
+in the project tree and is writable by the agent, so the network allowlist is a
+**guardrail**: it reduces accidental exfiltration and off-list fetches, but is not
+a hard security boundary. The microVM itself retains full unrestricted egress at
+the VM level. This distinction is recorded here and in the global `CLAUDE.md`
+rather than being elided.
+
+### Phase 1 findings (incorporated)
+
+- **Enforcement is kernel-backed.** When `allowedDomains` is set, the sandbox uses
+  `bwrap --unshare-net` to place each command in an isolated network namespace, then
+  routes all traffic through an in-namespace HTTP proxy (port 3128, forwarded via
+  socat bridge). Deny-by-default: unmatched connections are rejected at the proxy.
+  Hot-reload is not supported — changes require a session restart.
+- **Claude Code's own API traffic is unaffected.** The Node process runs outside
+  bwrap; `HTTP_PROXY`/`HTTPS_PROXY` inside the network namespace are not visible to
+  it. `api.anthropic.com` is never filtered.
+- **`*.d` wildcards are multi-level.** `matchesDomainPattern` uses `.endsWith('.' + baseDomain)`,
+  so `*.foo.com` matches `bar.foo.com`, `a.b.foo.com`, etc. It does NOT match
+  `foo.com` itself. Hence the `[d, *.d]` expansion strategy.
+- **SSH git is moot.** `ssh` is not installed in the container. HTTPS git operations
+  go through the proxy and are subject to domain filtering.
+- **`github.com` consequence.** The ported list omits `github.com` (read-only
+  stance). Under deny-by-default, HTTPS `git push` to `github.com` is blocked.
+  Users add `github.com` + `*.github.com` to their project's `settings.local.json`
+  to re-enable. The global `CLAUDE.md` documents this.
+
+### Non-goals
+
+- Refactoring `start-agent.sh` to share `templates/sandbox-allowlist.txt`. Its
+  enforcement path (tinyproxy suffix matching, `:ro` mount) differs from the sandbox
+  wildcard semantics; sharing the file would couple two independent mechanisms.
+  Noted as a possible later DRY step.
+
+### Consequences
+
+- Fresh `settings.local.json` files include `sandbox.network.allowedDomains` with
+  the full expanded list (~400+ entries after `d + *.d` expansion).
+- Existing files gain `sandbox.network` on next `start-claude.sh` run (seed-if-absent).
+- Files with a user-customized `network` block are untouched.
+- `github.com` (HTTPS push) and container registries are blocked under the default
+  config; documented in README, global `CLAUDE.md`, and project `CLAUDE.md`.
+- The global `CLAUDE.md` no longer claims full unrestricted egress for `claude-dev`.
