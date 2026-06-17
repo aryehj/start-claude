@@ -1007,7 +1007,7 @@ generate_filter_file "$TMP_WORK/filter"
 # --reload-allowlist was passed. Hash covers both tinyproxy.conf and filter so
 # any allowlist edit (which changes filter) triggers a push automatically.
 # The stored hash is read by the batch probe from /etc/tinyproxy/filter.hash.
-NEW_PROXY_HASH=$(cat "$TMP_WORK/tinyproxy.conf" "$TMP_WORK/filter" | sha256sum | awk '{print $1}')
+NEW_PROXY_HASH=$(cat "$TMP_WORK/tinyproxy.conf" "$TMP_WORK/filter" | shasum -a 256 | awk '{print $1}')
 if $RELOAD_ALLOWLIST || [[ "$NEW_PROXY_HASH" != "$TINYPROXY_STORED_HASH" || "$TINYPROXY_ACTIVE" != "true" ]]; then
   vm_put_file "$TMP_WORK/tinyproxy.conf" /etc/tinyproxy/tinyproxy.conf
   vm_put_file "$TMP_WORK/filter"         /etc/tinyproxy/filter
@@ -1081,6 +1081,7 @@ colima ssh -p "$COLIMA_PROFILE" -- sudo sh < "$TMP_WORK/firewall-apply.sh"
 if $RELOAD_ALLOWLIST; then
   entry_count=$(grep -cv -E '^\s*(#|$)' "$ALLOWLIST_FILE" || echo 0)
   echo "==> Allowlist reloaded ($entry_count entries, sandbox: $SANDBOX_NAME)"
+  [[ -n "${PROBE_PID:-}" ]] && { kill "$PROBE_PID" 2>/dev/null || true; wait "$PROBE_PID" 2>/dev/null || true; }
   rm -rf "$TMP_WORK"
   trap - EXIT
   exit 0

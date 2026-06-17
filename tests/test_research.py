@@ -12,6 +12,8 @@ from research import (
     prune_orphan_cache_files,
     render_iptables_apply_script,
     render_searxng_settings,
+    render_squid_conf,
+    squid_config_hash,
     Paths,
 )
 
@@ -311,6 +313,45 @@ def test_compose_denylist_set_algebra_invariant(tmp_path):
     result = set(compose_denylist(p))
     expected = (cache | additions) - overrides
     assert result == expected
+
+
+# ── squid_config_hash ─────────────────────────────────────────────────────────
+
+def test_squid_config_hash_is_deterministic():
+    h1 = squid_config_hash("conf-a", "acl-a")
+    h2 = squid_config_hash("conf-a", "acl-a")
+    assert h1 == h2
+
+
+def test_squid_config_hash_changes_with_conf():
+    assert squid_config_hash("conf-a", "acl") != squid_config_hash("conf-b", "acl")
+
+
+def test_squid_config_hash_changes_with_acl():
+    assert squid_config_hash("conf", "acl-a") != squid_config_hash("conf", "acl-b")
+
+
+def test_squid_config_hash_boundary_unambiguous():
+    # The NUL separator must keep conf/acl boundaries distinct: moving a
+    # character across the boundary changes the hash.
+    assert squid_config_hash("ab", "c") != squid_config_hash("a", "bc")
+
+
+def test_squid_config_hash_is_hex_sha256():
+    h = squid_config_hash("x", "y")
+    assert len(h) == 64
+    assert all(c in "0123456789abcdef" for c in h)
+
+
+def test_squid_config_hash_stable_across_bridge_ip():
+    # Real-world inputs: the same denylist with the same conf hashes identically;
+    # a different bridge IP in the conf changes the hash (forces a re-push).
+    acl = denylist_to_squid_acl(["evil.com", "spam.com"])
+    same = squid_config_hash(render_squid_conf("172.17.0.1", 8888), acl)
+    again = squid_config_hash(render_squid_conf("172.17.0.1", 8888), acl)
+    moved = squid_config_hash(render_squid_conf("172.18.0.1", 8888), acl)
+    assert same == again
+    assert same != moved
 
 
 # ── patch_vane_searxng_url ────────────────────────────────────────────────────

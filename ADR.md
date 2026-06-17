@@ -2797,3 +2797,79 @@ Three independent optimizations, shipped together:
   once.
 - The inference probe warning is emitted to stderr before the container is attached,
   preserving the user-visible behavior, just without the serial delay.
+
+## ADR-046: Warm-reattach SSH round-trip reduction in `research.py`
+
+**Status:** Accepted
+
+### Context
+
+`research.py` had the same warm-path overhead ADR-045 removed from
+`start-agent.sh`, before that optimization was ported here. Every bring-up — even
+a warm reattach to an already-running `research` VM with both containers up and an
+unchanged denylist — re-ran the full provisioning sequence, each VM fact costing a
+separate `colima ssh` handshake:
+
+- two `docker network inspect bridge` calls (`discover_network`: gateway, then subnet)
+- `ip route show default` for the host IP (plus up to two `getent` fallbacks)
+- `docker network inspect research-net` for the research-net CIDR
+- `command -v squid` install check (`install_squid`)
+- `sudo iptables -m hashlimit --help` kernel-module probe (`vm_has_hashlimit`)
+- `vm_put_file` × 2 for `squid.conf` and `denylist.txt` (two SSH calls each)
+- `systemctl enable --now` and an unconditional `systemctl restart squid`
+- `curl --max-time 3` inference probe (blocks up to 3 s when the host model server is down)
+- the iptables firewall apply (left as-is; intentional)
+
+The Squid restart and the denylist re-push are the costliest: the denylist targets
+million-entry feeds, so re-writing and re-pushing the ACL file every warm reattach
+moves real bytes, and a full `systemctl restart` drops every in-flight connection.
+
+### Decision
+
+Three independent optimizations, mirroring ADR-045, shipped together:
+
+1. **Batch read-only probe (`probe_vm`).** All read-only VM facts (bridge
+   gateway+subnet in one `docker network inspect`, default-route host IP with
+   `getent` fallbacks, research-net CIDR, squid install + active status, hashlimit
+   availability, stored config hash) are gathered in one `colima ssh` call. The
+   probe script is piped to a remote `sh` via `vm_sh`; it emits `KEY=value` lines
+   parsed on the host into a `facts` dict consumed by `discover_network`,
+   `ensure_docker_network`, `install_squid`, and `apply_firewall`.
+
+2. **Hash-gated Squid push and reload (`apply_firewall`).** A SHA-256 over the
+   rendered `squid.conf` + denylist (`squid_config_hash`, NUL-separated) is compared
+   against a marker at `/etc/squid/.research-config.hash` (read by the batch probe).
+   The push (`vm_put_file` × 2) + reload + marker write happen only when the hash
+   changed or Squid is not active. When a push does happen on an already-running
+   daemon, `squid -k reconfigure` is used (falling back to `restart`) instead of an
+   unconditional restart; a cold/first-install daemon still gets the full
+   `enable --now` + `restart` with `journalctl`-on-failure diagnostics. The
+   `--refresh-denylist` / `--reload-denylist` fast path keeps the marker consistent
+   so a subsequent bring-up does not needlessly re-push.
+
+3. **Backgrounded inference probe (`start_inference_probe` / `join_inference_probe`).**
+   `probe_inference` now returns its warning string instead of printing it, and runs
+   on a daemon thread launched right after the host IP is known. The thread is joined
+   just before the "Research environment ready" banner, so the 3-second `curl`
+   timeout overlaps the SearXNG + Vane container bring-up instead of serializing
+   before it.
+
+### Decisions explicitly NOT taken
+
+- **Skipping the iptables firewall apply on warm reattach.** The RESEARCH chain is
+  still flushed and rebuilt on every bring-up — same egress-trust-boundary invariant
+  as ADR-045. Only the Squid config push + daemon reload is gated.
+- **SSH multiplexing / a different transport.** `vm_sh` / `vm_ssh` / `colima ssh`
+  are unchanged; the win is fewer calls, not a new transport.
+
+### Consequences
+
+- Warm reattach with an unchanged denylist: 1 SSH handshake (batch probe) + 1
+  (firewall apply) ≈ 2, down from ~10, with no Squid push/restart and the 3-second
+  inference probe off the critical path.
+- First run still issues the research-net create + re-inspect and the squid
+  `apt-get install`; the batch probe detects absence and those conditional paths run
+  once. After install, `install_squid` flips the in-memory `SQUID_ACTIVE` fact to
+  `false` so `apply_firewall` takes its cold-start path.
+- Existing deployments have no marker file on the first run after this change, so the
+  stored hash reads empty, the push fires once, and the marker is written — self-healing.

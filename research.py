@@ -28,12 +28,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import secrets
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -51,6 +53,11 @@ CONTAINER_SEARXNG = "research-searxng"
 CONTAINER_VANE = "research-vane"
 RESEARCH_NET_NAME = "research-net"
 SQUID_PORT = 8888
+
+# Marker file in the VM holding the SHA-256 of the last-pushed squid.conf +
+# denylist. Used to skip the Squid config push + restart on warm reattach when
+# nothing changed (see apply_firewall / probe_vm).
+SQUID_HASH_MARKER = "/etc/squid/.research-config.hash"
 
 DEFAULT_MEMORY_GIB = 2
 DEFAULT_CPUS = 2
@@ -489,6 +496,20 @@ cache deny all
 """
 
 
+def squid_config_hash(conf_body: str, acl_body: str) -> str:
+    """SHA-256 over the squid.conf + denylist contents.
+
+    Stored in the VM (SQUID_HASH_MARKER) after each push so a warm reattach can
+    skip re-pushing Squid config and restarting the daemon when nothing changed.
+    The NUL separator keeps conf/acl boundaries unambiguous.
+    """
+    h = hashlib.sha256()
+    h.update(conf_body.encode())
+    h.update(b"\0")
+    h.update(acl_body.encode())
+    return h.hexdigest()
+
+
 def render_iptables_apply_script(
     bridge_ip: str,
     bridge_cidr: str,
@@ -753,33 +774,71 @@ def ensure_colima_vm(config: VmConfig) -> None:
     )
 
 
-def discover_network(config: VmConfig) -> VmConfig:
-    """Discover bridge IP, host IP, and CIDRs inside the VM; return updated config."""
-    bridge_ip = vm_sh(
-        "docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}'",
-        check=False,
-    ).stdout.strip().strip("\r")
+def probe_vm(config: VmConfig) -> dict:
+    """Gather every read-only VM fact the warm path needs in one colima ssh call.
+
+    Replaces the former chain of separate vm_sh probes (bridge gateway, bridge
+    subnet, host route + getent fallbacks, research-net CIDR, squid install/active
+    status, hashlimit availability, stored config hash). Emits KEY=value lines
+    parsed on the host. The only write that can follow is research-net creation
+    when RESEARCH_NET_CIDR comes back empty (handled in ensure_docker_network).
+    """
+    script = r"""#!/bin/sh
+# Bridge gateway + subnet in one inspect (was two separate calls).
+bridge_info=$(docker network inspect bridge \
+  -f '{{(index .IPAM.Config 0).Gateway}} {{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || true)
+echo "BRIDGE_IP=${bridge_info%% *}"
+echo "BRIDGE_CIDR=${bridge_info##* }"
+
+# Default-route host IP; fall back to getent if the route table is empty.
+host_ip=$(ip route show default 2>/dev/null | awk '/^default/ {print $3; exit}')
+if [ -z "$host_ip" ]; then
+  for candidate in host.lima.internal host.docker.internal; do
+    host_ip=$(getent hosts "$candidate" 2>/dev/null | awk '{print $1; exit}')
+    [ -n "$host_ip" ] && break
+  done
+fi
+echo "HOST_IP=$host_ip"
+
+# research-net CIDR (empty when the network does not exist yet).
+research_cidr=$(docker network inspect %RESEARCH_NET% \
+  -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || true)
+echo "RESEARCH_NET_CIDR=$research_cidr"
+
+# Squid package + service status.
+if command -v squid >/dev/null 2>&1; then echo "SQUID_INSTALLED=true"; else echo "SQUID_INSTALLED=false"; fi
+if systemctl is-active --quiet squid 2>/dev/null; then echo "SQUID_ACTIVE=true"; else echo "SQUID_ACTIVE=false"; fi
+
+# xt_hashlimit availability (help text needs no kernel module load).
+if sudo iptables -m hashlimit --help 2>&1 | grep -q hashlimit-name; then
+  echo "HASHLIMIT=true"
+else
+  echo "HASHLIMIT=false"
+fi
+
+# Stored squid config hash (used to skip the push when nothing changed).
+echo "SQUID_STORED_HASH=$(sudo cat %SQUID_HASH_MARKER% 2>/dev/null || true)"
+""".replace("%RESEARCH_NET%", RESEARCH_NET_NAME).replace("%SQUID_HASH_MARKER%", SQUID_HASH_MARKER)
+
+    out = vm_sh(script, check=False).stdout
+    facts: dict = {}
+    for line in out.replace("\r", "").splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            facts[key] = value.strip()
+    return facts
+
+
+def discover_network(config: VmConfig, facts: dict) -> VmConfig:
+    """Populate bridge IP, host IP, and CIDR on config from batched probe facts."""
+    bridge_ip = facts.get("BRIDGE_IP", "")
     if not bridge_ip:
         bridge_ip = "172.17.0.1"
         print(f"warning: could not discover docker bridge gateway; falling back to {bridge_ip}", file=sys.stderr)
 
-    bridge_cidr = vm_sh(
-        "docker network inspect bridge -f '{{(index .IPAM.Config 0).Subnet}}'",
-        check=False,
-    ).stdout.strip().strip("\r")
-    if not bridge_cidr:
-        bridge_cidr = "172.17.0.0/16"
+    bridge_cidr = facts.get("BRIDGE_CIDR", "") or "172.17.0.0/16"
 
-    host_ip = vm_sh(
-        "ip route show default 2>/dev/null | awk '/^default/ {print $3; exit}'",
-        check=False,
-    ).stdout.strip().strip("\r")
-    if not host_ip:
-        for candidate in ("host.lima.internal", "host.docker.internal"):
-            out = vm_sh(f"getent hosts {candidate} 2>/dev/null", check=False).stdout.strip()
-            if out:
-                host_ip = out.split()[0]
-                break
+    host_ip = facts.get("HOST_IP", "")
     if not host_ip:
         print(
             f"warning: could not determine the macOS host IP from inside the VM; "
@@ -809,14 +868,13 @@ def ensure_docker_context(profile: str = COLIMA_PROFILE) -> None:
         )
 
 
-def ensure_docker_network(config: VmConfig) -> None:
-    """Create research-net if missing; populate config.research_net_cidr."""
-    cidr = vm_sh(
-        f"docker network inspect {RESEARCH_NET_NAME} -f '{{{{(index .IPAM.Config 0).Subnet}}}}' 2>/dev/null || true",
-        check=False,
-    ).stdout.strip().strip("\r")
+def ensure_docker_network(config: VmConfig, facts: dict) -> None:
+    """Use the probed research-net CIDR; create the network only if it's missing."""
+    cidr = facts.get("RESEARCH_NET_CIDR", "")
 
     if not cidr:
+        # First run only: the batched probe found no research-net. Create it and
+        # re-read its CIDR (the one read that can also trigger a write).
         vm_sh(f"docker network create {RESEARCH_NET_NAME} >/dev/null")
         cidr = vm_sh(
             f"docker network inspect {RESEARCH_NET_NAME} -f '{{{{(index .IPAM.Config 0).Subnet}}}}' 2>/dev/null || true",
@@ -831,27 +889,83 @@ def ensure_docker_network(config: VmConfig) -> None:
     print(f"==> Research network: {RESEARCH_NET_NAME} cidr={cidr}")
 
 
-def install_squid(config: VmConfig) -> None:
-    result = vm_sh("command -v squid", check=False)
-    if result.returncode != 0:
+def install_squid(config: VmConfig, facts: dict) -> None:
+    if facts.get("SQUID_INSTALLED") != "true":
         print("==> Installing Squid in Colima VM")
         vm_sh("sudo apt-get update -qq")
         vm_sh("sudo apt-get install -y squid")
         # Squid auto-starts on install with default config; stop it so
         # apply_firewall can write the minimal config before restarting.
         vm_sh("sudo systemctl stop squid 2>/dev/null || true")
+        # The freshly-installed daemon was just stopped; reflect that so
+        # apply_firewall takes its start-from-cold path.
+        facts["SQUID_INSTALLED"] = "true"
+        facts["SQUID_ACTIVE"] = "false"
 
 
-def apply_firewall(config: VmConfig, paths: Paths) -> None:
-    """Push Squid config + denylist into the VM, then apply iptables rules."""
+def _reload_squid(config: VmConfig, *, cold: bool) -> None:
+    """Bring Squid up with the freshly-pushed config; raise on failure.
+
+    cold=True starts a stopped/first-install daemon. cold=False does an in-place
+    `squid -k reconfigure` (far cheaper than a restart) on an already-running
+    daemon, falling back to a restart if reconfigure fails.
+    """
+    if cold:
+        vm_sh("sudo systemctl enable --now squid >/dev/null 2>&1 || true")
+        cmd = (
+            "sudo systemctl restart squid 2>&1; RC=$?;"
+            " [ $RC -ne 0 ] && sudo journalctl -u squid --no-pager -n 30 2>/dev/null || true;"
+            " exit $RC"
+        )
+    else:
+        cmd = (
+            "sudo squid -k reconfigure 2>&1 || {"
+            " sudo systemctl restart squid 2>&1; RC=$?;"
+            " [ $RC -ne 0 ] && sudo journalctl -u squid --no-pager -n 30 2>/dev/null || true;"
+            " exit $RC; }"
+        )
+    result = vm_sh(cmd, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"squid failed to start (exit {result.returncode}).\n{result.stdout.strip()}"
+        )
+
+
+def _write_squid_hash_marker(config: VmConfig, digest: str) -> None:
+    """Persist the pushed-config hash in the VM so the next warm probe can read it."""
+    subprocess.run(
+        ["colima", "ssh", "-p", config.profile_name, "--", "sudo", "tee", SQUID_HASH_MARKER],
+        input=(digest + "\n").encode(),
+        capture_output=True,
+        check=True,
+    )
+
+
+def apply_firewall(config: VmConfig, paths: Paths, facts: dict) -> None:
+    """Push Squid config + denylist (only when changed), then re-assert iptables.
+
+    The iptables chain is rebuilt on every attach — the egress trust boundary
+    must not depend on a warm-path shortcut. The Squid config push + daemon
+    reload is hash-gated: on a warm reattach where the rendered squid.conf and
+    denylist are byte-identical to what was last pushed and Squid is already
+    running, the push and reload are skipped entirely.
+    """
     assert config.bridge_ip and config.bridge_cidr and config.host_ip and config.research_net_cidr
 
     denylist_domains = compose_denylist(paths)
     acl_body = denylist_to_squid_acl(denylist_domains)
     conf_body = render_squid_conf(config.bridge_ip, SQUID_PORT)
-    has_hashlimit = vm_has_hashlimit(config.profile_name)
+
+    hl = facts.get("HASHLIMIT")
+    if hl == "true":
+        has_hashlimit = True
+    elif hl == "false":
+        has_hashlimit = False
+    else:
+        has_hashlimit = vm_has_hashlimit(config.profile_name)
     if not has_hashlimit:
         print("warning: xt_hashlimit not available in VM; using coarse '-m limit' fallback.", file=sys.stderr)
+
     fw_script = render_iptables_apply_script(
         bridge_ip=config.bridge_ip,
         bridge_cidr=config.bridge_cidr,
@@ -862,31 +976,28 @@ def apply_firewall(config: VmConfig, paths: Paths) -> None:
         has_hashlimit=has_hashlimit,
     )
 
+    new_hash = squid_config_hash(conf_body, acl_body)
+    squid_active = facts.get("SQUID_ACTIVE") == "true"
+    push_needed = new_hash != facts.get("SQUID_STORED_HASH", "") or not squid_active
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        conf_file = tmp_path / "squid.conf"
-        acl_file = tmp_path / "denylist.txt"
         fw_file = tmp_path / "firewall-apply.sh"
-
-        conf_file.write_text(conf_body)
-        acl_file.write_text(acl_body)
         fw_file.write_text(fw_script)
 
-        vm_put_file(conf_file, "/etc/squid/squid.conf")
-        vm_put_file(acl_file, "/etc/squid/denylist.txt")
+        if push_needed:
+            conf_file = tmp_path / "squid.conf"
+            acl_file = tmp_path / "denylist.txt"
+            conf_file.write_text(conf_body)
+            acl_file.write_text(acl_body)
 
-        vm_sh("sudo systemctl enable --now squid >/dev/null 2>&1 || true")
-        result = vm_sh(
-            "sudo systemctl restart squid 2>&1; RC=$?;"
-            " [ $RC -ne 0 ] && sudo journalctl -u squid --no-pager -n 30 2>/dev/null || true;"
-            " exit $RC",
-            check=False,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"squid failed to start (exit {result.returncode}).\n"
-                f"{result.stdout.strip()}"
-            )
+            vm_put_file(conf_file, "/etc/squid/squid.conf")
+            vm_put_file(acl_file, "/etc/squid/denylist.txt")
+            _reload_squid(config, cold=not squid_active)
+            _write_squid_hash_marker(config, new_hash)
+            print(f"==> Squid config pushed ({len(denylist_domains)} denylist entries)")
+        else:
+            print(f"==> Squid config unchanged; skipping push ({len(denylist_domains)} denylist entries)")
 
         fw_content = fw_file.read_bytes()
         subprocess.run(
@@ -896,7 +1007,7 @@ def apply_firewall(config: VmConfig, paths: Paths) -> None:
             check=True,
         )
 
-    print(f"==> Firewall applied ({len(denylist_domains)} denylist entries)")
+    print("==> Firewall applied")
     print(f"    proxy: http://{config.bridge_ip}:{SQUID_PORT}")
 
 
@@ -1017,24 +1128,27 @@ def ensure_vane_container(paths: Paths, config: VmConfig) -> bool:
     return start_or_recreate(CONTAINER_VANE, _create)
 
 
-def probe_inference(config: VmConfig) -> None:
-    """Non-fatal probe to warn if the inference backend is not reachable."""
+def probe_inference(config: VmConfig) -> Optional[str]:
+    """Non-fatal probe; return a warning string if the backend is unreachable.
+
+    The curl carries a 3s timeout, so this is run on a background thread (see
+    main) and its returned warning is printed once the thread is joined — the
+    timeout overlaps the container bring-up instead of blocking it.
+    """
     assert config.host_ip
-    print(f"==> Probing {config.inference_label} at http://{config.host_ip}:{config.inference_port} from inside VM")
     if config.backend == "ollama":
         result = vm_sh(
             f"curl -sf --max-time 3 http://{config.host_ip}:{config.inference_port}/api/tags",
             check=False,
         )
         if result.returncode != 0:
-            print(
+            return (
                 f"warning: Ollama not reachable at http://{config.host_ip}:{config.inference_port} "
                 f"from inside the Colima VM.\n"
                 f"Ensure Ollama is running on the macOS host and bound to 0.0.0.0.\n"
                 f"On the host, run once:\n"
                 f"    launchctl setenv OLLAMA_HOST 0.0.0.0:{config.inference_port}\n"
-                f"and restart the Ollama app. Continuing without local inference.",
-                file=sys.stderr,
+                f"and restart the Ollama app. Continuing without local inference."
             )
     else:
         omlx_key = os.environ.get("OMLX_API_KEY", "")
@@ -1044,12 +1158,36 @@ def probe_inference(config: VmConfig) -> None:
             check=False,
         )
         if result.returncode != 0:
-            print(
+            return (
                 f"warning: omlx not reachable at http://{config.host_ip}:{config.inference_port} "
                 f"from inside the Colima VM.\n"
-                f"Ensure omlx is running on the host. Continuing without local inference.",
-                file=sys.stderr,
+                f"Ensure omlx is running on the host. Continuing without local inference."
             )
+    return None
+
+
+def start_inference_probe(config: VmConfig) -> "tuple[threading.Thread, list]":
+    """Launch probe_inference on a background thread; return (thread, result_box).
+
+    Pass the pair to join_inference_probe once the overlapping work completes.
+    """
+    print(f"==> Probing {config.inference_label} at http://{config.host_ip}:{config.inference_port} from inside VM")
+    box: list = [None]
+
+    def _run() -> None:
+        box[0] = probe_inference(config)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return thread, box
+
+
+def join_inference_probe(probe: "tuple[threading.Thread, list]") -> None:
+    """Join the probe thread started by start_inference_probe and print any warning."""
+    thread, box = probe
+    thread.join()
+    if box[0]:
+        print(box[0], file=sys.stderr)
 
 
 def rebuild_teardown(config: VmConfig) -> None:
@@ -1093,6 +1231,12 @@ def reload_denylist_fast_path(paths: Paths, config: VmConfig) -> None:
         "sudo squid -k reconfigure 2>/dev/null || sudo systemctl restart squid"
     )
 
+    # Keep the stored hash consistent with what's now on disk so the next full
+    # bring-up doesn't needlessly re-push. squid.conf is unchanged by this path
+    # (only the denylist moved), so re-derive it from the current bridge IP.
+    conf_body = render_squid_conf(config.bridge_ip, SQUID_PORT)
+    _write_squid_hash_marker(config, squid_config_hash(conf_body, acl_body))
+
     print(f"==> Denylist reloaded ({len(denylist_domains)} entries)")
 
 
@@ -1123,8 +1267,9 @@ def main() -> None:
             print(f"error: Colima VM '{config.profile_name}' is not running. Start it first.", file=sys.stderr)
             sys.exit(1)
         ensure_docker_context(config.profile_name)
-        config = discover_network(config)
-        ensure_docker_network(config)
+        facts = probe_vm(config)
+        config = discover_network(config, facts)
+        ensure_docker_network(config, facts)
         reload_denylist_fast_path(paths, config)
         return
 
@@ -1149,14 +1294,17 @@ def main() -> None:
     ensure_colima_vm(config)
     ensure_docker_context(config.profile_name)
 
-    config = discover_network(config)
-    ensure_docker_network(config)
+    facts = probe_vm(config)
+    config = discover_network(config, facts)
+    ensure_docker_network(config, facts)
 
-    install_squid(config)
+    install_squid(config, facts)
     seed_searxng_settings(paths, config)
-    apply_firewall(config, paths)
+    apply_firewall(config, paths, facts)
 
-    probe_inference(config)
+    # Background the inference probe so its 3s curl timeout overlaps the
+    # container bring-up below instead of blocking on the critical path.
+    probe = start_inference_probe(config)
 
     ensure_searxng_container(paths, config)
     url_changed = ensure_vane_searxng_url(paths)
@@ -1165,6 +1313,9 @@ def main() -> None:
         # Config was patched on an already-running container; restart so Vane re-reads it.
         subprocess.run(["docker", "restart", CONTAINER_VANE], capture_output=True, check=True)
         print(f"    {CONTAINER_VANE}: restarted to apply SearXNG URL")
+
+    # Collect the backgrounded inference probe; print its warning if any.
+    join_inference_probe(probe)
 
     print()
     print("==> Research environment ready")
