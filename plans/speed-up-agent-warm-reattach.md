@@ -2,10 +2,10 @@
 
 ## Status
 
-- [ ] Batch the read-only VM probes into a single `colima ssh` round-trip (Opus recommended)
-- [ ] Push tinyproxy config + reload only when it changed; drop the unconditional restart (Opus recommended)
-- [ ] Run the inference-backend probe in the background, overlapping it with later host-side work
-- [ ] Update docs (ADR + CLAUDE.md key-decisions, README env notes if affected) (Haiku ok)
+- [x] Batch the read-only VM probes into a single `colima ssh` round-trip (Opus recommended)
+- [x] Push tinyproxy config + reload only when it changed; drop the unconditional restart (Opus recommended)
+- [x] Run the inference-backend probe in the background, overlapping it with later host-side work
+- [x] Update docs (ADR + CLAUDE.md key-decisions, README env notes if affected) (Haiku ok)
 
 ## Context
 
