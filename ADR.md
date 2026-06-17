@@ -2717,3 +2717,83 @@ rather than being elided.
 - `github.com` (HTTPS push) and container registries are blocked under the default
   config; documented in README, global `CLAUDE.md`, and project `CLAUDE.md`.
 - The global `CLAUDE.md` no longer claims full unrestricted egress for `claude-dev`.
+
+## ADR-045: Warm-reattach SSH round-trip reduction in `start-agent.sh`
+
+**Status:** Accepted
+
+### Context
+
+Every `start-agent.sh` invocation — even a warm reattach to an already-running VM
+and container — re-ran the full VM provisioning sequence. Each `vm_ssh` / `vm_sh`
+call pays a fresh SSH handshake (~100-300ms each). On the warm path the script
+previously issued roughly ten separate handshakes:
+
+- two `docker network inspect bridge` calls (gateway, then subnet — a duplicate)
+- `ip route show default` for the host IP (plus up to two `getent` fallbacks)
+- `docker network inspect claude-agent-net` for the agent-net CIDR
+- `dpkg-query` to check whether tinyproxy was installed
+- `vm_put_file` × 2 for tinyproxy.conf and filter (two SSH calls each = four total)
+- `systemctl enable --now` and an unconditional `systemctl restart tinyproxy`
+- `curl --max-time 3` for the inference probe (blocks up to 3 s when host server is down)
+- the firewall apply (left as-is; intentional)
+
+### Decision
+
+Three independent optimizations, shipped together:
+
+1. **Batch read-only probe.** All read-only VM facts (bridge gateway+subnet in one
+   `docker network inspect` call, default-route host IP with `getent` fallbacks,
+   agent-net CIDR when search is enabled, tinyproxy package and service status,
+   stored config hash) are gathered in a single `colima ssh` invocation. The probe
+   script is written to `$TMP_WORK/vm-probe.sh` on the host and piped in as stdin;
+   the remote `sh` executes it and emits `KEY=value` lines parsed on the host.
+   One SSH handshake covers everything the former ten-plus calls covered.
+
+2. **Hash-gated tinyproxy push and reload.** After generating `tinyproxy.conf` and
+   the `filter` file, the script computes a SHA-256 of their combined content and
+   compares it against a stored hash in `/etc/tinyproxy/filter.hash` (read by the
+   batch probe). Push (`vm_put_file` × 2) and reload happen only when the hash
+   changed, tinyproxy is not yet active, or `--reload-allowlist` was passed. On a
+   warm reattach with an unchanged allowlist this path is skipped entirely — zero
+   SSH calls instead of four. When a push does happen, `systemctl reload` is used
+   instead of the previous unconditional `systemctl restart`, preserving in-flight
+   connections. The new hash is written back with a single `sudo tee` call.
+
+3. **Backgrounded inference probe.** The `curl --max-time 3` probe is launched as
+   a background job immediately after `HOST_IP` is established (right after the
+   batch probe), with its warning output redirected to `$TMP_WORK/probe-warning`.
+   `wait_inference_probe()` collects the result and emits any warning before either
+   `exec docker exec` (warm-reattach path) or `exec docker run` (fresh container
+   path), ensuring no orphaned process survives the `exec`. The 3-second timeout
+   now overlaps the tinyproxy push, firewall apply, and host-side Python config
+   injection rather than serializing after them.
+
+### Decisions explicitly NOT taken
+
+- **SSH multiplexing (`ControlMaster` via `colima ssh-config`).** Would add
+  persistent background processes and lifecycle complexity. The batch probe already
+  reduces handshake count to one (plus the firewall apply, which is left alone);
+  multiplexing the remaining two calls is not worth the complexity.
+- **Fast-path gate that skips firewall reconfiguration on warm reattach.** The
+  CLAUDE_AGENT iptables chain is still flushed and rebuilt on every attach. This
+  is a deliberate safety invariant: it ensures rules are always in a known-good
+  state regardless of what happened since the last attach.
+- **Caching the SSH transport across functions.** `vm_ssh` / `vm_sh` / `colima ssh`
+  are left as-is; the transport is unchanged. Fewer calls, not a different transport.
+
+### Consequences
+
+- Warm reattach with unchanged allowlist: 1 SSH handshake (batch probe) + 1
+  (firewall apply) = 2 total, down from ~10. The 3-second inference probe no longer
+  sits on the critical path.
+- `--reload-allowlist` still always pushes the tinyproxy config and reloads the
+  service. An edited allowlist changes the filter content and thus the hash, so the
+  hash check alone would trigger a push anyway; the explicit `$RELOAD_ALLOWLIST`
+  guard is retained as a belt-and-suspenders guarantee.
+- Agent-net create-if-missing still issues separate `vm_ssh` calls (create +
+  re-inspect), but this only happens on the very first run when the network does
+  not exist; the batch probe detects absence and the conditional create path runs
+  once.
+- The inference probe warning is emitted to stderr before the container is attached,
+  preserving the user-visible behavior, just without the serial delay.
