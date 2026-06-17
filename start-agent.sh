@@ -786,30 +786,81 @@ elif $RESET_CONTAINER && ! $RELOAD_ALLOWLIST; then
   echo "==> --reset-container: image '$IMAGE_TAG' kept intact"
 fi
 
-# ── discover bridge IP, host IP, bridge CIDR inside the VM ───────────────────
-BRIDGE_IP=$(vm_ssh docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null | tr -d '\r' || true)
+# ── temp work dir (probe script, config files, firewall script) ───────────────
+TMP_WORK=$(mktemp -d)
+trap 'rm -rf "$TMP_WORK"' EXIT
+
+# ── batch VM probe: all read-only facts in one SSH round-trip ─────────────────
+# Replaces separate vm_ssh calls for bridge, host IP, agent-net CIDR,
+# tinyproxy install/active status, and the stored config hash. The script is
+# written to a host temp file and piped in as stdin — one SSH handshake total.
+cat > "$TMP_WORK/vm-probe.sh" <<PROBE_EOF
+#!/bin/sh
+AGENT_NET_NAME="$AGENT_NET_NAME"
+LOCAL_SEARCH_ENABLED="$LOCAL_SEARCH_ENABLED"
+
+# Bridge gateway + subnet in one inspect (eliminates the former duplicate call).
+bridge_info=\$(docker network inspect bridge \\
+  -f '{{(index .IPAM.Config 0).Gateway}} {{(index .IPAM.Config 0).Subnet}}' \\
+  2>/dev/null || true)
+echo "BRIDGE_IP=\${bridge_info%% *}"
+echo "BRIDGE_CIDR=\${bridge_info##* }"
+
+# Default-route host IP; fall back to getent if the route table is empty.
+host_ip=\$(ip route show default 2>/dev/null | awk '/^default/ {print \$3; exit}')
+if [ -z "\$host_ip" ]; then
+  for candidate in host.lima.internal host.docker.internal; do
+    host_ip=\$(getent hosts "\$candidate" 2>/dev/null | awk '{print \$1; exit}')
+    [ -n "\$host_ip" ] && break
+  done
+fi
+echo "HOST_IP=\$host_ip"
+
+# Agent-net CIDR (only needed when local search is enabled).
+if [ "\$LOCAL_SEARCH_ENABLED" = "true" ]; then
+  agent_cidr=\$(docker network inspect "\$AGENT_NET_NAME" \\
+    -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || true)
+  echo "AGENT_NET_CIDR=\$agent_cidr"
+fi
+
+# Tinyproxy package + service status.
+tp_status=\$(dpkg-query -W -f='\${Status}' tinyproxy 2>/dev/null || true)
+if echo "\$tp_status" | grep -q "install ok installed"; then
+  echo "TINYPROXY_INSTALLED=true"
+else
+  echo "TINYPROXY_INSTALLED=false"
+fi
+if systemctl is-active --quiet tinyproxy 2>/dev/null; then
+  echo "TINYPROXY_ACTIVE=true"
+else
+  echo "TINYPROXY_ACTIVE=false"
+fi
+
+# Stored config hash (used to skip push when nothing changed).
+stored_hash=\$(sudo cat /etc/tinyproxy/filter.hash 2>/dev/null || true)
+echo "TINYPROXY_STORED_HASH=\$stored_hash"
+PROBE_EOF
+
+PROBE_OUTPUT=$(colima ssh -p "$COLIMA_PROFILE" -- sh < "$TMP_WORK/vm-probe.sh" 2>/dev/null | tr -d '\r')
+
+# Parse KEY=value lines emitted by the probe.
+_probe_val() { printf '%s\n' "$PROBE_OUTPUT" | grep "^$1=" | cut -d= -f2-; }
+
+BRIDGE_IP=$(          _probe_val BRIDGE_IP)
+BRIDGE_CIDR=$(        _probe_val BRIDGE_CIDR)
+HOST_IP=$(            _probe_val HOST_IP)
+AGENT_NET_CIDR=$(     _probe_val AGENT_NET_CIDR)
+TINYPROXY_INSTALLED=$(_probe_val TINYPROXY_INSTALLED)
+TINYPROXY_ACTIVE=$(   _probe_val TINYPROXY_ACTIVE)
+TINYPROXY_STORED_HASH=$(_probe_val TINYPROXY_STORED_HASH)
+
+# Fallbacks — same behaviour as the former individual vm_ssh calls.
 if [[ -z "$BRIDGE_IP" ]]; then
   BRIDGE_IP="172.17.0.1"
   echo "warning: could not discover docker bridge gateway; falling back to $BRIDGE_IP" >&2
 fi
-BRIDGE_CIDR=$(vm_ssh docker network inspect bridge -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null | tr -d '\r' || true)
 if [[ -z "$BRIDGE_CIDR" ]]; then
   BRIDGE_CIDR="172.17.0.0/16"
-fi
-
-# HOST_IP from inside the VM: default gateway under Colima's vmnet points at
-# the macOS host when `--network-address` is set. Run `ip route` remotely and
-# parse the output locally so we don't have to fight with quoting awk's $3
-# through the SSH argv-join round trip.
-HOST_IP=$(vm_ssh ip route show default 2>/dev/null | tr -d '\r' | awk '/^default/ {print $3; exit}' || true)
-if [[ -z "$HOST_IP" ]]; then
-  for candidate in host.lima.internal host.docker.internal; do
-    hosts_line=$(vm_ssh getent hosts "$candidate" 2>/dev/null | tr -d '\r' || true)
-    if [[ -n "$hosts_line" ]]; then
-      HOST_IP=$(printf '%s\n' "$hosts_line" | awk '{print $1; exit}')
-      [[ -n "$HOST_IP" ]] && break
-    fi
-  done
 fi
 if [[ -z "$HOST_IP" ]]; then
   echo "warning: could not determine the macOS host IP from inside the VM; local inference ($INFERENCE_LABEL) will not work." >&2
@@ -823,9 +874,7 @@ echo "==> VM network: bridge=$BRIDGE_IP cidr=$BRIDGE_CIDR host=$HOST_IP"
 # not on the default bridge. claude-agent-net provides this without changing
 # tinyproxy's Listen address — VM routing lets containers on this network reach
 # $BRIDGE_IP:$TINYPROXY_PORT through the default bridge interface.
-AGENT_NET_CIDR=""
 if $LOCAL_SEARCH_ENABLED; then
-  AGENT_NET_CIDR=$(vm_ssh docker network inspect "$AGENT_NET_NAME" -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null | tr -d '\r' || true)
   if [[ -z "$AGENT_NET_CIDR" ]]; then
     vm_ssh docker network create "$AGENT_NET_NAME" >/dev/null
     AGENT_NET_CIDR=$(vm_ssh docker network inspect "$AGENT_NET_NAME" -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null | tr -d '\r' || true)
@@ -836,6 +885,46 @@ if $LOCAL_SEARCH_ENABLED; then
   fi
   echo "==> Agent network: $AGENT_NET_NAME cidr=$AGENT_NET_CIDR"
 fi
+
+# ── inference backend preflight (non-fatal, overlaps later work) ──────────────
+# Launched here — right after HOST_IP is known — as a background job so the
+# up-to-3s curl timeout overlaps tinyproxy push, firewall apply, and host-side
+# Python config injection. wait_inference_probe() collects the result before any
+# exec call so no orphaned process survives exec.
+PROBE_PID=""
+echo "==> Probing $INFERENCE_LABEL at http://$HOST_IP:$INFERENCE_PORT from inside VM"
+case "$BACKEND" in
+  ollama)
+    {
+      if ! vm_ssh curl -sf --max-time 3 "http://$HOST_IP:$INFERENCE_PORT/api/tags" >/dev/null 2>&1; then
+        cat <<WARN
+warning: Ollama not reachable at http://$HOST_IP:$INFERENCE_PORT from inside the
+Colima VM. Ensure Ollama is running on the macOS host and bound to 0.0.0.0.
+On the host, run once:
+    launchctl setenv OLLAMA_HOST 0.0.0.0:$INFERENCE_PORT
+and restart the Ollama app. Continuing without local inference.
+WARN
+      fi
+    } >"$TMP_WORK/probe-warning" 2>&1 &
+    PROBE_PID=$!
+    ;;
+  omlx)
+    OMLX_CURL_ARGS=(-sf --max-time 3)
+    [[ -n "${OMLX_API_KEY:-}" ]] && OMLX_CURL_ARGS+=(-H "Authorization: Bearer $OMLX_API_KEY")
+    {
+      if ! vm_ssh curl "${OMLX_CURL_ARGS[@]}" "http://$HOST_IP:$INFERENCE_PORT/v1/models" >/dev/null 2>&1; then
+        cat <<WARN
+warning: omlx not reachable at http://$HOST_IP:$INFERENCE_PORT from inside the
+Colima VM. Ensure omlx is running on the host with:
+    omlx serve --model-dir ~/models
+or via: brew services start omlx
+Continuing without local inference.
+WARN
+      fi
+    } >"$TMP_WORK/probe-warning" 2>&1 &
+    PROBE_PID=$!
+    ;;
+esac
 
 # ── SearXNG settings.yml seed (first run only, local-search path) ────────────
 if $LOCAL_SEARCH_ENABLED; then
@@ -875,11 +964,12 @@ SXNG
 fi
 
 # ── tinyproxy install in VM (idempotent) ─────────────────────────────────────
+# Install check uses TINYPROXY_INSTALLED from the batch probe — no extra SSH.
 # Check the `tinyproxy` package, not the binary: on Ubuntu 24.04 the package is
 # split (`tinyproxy-bin` ships /usr/bin/tinyproxy; `tinyproxy` ships the systemd
 # unit + default config). A prior purge of `tinyproxy` can leave the binary
 # behind, so a `command -v` check would pass while `systemctl` has no unit.
-if ! vm_ssh dpkg-query -W -f='${Status}' tinyproxy 2>/dev/null | grep -q "install ok installed"; then
+if [[ "$TINYPROXY_INSTALLED" != "true" ]]; then
   echo "==> Installing tinyproxy in Colima VM"
   vm_ssh sudo apt-get update -qq
   # DEBIAN_FRONTEND=noninteractive + --force-confnew handles the case where a
@@ -891,10 +981,7 @@ if ! vm_ssh dpkg-query -W -f='${Status}' tinyproxy 2>/dev/null | grep -q "instal
   vm_ssh sudo systemctl daemon-reload
 fi
 
-# Build tinyproxy config and filter on the host, then push into the VM.
-TMP_WORK=$(mktemp -d)
-trap 'rm -rf "$TMP_WORK"' EXIT
-
+# Build tinyproxy config and filter on the host.
 cat > "$TMP_WORK/tinyproxy.conf" <<CONF
 User tinyproxy
 Group tinyproxy
@@ -916,17 +1003,23 @@ CONF
 
 generate_filter_file "$TMP_WORK/filter"
 
-# Ship both files directly into /etc/tinyproxy/ via `sudo tee` over colima ssh.
-vm_put_file "$TMP_WORK/tinyproxy.conf" /etc/tinyproxy/tinyproxy.conf
-vm_put_file "$TMP_WORK/filter"         /etc/tinyproxy/filter
-
-# Enable and (re)start/reload tinyproxy. On first run, enable+start; otherwise
-# reload to pick up filter changes without interrupting in-flight connections.
-if $RELOAD_ALLOWLIST; then
-  vm_ssh sudo systemctl reload tinyproxy 2>/dev/null || vm_ssh sudo systemctl restart tinyproxy
-else
-  vm_ssh sudo systemctl enable --now tinyproxy >/dev/null 2>&1 || true
-  vm_ssh sudo systemctl restart tinyproxy
+# Push config only when the content changed, tinyproxy is not yet active, or
+# --reload-allowlist was passed. Hash covers both tinyproxy.conf and filter so
+# any allowlist edit (which changes filter) triggers a push automatically.
+# The stored hash is read by the batch probe from /etc/tinyproxy/filter.hash.
+NEW_PROXY_HASH=$(cat "$TMP_WORK/tinyproxy.conf" "$TMP_WORK/filter" | sha256sum | awk '{print $1}')
+if $RELOAD_ALLOWLIST || [[ "$NEW_PROXY_HASH" != "$TINYPROXY_STORED_HASH" || "$TINYPROXY_ACTIVE" != "true" ]]; then
+  vm_put_file "$TMP_WORK/tinyproxy.conf" /etc/tinyproxy/tinyproxy.conf
+  vm_put_file "$TMP_WORK/filter"         /etc/tinyproxy/filter
+  # Persist new hash so next warm reattach can skip the push.
+  printf '%s\n' "$NEW_PROXY_HASH" | colima ssh -p "$COLIMA_PROFILE" -- sudo tee /etc/tinyproxy/filter.hash >/dev/null
+  # Reload (no connection drop) when tinyproxy is already running; start it otherwise.
+  if [[ "$TINYPROXY_ACTIVE" == "true" ]]; then
+    vm_ssh sudo systemctl reload tinyproxy 2>/dev/null || vm_ssh sudo systemctl restart tinyproxy
+  else
+    vm_ssh sudo systemctl enable --now tinyproxy >/dev/null 2>&1 || true
+    vm_ssh sudo systemctl start tinyproxy
+  fi
 fi
 
 # ── iptables rules in the VM (CLAUDE_AGENT child chain of DOCKER-USER) ───────
@@ -992,37 +1085,6 @@ if $RELOAD_ALLOWLIST; then
   trap - EXIT
   exit 0
 fi
-
-# ── inference backend preflight (non-fatal) ──────────────────────────────────
-echo "==> Probing $INFERENCE_LABEL at http://$HOST_IP:$INFERENCE_PORT from inside VM"
-case "$BACKEND" in
-  ollama)
-    if ! vm_ssh curl -sf --max-time 3 "http://$HOST_IP:$INFERENCE_PORT/api/tags" >/dev/null 2>&1; then
-      cat >&2 <<WARN
-warning: Ollama not reachable at http://$HOST_IP:$INFERENCE_PORT from inside the
-Colima VM. Ensure Ollama is running on the macOS host and bound to 0.0.0.0.
-On the host, run once:
-    launchctl setenv OLLAMA_HOST 0.0.0.0:$INFERENCE_PORT
-and restart the Ollama app. Continuing without local inference.
-WARN
-    fi
-    ;;
-  omlx)
-    OMLX_CURL_ARGS=(-sf --max-time 3)
-    if [[ -n "${OMLX_API_KEY:-}" ]]; then
-      OMLX_CURL_ARGS+=(-H "Authorization: Bearer $OMLX_API_KEY")
-    fi
-    if ! vm_ssh curl "${OMLX_CURL_ARGS[@]}" "http://$HOST_IP:$INFERENCE_PORT/v1/models" >/dev/null 2>&1; then
-      cat >&2 <<WARN
-warning: omlx not reachable at http://$HOST_IP:$INFERENCE_PORT from inside the
-Colima VM. Ensure omlx is running on the host with:
-    omlx serve --model-dir ~/models
-or via: brew services start omlx
-Continuing without local inference.
-WARN
-    fi
-    ;;
-esac
 
 # ── build the image if missing ───────────────────────────────────────────────
 if ! docker image inspect "$IMAGE_TAG" &>/dev/null; then
@@ -1537,9 +1599,17 @@ JSONEOF
   echo "==> Created $PROJECT_SETTINGS_FILE"
 fi
 
+wait_inference_probe() {
+  [[ -z "${PROBE_PID:-}" ]] && return
+  wait "$PROBE_PID" 2>/dev/null || true
+  [[ -s "$TMP_WORK/probe-warning" ]] && cat "$TMP_WORK/probe-warning" >&2
+  PROBE_PID=""
+}
+
 attach_existing() {
   echo "==> Attaching to existing container '$CONTAINER_NAME'"
   docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  wait_inference_probe
   rm -rf "$TMP_WORK"
   trap - EXIT
   exec docker exec -it -w "$PROJECT_DIR" "${DOCKER_ENV_ARGS[@]}" "$CONTAINER_NAME" /bin/bash
@@ -1572,6 +1642,8 @@ NETWORK_ARGS=()
 if $LOCAL_SEARCH_ENABLED; then
   NETWORK_ARGS=(--network "$AGENT_NET_NAME")
 fi
+
+wait_inference_probe
 
 echo "==> Creating container '$CONTAINER_NAME'"
 echo "    sandbox  : $SANDBOX_NAME  ($SANDBOX_ROOT)"

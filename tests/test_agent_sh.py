@@ -309,3 +309,111 @@ def test_agents_skills_mounted_in_docker_run():
     assert "/root/.agents/skills" in agent_block, (
         "AGENTS_SKILLS_DIR not mounted at /root/.agents/skills in docker run block"
     )
+
+
+# ── warm-reattach optimizations ───────────────────────────────────────────────
+
+def test_batch_vm_probe_single_ssh_call():
+    # The read-only network discovery must be a single colima ssh invocation
+    # (vm-probe.sh piped in) rather than separate vm_ssh calls for bridge/host/agentnet.
+    # We verify this by checking that the vm-probe.sh pattern exists and that the
+    # old separate per-property vm_ssh patterns do not.
+    assert "vm-probe.sh" in _SCRIPT_TEXT, (
+        "vm-probe.sh batch probe not found; separate vm_ssh calls for network "
+        "discovery were not collapsed into a single round-trip"
+    )
+    # The old duplicate docker network inspect bridge calls must be gone.
+    bridge_inspect_calls = re.findall(
+        r'vm_ssh\s+docker\s+network\s+inspect\s+bridge', _SCRIPT_TEXT
+    )
+    assert len(bridge_inspect_calls) == 0, (
+        f"Found {len(bridge_inspect_calls)} separate vm_ssh docker network inspect bridge call(s); "
+        "should be zero after batching into vm-probe.sh"
+    )
+
+
+def test_batch_probe_covers_dpkg_query():
+    # dpkg-query (tinyproxy install check) must be inside the batch probe,
+    # not a separate vm_ssh call on the main code path.
+    # The probe script written to disk contains the dpkg-query logic.
+    assert "dpkg-query" in _SCRIPT_TEXT, "dpkg-query not found in script at all"
+    # There must be no top-level `vm_ssh dpkg-query` outside a heredoc/probe.
+    standalone_dpkg = re.findall(r'(?m)^\s*(?:if\s+)?(?:!\s+)?vm_ssh\s+dpkg-query', _SCRIPT_TEXT)
+    assert len(standalone_dpkg) == 0, (
+        f"Found {len(standalone_dpkg)} standalone vm_ssh dpkg-query call(s); "
+        "tinyproxy install check must be part of the batch probe"
+    )
+
+
+def test_tinyproxy_push_hash_gated():
+    # The tinyproxy config push must be conditional on a hash comparison so
+    # unchanged configs are not pushed on warm reattach.
+    assert "TINYPROXY_STORED_HASH" in _SCRIPT_TEXT, (
+        "TINYPROXY_STORED_HASH variable not found; hash-gated tinyproxy push not implemented"
+    )
+    assert "filter.hash" in _SCRIPT_TEXT, (
+        "filter.hash marker file not found; stored hash not being persisted in VM"
+    )
+    # The vm_put_file calls for tinyproxy.conf and filter must be inside a conditional block.
+    # We locate the vm_put_file tinyproxy.conf call and check it's preceded by an if/then.
+    lines = _SCRIPT_TEXT.splitlines()
+    put_lines = [i for i, l in enumerate(lines) if "vm_put_file" in l and "tinyproxy.conf" in l]
+    assert put_lines, "vm_put_file tinyproxy.conf not found"
+    for lineno in put_lines:
+        context = "\n".join(lines[max(0, lineno - 15):lineno + 1])
+        assert re.search(r'\bif\b', context), (
+            f"vm_put_file tinyproxy.conf at line {lineno + 1} does not appear inside "
+            "a conditional block; tinyproxy push must be hash-gated"
+        )
+
+
+def test_tinyproxy_reload_not_unconditional_restart():
+    # On the warm path (config unchanged), tinyproxy must NOT be restarted.
+    # We verify by checking there's no unconditional `systemctl restart tinyproxy`
+    # outside a conditional block.
+    lines = _SCRIPT_TEXT.splitlines()
+    restart_lines = [
+        i for i, l in enumerate(lines)
+        if "systemctl restart tinyproxy" in l and not l.strip().startswith("#")
+    ]
+    for lineno in restart_lines:
+        context = "\n".join(lines[max(0, lineno - 20):lineno + 1])
+        assert re.search(r'\bif\b', context), (
+            f"systemctl restart tinyproxy at line {lineno + 1} is not inside a "
+            "conditional block; it will run unconditionally on every warm reattach"
+        )
+
+
+def test_inference_probe_backgrounded():
+    # The inference probe must be launched as a background job so its up-to-3s
+    # timeout overlaps the iptables apply and Python config injection.
+    assert "PROBE_PID" in _SCRIPT_TEXT, (
+        "PROBE_PID not found; inference probe is not backgrounded"
+    )
+    # The background launch: the probe block's closing brace is followed by `&`
+    # (job control). PROBE_PID=$! captures the job id immediately after.
+    assert re.search(r'PROBE_PID=\$!', _SCRIPT_TEXT), (
+        "PROBE_PID=$! not found; background job is not being captured for wait"
+    )
+    assert re.search(r'}\s*>.*probe-warning.*&', _SCRIPT_TEXT, re.DOTALL), (
+        "No '} > probe-warning ... &' block found; inference probe must be backgrounded"
+    )
+
+
+def test_wait_inference_probe_before_exec():
+    # wait_inference_probe (or equivalent) must be called before both exec paths
+    # so there are no orphaned background processes and the warning is emitted.
+    assert "wait_inference_probe" in _SCRIPT_TEXT, (
+        "wait_inference_probe not found; background probe is never awaited"
+    )
+    # Must appear before attach_existing's exec docker exec and before exec docker run.
+    attach_fn = _function_body("attach_existing")
+    assert "wait_inference_probe" in attach_fn, (
+        "wait_inference_probe not called inside attach_existing(); "
+        "warm-reattach path would leave an orphaned background probe"
+    )
+    # Must appear before exec docker run in the fresh-container section.
+    fresh_section = _fresh_container_section()
+    assert "wait_inference_probe" in fresh_section, (
+        "wait_inference_probe not called before exec docker run in fresh-container section"
+    )
