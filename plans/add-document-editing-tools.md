@@ -2,10 +2,10 @@
 
 ## Status
 
-- [ ] Add LibreOffice headless, Office-metric fonts, pandoc, and poppler-utils to `dockerfiles/claude-agent.Dockerfile`
-- [ ] Bake an `/opt/doc-tools` venv (python-docx, openpyxl, python-pptx) and expose a stable interpreter entrypoint
-- [ ] Document the tooling in `templates/global-claude.md` (claude-agent-scoped) and note its absence in the claude-dev section *(Haiku ok)*
-- [ ] Add static install-line assertions to `tests/test_dockerfile.py` *(Haiku ok)*
+- [x] Add LibreOffice headless, Office-metric fonts, pandoc, and poppler-utils to `dockerfiles/claude-agent.Dockerfile`
+- [x] Bake an `/opt/doc-tools` venv (python-docx, openpyxl, python-pptx) and expose a stable interpreter entrypoint
+- [x] Document the tooling in `templates/global-claude.md` (claude-agent-scoped) and note its absence in the claude-dev section *(Haiku ok)*
+- [x] Add static install-line assertions to `tests/test_dockerfile.py` *(Haiku ok)*
 - [ ] `start-agent.sh --rebuild`, then smoke-test conversion + page-count inside the container
 
 ## Context

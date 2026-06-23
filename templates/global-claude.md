@@ -61,6 +61,38 @@ rejecting it. Do not retry blindly — tell the user to add the hostname to
 
 A local model server runs on the macOS host at `$OLLAMA_HOST` (Ollama, port 11434) or `$OMLX_HOST` (omlx, port 8000). OpenCode is pre-wired to it — no configuration needed. Route local-model calls to `$OLLAMA_HOST` / `$OMLX_HOST`, not through the proxy.
 
+## Office Document Toolchain (claude-agent)
+
+The image ships a full headless office stack for format conversion, page-count
+verification, and document editing.
+
+**Convert to PDF (or between office formats):**
+```bash
+soffice --headless --convert-to pdf --outdir /tmp/out /path/to/file.docx
+```
+Also works with `.xlsx`, `.pptx`, `.odt`, etc. `--outdir` must exist.
+
+**Verify page count / layout:**
+```bash
+pdfinfo /tmp/out/file.pdf   # shows "Pages:" among other metadata
+```
+
+**Edit `.docx`/`.xlsx`/`.pptx` in Python** — use the `docpython` interpreter
+(pre-installed venv at `/opt/doc-tools/venv`):
+```bash
+docpython -c "from docx import Document; d = Document('file.docx'); print(len(d.paragraphs))"
+```
+Libraries available: `python-docx` (`.docx`), `openpyxl` (`.xlsx`),
+`python-pptx` (`.pptx`). **Tip:** preserve styling by templating off the
+existing file (`Document('existing.docx')`) rather than building formatting
+from scratch — rebuilding formatting from scratch causes style drift.
+
+**Markdown ↔ docx conversion:**
+```bash
+pandoc input.md -o output.docx
+pandoc input.docx -t markdown -o output.md
+```
+
 ## Differences in claude-dev (start-claude.sh)
 
 - **Sandboxed bash egress is restricted to a default-deny allowlist.**
@@ -80,6 +112,11 @@ A local model server runs on the macOS host at `$OLLAMA_HOST` (Ollama, port 1143
   Note: the microVM itself has full unrestricted egress at the VM level —
   this is a guardrail against accidental off-list fetches, not a hard
   security boundary (the settings file is writable by the agent).
+- **No office document toolchain** — LibreOffice, pandoc, poppler-utils, and
+  the `docpython` venv are **not** present. Use `uv run` to install
+  `python-docx` / `openpyxl` / `python-pptx` at runtime for editing; format
+  conversion and page-count verification via `soffice`/`pdfinfo` are
+  unavailable without the claude-agent image.
 - **No local inference server** — `$OLLAMA_HOST` and `$OMLX_HOST` are unset.
 - **Bubblewrap sandbox is active** for bash commands. `/tmp` and
   `/root/.cache` are **read-only** at the sandbox mount layer. Use `$TMPDIR`

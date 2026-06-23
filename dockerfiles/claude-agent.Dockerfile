@@ -50,6 +50,24 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
 # setup_lts.x satisfies). Installed in one layer so npm bootstraps once.
 RUN npm install -g opencode-ai@latest @earendil-works/pi-coding-agent@latest
 
+# ── Office document toolchain ────────────────────────────────────────────────
+# LibreOffice headless components for format conversion (soffice --headless --convert-to).
+# Office-metric fonts so LibreOffice pagination matches Word/Excel/PowerPoint:
+#   fonts-liberation  → Arial/Times New Roman/Courier New metrics
+#   fonts-crosextra-carlito  → Calibri metric-compatible
+#   fonts-crosextra-caladea  → Cambria metric-compatible
+#   fonts-dejavu  → broad Unicode coverage fallback
+#   fonts-roboto  → used directly in user documents in this environment
+# pandoc for Markdown↔docx conversions; poppler-utils for pdfinfo/pdftotext.
+RUN apt-get update -qq \
+ && apt-get install -y --no-install-recommends \
+      libreoffice-writer libreoffice-calc libreoffice-impress \
+      fonts-liberation fonts-crosextra-carlito fonts-crosextra-caladea \
+      fonts-dejavu fonts-roboto \
+      pandoc \
+      poppler-utils \
+ && rm -rf /var/lib/apt/lists/*
+
 # ── SearXNG MCP shim ─────────────────────────────────────────────────────────
 # ~40-line FastMCP wrapper that exposes a single `websearch` tool backed by a
 # local SearXNG instance. Installed to /opt/searxng-mcp/server.py so opencode
@@ -63,6 +81,16 @@ COPY searxng-mcp/server.py /opt/searxng-mcp/server.py
 # image and invoked directly (see start-agent.sh command wiring).
 RUN uv venv /opt/searxng-mcp/venv \
  && uv pip install --python /opt/searxng-mcp/venv/bin/python 'mcp[cli]' httpx
+
+# ── doc-tools Python venv ─────────────────────────────────────────────────────
+# Baked venv so python-docx/openpyxl/python-pptx are present without a runtime
+# install step. Mirrors the searxng-mcp pattern — system Python is PEP 668
+# externally managed so uv pip install --system hard-fails. docpython is exposed
+# as a stable entrypoint agents can invoke without knowing the venv path.
+RUN uv venv /opt/doc-tools/venv \
+ && uv pip install --python /opt/doc-tools/venv/bin/python \
+      python-docx openpyxl python-pptx \
+ && ln -sf /opt/doc-tools/venv/bin/python /usr/local/bin/docpython
 
 # ── UV project venv redirect (dynamic $TMPDIR) ───────────────────────────────
 # Redirect venvs out of the bind-mounted project dir, which may carry a
