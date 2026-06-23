@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.6
 #
 # claude-agent base image — Debian bookworm with Claude Code + OpenCode CLIs,
-# Node LTS, uv, git, ripgrep, fd, jq.
+# Node LTS, uv, git, ripgrep, fd, jq, unzip/zip.
 # Built by start-agent.sh into Colima's docker runtime as claude-agent:latest.
 #
 # Unlike start-claude.sh, this image omits the Claude Code bubblewrap sandbox
@@ -22,6 +22,7 @@ RUN apt-get update -qq \
       bash curl wget git ca-certificates \
       python3 \
       jq ripgrep fd-find \
+      unzip zip \
  && apt-get upgrade -y \
  && rm -rf /var/lib/apt/lists/*
 
