@@ -20,7 +20,7 @@ def test_pi_deprecated_package_not_used():
 
 
 def test_opencode_installed_via_npm():
-    assert "npm install -g opencode-ai" in _TEXT, (
+    assert "npm install -g" in _TEXT and "opencode-ai@latest" in _TEXT, (
         "opencode CLI not installed in Dockerfile"
     )
 

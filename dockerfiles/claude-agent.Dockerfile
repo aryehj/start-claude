@@ -49,7 +49,7 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
 # Both shipped as canonical npm packages: opencode-ai (binary `opencode`) and
 # @earendil-works/pi-coding-agent (binary `pi`, requires Node >=22.19.0 which
 # setup_lts.x satisfies). Installed in one layer so npm bootstraps once.
-RUN npm install -g opencode-ai@latest @earendil-works/pi-coding-agent@latest
+RUN npm install -g --allow-scripts=opencode-ai,@google/genai,protobufjs opencode-ai@latest @earendil-works/pi-coding-agent@latest
 
 # ── Office document toolchain ────────────────────────────────────────────────
 # LibreOffice headless components for format conversion (soffice --headless --convert-to).
