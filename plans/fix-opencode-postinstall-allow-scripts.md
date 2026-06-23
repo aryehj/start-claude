@@ -2,7 +2,7 @@
 
 ## Status
 
-- [ ] Add `--allow-scripts=opencode-ai,@google/genai,protobufjs` to the `npm install -g` at `dockerfiles/claude-agent.Dockerfile:52` (Haiku ok)
+- [x] Add `--allow-scripts=opencode-ai,@google/genai,protobufjs` to the `npm install -g` at `dockerfiles/claude-agent.Dockerfile:52` (Haiku ok)
 - [ ] Rebuild (`start-agent.sh --rebuild`) and verify `opencode --version` and `pi --version` both run inside the container, and the allow-scripts warning is gone from the build log
 
 ## Context
