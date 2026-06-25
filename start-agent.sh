@@ -1534,6 +1534,14 @@ DOCKER_ENV_ARGS=(
   -e "HTTPS_PROXY=http://$BRIDGE_IP:$TINYPROXY_PORT"
   -e "HTTP_PROXY=http://$BRIDGE_IP:$TINYPROXY_PORT"
   -e "NO_PROXY=localhost,127.0.0.1,$BRIDGE_IP,$HOST_IP,searxng"
+  # Lowercase duplicates: apt (and curl/wget/git) only consult lowercase
+  # http_proxy/https_proxy, ignoring the uppercase forms Node honors. Without
+  # these, apt connects direct to the bridge and hits the CLAUDE_AGENT REJECT
+  # ("no route to host"); with them it flows through tinyproxy and is gated by
+  # the same hostname allowlist as everything else. No firewall change needed.
+  -e "http_proxy=http://$BRIDGE_IP:$TINYPROXY_PORT"
+  -e "https_proxy=http://$BRIDGE_IP:$TINYPROXY_PORT"
+  -e "no_proxy=localhost,127.0.0.1,$BRIDGE_IP,$HOST_IP,searxng"
   -e "NODE_USE_ENV_PROXY=1"
   -e "TMPDIR=/tmp"
 )

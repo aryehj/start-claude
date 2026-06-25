@@ -31,9 +31,12 @@ that won't run on Linux. Run `uv sync` once per fresh session to build a
 usable venv; this is expected and normal.
 
 **No bare `python` on PATH, and `python3-venv` / `ensurepip` / `pip` are
-not installed.** Don't try to `apt-get install` them — on `claude-agent`
-the proxy blocks `deb.debian.org` anyway, and on either environment the
-right fix is to use `uv`. For scratch Python work:
+not installed.** For Python, reach for `uv` rather than `apt-get install`:
+it's faster, needs no root, and sidesteps the macOS-`.venv`-leak problem
+above. (`apt-get` does work on `claude-agent` — it flows through the egress
+proxy and is gated by the same hostname allowlist as everything else — so
+use it for genuinely system-level packages; just don't use it to bootstrap
+Python.) For scratch Python work:
 
 ```bash
 cd /tmp && uv init myproj && cd myproj && uv add <pkg> && uv run python -c '...'
