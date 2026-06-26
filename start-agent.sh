@@ -1017,8 +1017,14 @@ if $RELOAD_ALLOWLIST || [[ "$NEW_PROXY_HASH" != "$TINYPROXY_STORED_HASH" || "$TI
   if [[ "$TINYPROXY_ACTIVE" == "true" ]]; then
     vm_ssh sudo systemctl reload tinyproxy 2>/dev/null || vm_ssh sudo systemctl restart tinyproxy
   else
-    vm_ssh sudo systemctl enable --now tinyproxy >/dev/null 2>&1 || true
-    vm_ssh sudo systemctl start tinyproxy
+    # restart, not start: on a freshly recreated VM dpkg's postinst auto-starts
+    # tinyproxy with its default config *before* the probe-derived TINYPROXY_ACTIVE
+    # (read pre-install, so "false") is consulted here. `start`/`enable --now` are
+    # no-ops against that already-running unit and never load the config pushed
+    # above, leaving egress broken until --reload-allowlist. `restart` loads the
+    # pushed config whether the unit was auto-started or not yet running.
+    vm_ssh sudo systemctl enable tinyproxy >/dev/null 2>&1 || true
+    vm_ssh sudo systemctl restart tinyproxy
   fi
 fi
 
