@@ -47,6 +47,18 @@ def test_poppler_utils_installed():
     )
 
 
+def test_file_command_installed():
+    assert "libreoffice-writer" in _TEXT, "expected office-toolchain apt layer to exist"
+    office_layer_start = _TEXT.index("libreoffice-writer")
+    office_layer_end = _TEXT.index("rm -rf /var/lib/apt/lists/*", office_layer_start)
+    assert "file" in {
+        pkg.strip() for pkg in _TEXT[office_layer_start:office_layer_end].split()
+    }, (
+        "file not installed in Dockerfile; expected `file` in the office-toolchain "
+        "apt layer (provides libmagic-backed file-type detection)"
+    )
+
+
 def test_doc_tools_venv_python_docx():
     assert "python-docx" in _TEXT, (
         "python-docx not installed in Dockerfile; expected python-docx in the /opt/doc-tools venv"
@@ -65,8 +77,13 @@ def test_doc_tools_venv_python_pptx():
     )
 
 
-def test_docpython_symlink_created():
-    assert "docpython" in _TEXT, (
-        "docpython symlink not created in Dockerfile; expected a symlink from "
-        "/opt/doc-tools/venv/bin/python to /usr/local/bin/docpython"
+def test_docpython_is_wrapper_not_bare_symlink():
+    assert "ln -sf /opt/doc-tools/venv/bin/python /usr/local/bin/docpython" not in _TEXT, (
+        "docpython must not be a bare symlink to the venv's bin/python; that "
+        "second-order symlink loses the venv's pyvenv.cfg discovery and drops "
+        "site-packages off sys.path (import docx/openpyxl/pptx fails)"
+    )
+    assert "/usr/local/bin/docpython" in _TEXT and "exec /opt/doc-tools/venv/bin/python" in _TEXT, (
+        "docpython must be a wrapper at /usr/local/bin/docpython that execs "
+        "/opt/doc-tools/venv/bin/python directly"
     )

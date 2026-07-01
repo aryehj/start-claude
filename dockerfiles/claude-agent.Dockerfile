@@ -59,7 +59,8 @@ RUN npm install -g --allow-scripts=opencode-ai,@google/genai,protobufjs opencode
 #   fonts-crosextra-caladea  → Cambria metric-compatible
 #   fonts-dejavu  → broad Unicode coverage fallback
 #   fonts-roboto  → used directly in user documents in this environment
-# pandoc for Markdown↔docx conversions; poppler-utils for pdfinfo/pdftotext.
+# pandoc for Markdown↔docx conversions; poppler-utils for pdfinfo/pdftotext;
+# file (libmagic) for document type inspection.
 RUN apt-get update -qq \
  && apt-get install -y --no-install-recommends \
       libreoffice-writer libreoffice-calc libreoffice-impress \
@@ -67,6 +68,7 @@ RUN apt-get update -qq \
       fonts-dejavu fonts-roboto \
       pandoc \
       poppler-utils \
+      file \
  && rm -rf /var/lib/apt/lists/*
 
 # ── SearXNG MCP shim ─────────────────────────────────────────────────────────
@@ -90,8 +92,15 @@ RUN uv venv /opt/searxng-mcp/venv \
 # as a stable entrypoint agents can invoke without knowing the venv path.
 RUN uv venv /opt/doc-tools/venv \
  && uv pip install --python /opt/doc-tools/venv/bin/python \
-      python-docx openpyxl python-pptx \
- && ln -sf /opt/doc-tools/venv/bin/python /usr/local/bin/docpython
+      python-docx openpyxl python-pptx
+# A bare symlink to the venv's bin/python resolves past the venv (it's itself a
+# symlink into uv's standalone interpreter), dropping pyvenv.cfg discovery and
+# site-packages off sys.path. Wrap instead so sys.executable stays in-venv.
+RUN cat > /usr/local/bin/docpython <<'DOCPYEOF'
+#!/bin/sh
+exec /opt/doc-tools/venv/bin/python "$@"
+DOCPYEOF
+RUN chmod +x /usr/local/bin/docpython
 
 # ── UV project venv redirect (dynamic $TMPDIR) ───────────────────────────────
 # Redirect venvs out of the bind-mounted project dir, which may carry a
