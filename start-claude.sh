@@ -246,7 +246,7 @@ else
     apt-get install -y --no-install-recommends \
       bash curl wget git ca-certificates \
       python3 \
-      jq ripgrep fd-find \
+      jq ripgrep fd-find unzip zip \
       bubblewrap socat libseccomp2
     apt-get upgrade -y
     rm -rf /var/lib/apt/lists/*
