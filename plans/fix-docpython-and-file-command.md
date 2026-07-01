@@ -2,10 +2,10 @@
 
 ## Status
 
-- [ ] Replace the bare `docpython` symlink with a wrapper that execs the venv Python (`dockerfiles/claude-agent.Dockerfile:94`)
-- [ ] Add `file` to the office-toolchain apt layer (`dockerfiles/claude-agent.Dockerfile:63-70`)
-- [ ] Strengthen `test_docpython_symlink_created` to assert the wrapper form, not a bare symlink (`tests/test_dockerfile.py:68`)
-- [ ] Add a `file` install assertion to `tests/test_dockerfile.py`
+- [x] Replace the bare `docpython` symlink with a wrapper that execs the venv Python (`dockerfiles/claude-agent.Dockerfile:94`)
+- [x] Add `file` to the office-toolchain apt layer (`dockerfiles/claude-agent.Dockerfile:63-70`)
+- [x] Strengthen `test_docpython_symlink_created` to assert the wrapper form, not a bare symlink (`tests/test_dockerfile.py:68`)
+- [x] Add a `file` install assertion to `tests/test_dockerfile.py`
 - [ ] `start-agent.sh --rebuild`, then verify `docpython -c "import docx, openpyxl, pptx"` and `file --version` inside the container
 
 ## Context
