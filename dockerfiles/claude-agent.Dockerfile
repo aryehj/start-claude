@@ -13,8 +13,20 @@
 
 FROM debian:bookworm-slim
 
+# PYTHONHASHSEED pins a fixed hash secret so CPython skips the unconditional
+# getrandom(2) read at interpreter startup — that read blocks indefinitely when
+# the VM kernel's CRNG is unseeded (low-entropy microVM), hanging every python
+# invocation including the /opt/doc-tools venv. The doc libraries are pure
+# parsers, so a deterministic seed has no functional downside.
+# UV_PYTHON_* make ad-hoc `uv init/run` use the baked system python3 instead of
+# fetching a managed CPython, whose download's first hop is github.com — a
+# write-capable host intentionally excluded from the tinyproxy allowlist, so the
+# fetch would otherwise stall.
 ENV DEBIAN_FRONTEND=noninteractive \
-    PATH="/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+    PATH="/root/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    PYTHONHASHSEED=0 \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PYTHON_PREFERENCE=system
 
 # ── system packages ──────────────────────────────────────────────────────────
 RUN apt-get update -qq \
@@ -96,9 +108,11 @@ RUN uv venv /opt/doc-tools/venv \
 # A bare symlink to the venv's bin/python resolves past the venv (it's itself a
 # symlink into uv's standalone interpreter), dropping pyvenv.cfg discovery and
 # site-packages off sys.path. Wrap instead so sys.executable stays in-venv.
+# PYTHONHASHSEED=0 is set here as well as via ENV so it holds even if the ambient
+# env is stripped — it skips the blocking getrandom() startup read (see ENV note).
 RUN cat > /usr/local/bin/docpython <<'DOCPYEOF'
 #!/bin/sh
-exec /opt/doc-tools/venv/bin/python "$@"
+exec env PYTHONHASHSEED=0 /opt/doc-tools/venv/bin/python "$@"
 DOCPYEOF
 RUN chmod +x /usr/local/bin/docpython
 

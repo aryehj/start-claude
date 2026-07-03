@@ -83,7 +83,24 @@ def test_docpython_is_wrapper_not_bare_symlink():
         "second-order symlink loses the venv's pyvenv.cfg discovery and drops "
         "site-packages off sys.path (import docx/openpyxl/pptx fails)"
     )
-    assert "/usr/local/bin/docpython" in _TEXT and "exec /opt/doc-tools/venv/bin/python" in _TEXT, (
+    assert "/usr/local/bin/docpython" in _TEXT and "exec env PYTHONHASHSEED=0 /opt/doc-tools/venv/bin/python" in _TEXT, (
         "docpython must be a wrapper at /usr/local/bin/docpython that execs "
-        "/opt/doc-tools/venv/bin/python directly"
+        "/opt/doc-tools/venv/bin/python with PYTHONHASHSEED pinned (skips the "
+        "blocking getrandom() startup read on a low-entropy VM)"
+    )
+
+
+def test_pythonhashseed_pinned_in_env():
+    assert "PYTHONHASHSEED=0" in _TEXT, (
+        "PYTHONHASHSEED=0 must be set (ENV + docpython wrapper) so CPython skips "
+        "the unconditional getrandom(2) read at startup, which blocks and hangs "
+        "every python invocation when the VM kernel CRNG is unseeded"
+    )
+
+
+def test_uv_uses_system_python_no_managed_download():
+    assert "UV_PYTHON_DOWNLOADS=never" in _TEXT and "UV_PYTHON_PREFERENCE=system" in _TEXT, (
+        "UV_PYTHON_DOWNLOADS=never and UV_PYTHON_PREFERENCE=system must be set so "
+        "ad-hoc `uv init/run` uses the baked system python3 instead of fetching a "
+        "managed CPython via github.com, which is excluded from the allowlist and stalls"
     )
