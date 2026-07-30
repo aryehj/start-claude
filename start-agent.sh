@@ -1339,11 +1339,15 @@ perms = data.setdefault('permission', {})
 perms.setdefault('webfetch', 'allow')
 if local_search_enabled:
     mcps = data.setdefault('mcp', {})
-    mcps.setdefault('searxng', {
-        'type': 'local',
-        'command': ['/opt/searxng-mcp/venv/bin/python', '/opt/searxng-mcp/server.py'],
-        'environment': {'SEARXNG_URL': 'http://searxng:8080'},
-    })
+    # Reconcile rather than setdefault: the interpreter path and SearXNG URL are
+    # script-owned and must track the image. Under setdefault an existing sandbox
+    # kept a stale command forever, so a path change would leave opencode showing
+    # the server as "offline" even with a correct source tree. Only these three
+    # keys are script-owned; a hand-added `enabled` flag survives untouched.
+    entry = mcps.setdefault('searxng', {})
+    entry['type'] = 'local'
+    entry['command'] = ['/opt/searxng-mcp/venv/bin/python', '/opt/searxng-mcp/server.py']
+    entry['environment'] = {'SEARXNG_URL': 'http://searxng:8080'}
     perms['websearch'] = 'allow'
 else:
     perms.setdefault('websearch', 'deny')

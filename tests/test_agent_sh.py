@@ -417,3 +417,47 @@ def test_wait_inference_probe_before_exec():
     assert "wait_inference_probe" in fresh_section, (
         "wait_inference_probe not called before exec docker run in fresh-container section"
     )
+
+
+# ── searxng MCP wiring ────────────────────────────────────────────────────────
+# The shim's interpreter path is duplicated across start-agent.sh (the opencode
+# `mcp.searxng` command array) and claude-agent.Dockerfile (the `uv venv` that
+# creates it). A mismatch fails silently — opencode just shows searxng offline.
+
+DOCKERFILE = Path(__file__).parent.parent / "dockerfiles" / "claude-agent.Dockerfile"
+_DOCKERFILE_TEXT = DOCKERFILE.read_text()
+
+
+def test_searxng_mcp_command_path_matches_dockerfile():
+    match = re.search(
+        r"'(/opt/searxng-mcp/venv/bin/python)',\s*'(/opt/searxng-mcp/server\.py)'",
+        _SCRIPT_TEXT,
+    )
+    assert match, (
+        "searxng MCP `command` array not found in start-agent.sh's opencode.json "
+        "generation block"
+    )
+    interpreter, script = match.groups()
+    venv_dir = interpreter.rsplit("/bin/python", 1)[0]
+    assert f"uv venv {venv_dir}" in _DOCKERFILE_TEXT, (
+        f"start-agent.sh spawns the searxng MCP shim via `{interpreter}`, but the "
+        f"Dockerfile does not create a venv at {venv_dir} (`uv venv {venv_dir}`). "
+        "opencode would show the server as offline."
+    )
+    assert f"COPY searxng-mcp/server.py {script}" in _DOCKERFILE_TEXT, (
+        f"start-agent.sh runs `{script}`, but the Dockerfile does not COPY the "
+        f"shim to that path."
+    )
+
+
+def test_searxng_mcp_block_is_reconciled_not_setdefault():
+    # setdefault leaves a stale command/URL in an existing sandbox's opencode.json
+    # forever, so a path change never propagates. The script owns these keys.
+    for key in ("type", "command", "environment"):
+        assert re.search(rf"entry\['{key}'\]\s*=", _SCRIPT_TEXT), (
+            f"searxng MCP `{key}` is not assigned unconditionally; an existing "
+            "sandbox's opencode.json would keep a stale value across upgrades"
+        )
+    assert "entry['enabled']" not in _SCRIPT_TEXT, (
+        "searxng MCP block must not overwrite `enabled`; that key is the user's"
+    )

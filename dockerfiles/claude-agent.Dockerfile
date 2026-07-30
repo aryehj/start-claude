@@ -70,7 +70,7 @@ RUN apt-get update -qq \
  && rm -rf /var/lib/apt/lists/*
 
 # ── SearXNG MCP shim ─────────────────────────────────────────────────────────
-# ~40-line FastMCP wrapper that exposes a single `websearch` tool backed by a
+# ~20-line MCPServer wrapper that exposes a single `websearch` tool backed by a
 # local SearXNG instance. Installed to /opt/searxng-mcp/server.py so opencode
 # can spawn it as a stdio MCP server when --enable-local-search is active.
 # Custom shim used instead of ihor-sokoliuk/mcp-searxng (npm) because the npm
@@ -80,8 +80,17 @@ COPY searxng-mcp/server.py /opt/searxng-mcp/server.py
 # Dedicated venv — Debian bookworm's system Python is PEP 668 externally
 # managed, so `uv pip install --system` hard-fails. The venv is baked into the
 # image and invoked directly (see start-agent.sh command wiring).
+#
+# Majors are pinned deliberately. An unpinned `mcp` silently resolved to SDK
+# 2.0.0 on a rebuild, which renamed FastMCP -> MCPServer and moved it from
+# mcp.server.fastmcp to mcp.server.mcpserver. The shim then died at import, and
+# a stdio MCP server that exits before the initialize handshake surfaces in
+# opencode only as "offline" — no build failure, no error message. Bump these
+# pins deliberately, alongside the import in searxng-mcp/server.py.
+# The [cli] extra is omitted: it pulls typer/rich for `mcp` command-line tooling
+# the shim never invokes (it is spawned as `venv/bin/python server.py`).
 RUN uv venv /opt/searxng-mcp/venv \
- && uv pip install --python /opt/searxng-mcp/venv/bin/python 'mcp[cli]' httpx
+ && uv pip install --python /opt/searxng-mcp/venv/bin/python 'mcp>=2,<3' 'httpx>=0.28,<1'
 
 # ── doc-tools Python venv ─────────────────────────────────────────────────────
 # Baked venv so python-docx/openpyxl/python-pptx are present without a runtime

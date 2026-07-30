@@ -1,7 +1,7 @@
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 import httpx, os
 
-mcp = FastMCP("searxng")
+mcp = MCPServer("searxng")
 URL = os.environ["SEARXNG_URL"]
 
 @mcp.tool()
