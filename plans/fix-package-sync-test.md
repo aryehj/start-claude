@@ -2,10 +2,10 @@
 
 ## Status
 
-- [ ] Add `unzip zip` to `start-claude.sh`'s apt block (Haiku ok)
-- [ ] Make `_parse_apt_packages` collect every `--no-install-recommends` block, not just the first
-- [ ] Add a doc-tools exclusion set + staleness guard, mirroring `_SANDBOX_ONLY_PACKAGES`
-- [ ] Run the suite; confirm both `test_package_sync.py` tests pass
+- [x] Add `unzip zip` to `start-claude.sh`'s apt block (Haiku ok)
+- [x] Make `_parse_apt_packages` collect every `--no-install-recommends` block, not just the first
+- [x] Add a doc-tools exclusion set + staleness guard, mirroring `_SANDBOX_ONLY_PACKAGES`
+- [x] Run the suite; confirm both `test_package_sync.py` tests pass
 
 ## Context
 
