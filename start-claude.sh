@@ -160,12 +160,34 @@ if sb.get('allowUnsandboxedCommands') is not False:
     changed = True
     print(f"==> Set sandbox.allowUnsandboxedCommands=false in {path}")
 
+# The container runs as root, and sandbox-runtime >= 0.0.66 forces a user
+# namespace and drops all caps on its secure path. Mounting a fresh /proc from
+# a new userns requires a fully-visible procfs, which Apple Containers does not
+# provide (it masks /proc/keys, /proc/timer_list, /proc/bus, /proc/fs,
+# /proc/irq, /proc/sys), so bwrap fails outright. Weaker mode bind-mounts /proc
+# instead and keeps caps, which still confines the filesystem (mounts inherited
+# into a child userns are MNT_LOCKED) and leaves network isolation untouched.
+# See ADR-047.
+if sb.get('enableWeakerNestedSandbox') is not True:
+    sb['enableWeakerNestedSandbox'] = True
+    changed = True
+    print(f"==> Set sandbox.enableWeakerNestedSandbox=true in {path}")
+
 # Remove stale UI keys that belong in global settings.json
 for key in ('theme', 'spinnerTipsEnabled', 'prefersReducedMotion'):
     if key in data:
         del data[key]
         changed = True
         print(f"==> Removed {key} from {path} (belongs in global settings.json)")
+
+# Drop the obsolete sandbox.seccomp override. Older files carry applyPath/bpfPath
+# pointing under dist/vendor/, but the package ships vendor/ at its root and no
+# longer ships a .bpf at all (the schema only accepts applyPath and argv0).
+# sandbox-runtime auto-discovers the binary, so the block is dead config.
+if 'seccomp' in sb:
+    del sb['seccomp']
+    changed = True
+    print(f"==> Removed stale sandbox.seccomp from {path} (auto-discovered)")
 
 # Seed sandbox.network.allowedDomains — seed-if-absent; reseed if flag set.
 # Deliberately does NOT reconcile per-entry: user-pruned entries stay pruned.
@@ -256,7 +278,13 @@ else
     apt-get install -y nodejs
     rm -rf /var/lib/apt/lists/*
 
-    npm install -g npm@latest @anthropic-ai/sandbox-runtime
+    # sandbox-runtime is PINNED deliberately. It is a security dependency whose
+    # bwrap invocation changes between releases, and an unpinned `latest` silently
+    # imported a breaking change once already: 0.0.66 (2026-07-17) added
+    # `--unshare-user --cap-drop ALL` to the secure path, which cannot start in a
+    # container with a masked /proc. Treat bumps as a deliberate, tested step.
+    # See ADR-047.
+    npm install -g npm@latest @anthropic-ai/sandbox-runtime@0.0.73
 
     # ── uv ───────────────────────────────────────────────────────────────────
     # UV_INSTALL_DIR puts the binaries directly into /usr/local/bin, so no

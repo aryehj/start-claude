@@ -113,3 +113,35 @@ def test_script_seeds_network_sandbox():
     assert "'network'" in text or '"network"' in text, (
         "start-claude.sh must set sandbox.network block"
     )
+
+
+# ── nested-sandbox mode and dependency pin (ADR-047) ──────────────────────────
+
+def test_sandbox_runtime_is_pinned():
+    """sandbox-runtime must be version-pinned.
+
+    An unpinned `latest` silently imported 0.0.66, which added
+    `--unshare-user --cap-drop ALL` and made the sandbox unstartable under Apple
+    Containers' masked /proc. Bumps must be deliberate. See ADR-047.
+    """
+    text = _script_text()
+    assert re.search(r'@anthropic-ai/sandbox-runtime@\d+\.\d+\.\d+', text), (
+        "start-claude.sh must install @anthropic-ai/sandbox-runtime at a pinned "
+        "version (found an unpinned install)"
+    )
+
+
+def test_script_sets_weaker_nested_sandbox():
+    """The secure nested-sandbox path cannot start in this container; see ADR-047."""
+    text = _script_text()
+    assert 'enableWeakerNestedSandbox' in text, (
+        "start-claude.sh must set sandbox.enableWeakerNestedSandbox=true"
+    )
+
+
+def test_script_strips_stale_seccomp_block():
+    """Legacy settings carry a sandbox.seccomp block with paths that no longer exist."""
+    text = _script_text()
+    assert re.search(r"del sb\[['\"]seccomp['\"]\]", text), (
+        "start-claude.sh must remove the stale sandbox.seccomp block"
+    )

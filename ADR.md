@@ -2873,3 +2873,120 @@ Three independent optimizations, mirroring ADR-045, shipped together:
   `false` so `apply_firewall` takes its cold-start path.
 - Existing deployments have no marker file on the first run after this change, so the
   stored hash reads empty, the push fires once, and the marker is written — self-healing.
+
+## ADR-047: Pin `@anthropic-ai/sandbox-runtime` and enable `enableWeakerNestedSandbox` in `start-claude.sh`
+
+**Date:** 2026-08-19
+**Status:** Accepted
+
+### Context
+
+The in-container sandbox (working since ADR-043) began failing every Bash command
+with `bwrap: Can't mount proc on /newroot/proc: Operation not permitted`. Because
+`settings.local.json` carries `failIfUnavailable: true` and
+`allowUnsandboxedCommands: false`, an unstartable sandbox is a hard failure on
+*every* command, not a degraded mode — so the sandbox was manually disabled.
+
+The failure was initially assumed to be an Apple Containers regression, since it
+coincided with several Containers version bumps. It was not. Bisecting the shipped
+`dist/sandbox/linux-sandbox-utils.js` across published versions located a change in
+**sandbox-runtime 0.0.66 (2026-07-17)** — `--cap-drop` appears in no release from
+0.0.50 through 0.0.65, and in every release from 0.0.66 on:
+
+```js
+// 0.0.65 — worked here
+bwrapArgs.push('--proc', '/proc');
+// 0.0.66+ — cannot start here
+bwrapArgs.push('--unshare-user', '--cap-drop', 'ALL', '--proc', '/proc');
+```
+
+Upstream's intent is sound: bwrap only auto-creates a user namespace when
+EUID != 0, so a **root** parent would otherwise keep full caps in the initial
+namespace and could remount rw over `--ro-bind / /`. Forcing the userns and
+dropping caps closes that. The container runs as root, so the change applies
+squarely — and breaks it two ways:
+
+1. **The fresh `/proc` mount now fails.** Apple Containers masks parts of `/proc`
+   (`/proc/keys` and `/proc/timer_list` bound over from devtmpfs; `/proc/bus`,
+   `/proc/fs`, `/proc/irq`, `/proc/sys` as read-only binds). The kernel refuses to
+   mount a new procfs *from a non-initial user namespace* unless the visible procfs
+   is fully visible (`mount_too_revealing`). Under 0.0.65 the mount happened in the
+   **initial** userns as root with `CAP_SYS_ADMIN`, where that check does not apply
+   — so the identical masking had been harmless all along.
+2. **`--cap-drop ALL` breaks stage 2.** `apply-seccomp` creates a nested
+   user+PID+mount namespace and writes `/proc/self/uid_map`; with the bounding set
+   emptied it cannot (`write /proc/self/uid_map: Operation not permitted`).
+
+Unmasking `/proc` by hand clears (1) but not (2), so it is not a fix.
+
+The regression arrived silently because `start-claude.sh` installed the dependency
+unpinned (`npm install -g … @anthropic-ai/sandbox-runtime`), and every `--rebuild`
+re-resolves `latest`. A Containers upgrade is exactly what prompts a rebuild —
+which is why the breakage *looked* like a Containers problem.
+
+### Decision
+
+Two changes:
+
+1. **Pin `@anthropic-ai/sandbox-runtime@0.0.73`.** It is a security dependency whose
+   bwrap invocation changes between releases; bumps must be a deliberate, tested step.
+2. **Set `sandbox.enableWeakerNestedSandbox: true`** in the settings-injection block,
+   idempotently, alongside `failIfUnavailable` / `allowUnsandboxedCommands`. This is
+   upstream's own escape hatch for containers: it takes the
+   `--unshare-user --bind /proc /proc` branch — no fresh procfs mount, no cap-drop.
+
+Also drop any stale `sandbox.seccomp` block. Older files point `applyPath`/`bpfPath`
+under `dist/vendor/`, but the package ships `vendor/` at its root and no longer ships
+a `.bpf` at all (the schema accepts only `applyPath` and `argv0`). The binary is
+auto-discovered, so the block is dead config.
+
+Pinning to 0.0.65 to restore secure mode was rejected: it freezes a security
+dependency at a pre-hardening release and drifts from what Claude Code expects.
+
+### Security analysis
+
+The honest comparison is not weaker-mode vs. secure-mode — secure mode does not run
+here at all. It is weaker-mode vs. the 0.0.65 configuration that ran here for months.
+Each row was probed directly in the container:
+
+| property | 0.0.65 baseline | weaker mode | 0.0.66 secure |
+| --- | --- | --- | --- |
+| remount `/` rw from inside | **succeeds** | denied | denied |
+| write to `/etc` from inside | **escape — wrote** | blocked | blocked |
+| read another process's `environ` | **readable** | denied | denied |
+| processes visible in `/proc` | all | all | isolated |
+| network ns + domain allowlist | yes | yes | yes |
+| seccomp unix-socket blocking | yes | yes | yes |
+| **starts in this container** | yes | **yes** | **no** |
+
+Counterintuitively, weaker mode is *stronger* than the baseline it replaces on two
+axes. Forcing `--unshare-user` places the process in a **child** user namespace,
+where mounts propagated in are `MNT_LOCKED` — the kernel refuses to clear their
+read-only flag regardless of caps held in that namespace. The 0.0.65 baseline had no
+userns at all, so it held real `CAP_SYS_ADMIN` in the initial namespace and could
+remount `/` and write to `/etc`. Likewise `ptrace_may_access` fails across the userns
+boundary, so `/proc/<pid>/environ` — which carries `ANTHROPIC_API_KEY` — is
+unreadable under weaker mode but was fully readable before.
+
+What weaker mode genuinely concedes versus 0.0.66 secure mode is one thing: `/proc`
+is bind-mounted rather than freshly mounted, so a sandboxed command can *enumerate*
+other processes in its own container (existence, names, cmdlines). Their contents
+stay protected, and with one microVM per project those processes are the user's own
+session, not another tenant's.
+
+The guardrail ADR-044 rests on is untouched: `--unshare-net` is gated solely on
+`needsNetworkRestriction`, independent of this setting.
+
+### Consequences
+
+- The sandbox starts again, and filesystem/network/seccomp confinement is genuinely
+  enforced rather than failing preflight.
+- Sandbox-runtime upgrades are now explicit. The pin must be bumped deliberately, and
+  a bump should be re-tested against the matrix above — this ADR is the reason.
+- Existing `settings.local.json` files pick up `enableWeakerNestedSandbox` and lose
+  the stale `seccomp` block on the next run. `enabled` is deliberately **not**
+  forced on existing files (it is only `setdefault`-ed for new ones), so a project
+  that was manually set to `"enabled": false` must be flipped back by hand.
+- ADR-043's sandbox remains the mechanism; this record documents that its secure
+  path is unavailable under Apple Containers' `/proc` masking while the container
+  runs as root.
