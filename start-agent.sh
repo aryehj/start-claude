@@ -160,6 +160,9 @@ while [[ $# -gt 0 ]]; do
     --init-sandbox=*)    INIT_SANDBOX="${1#--init-sandbox=}" ;;
     --init-sandbox)      INIT_SANDBOX="${2:?--init-sandbox requires a PATH}"; shift ;;
     -h|--help)           usage; exit 0 ;;
+    # Reject unknown flags here; otherwise a typo (e.g. --rebuilt) lands in
+    # POSITIONAL, becomes PROJECT_DIR, and dies later with a cryptic cd error.
+    -*)                  echo "error: unknown option '$1'" >&2; usage >&2; exit 2 ;;
     *)                   POSITIONAL+=("$1") ;;
   esac
   shift
@@ -892,11 +895,22 @@ fi
 # Python config injection. wait_inference_probe() collects the result before any
 # exec call so no orphaned process survives exec.
 PROBE_PID=""
+# Up to 3 attempts, 1s apart: a single 3s curl false-fails when the server is
+# momentarily slow (starting up, loading a model). Still backgrounded, so the
+# extra time overlaps other work.
+probe_retry() {
+  local i
+  for i in 1 2 3; do
+    "$@" >/dev/null 2>&1 && return 0
+    [[ $i -lt 3 ]] && sleep 1
+  done
+  return 1
+}
 echo "==> Probing $INFERENCE_LABEL at http://$HOST_IP:$INFERENCE_PORT from inside VM"
 case "$BACKEND" in
   ollama)
     {
-      if ! vm_ssh curl -sf --max-time 3 "http://$HOST_IP:$INFERENCE_PORT/api/tags" >/dev/null 2>&1; then
+      if ! probe_retry vm_ssh curl -sf --max-time 3 "http://$HOST_IP:$INFERENCE_PORT/api/tags"; then
         cat <<WARN
 warning: Ollama not reachable at http://$HOST_IP:$INFERENCE_PORT from inside the
 Colima VM. Ensure Ollama is running on the macOS host and bound to 0.0.0.0.
@@ -912,7 +926,7 @@ WARN
     OMLX_CURL_ARGS=(-sf --max-time 3)
     [[ -n "${OMLX_API_KEY:-}" ]] && OMLX_CURL_ARGS+=(-H "Authorization: Bearer $OMLX_API_KEY")
     {
-      if ! vm_ssh curl "${OMLX_CURL_ARGS[@]}" "http://$HOST_IP:$INFERENCE_PORT/v1/models" >/dev/null 2>&1; then
+      if ! probe_retry vm_ssh curl "${OMLX_CURL_ARGS[@]}" "http://$HOST_IP:$INFERENCE_PORT/v1/models"; then
         cat <<WARN
 warning: omlx not reachable at http://$HOST_IP:$INFERENCE_PORT from inside the
 Colima VM. Ensure omlx is running on the host with:
@@ -1614,10 +1628,14 @@ JSONEOF
   echo "==> Created $PROJECT_SETTINGS_FILE"
 fi
 
+INFERENCE_STATUS=""
 wait_inference_probe() {
   [[ -z "${PROBE_PID:-}" ]] && return
   wait "$PROBE_PID" 2>/dev/null || true
-  [[ -s "$TMP_WORK/probe-warning" ]] && cat "$TMP_WORK/probe-warning" >&2
+  if [[ -s "$TMP_WORK/probe-warning" ]]; then
+    cat "$TMP_WORK/probe-warning" >&2
+    INFERENCE_STATUS="  (NOT reachable at startup)"
+  fi
   PROBE_PID=""
 }
 
@@ -1664,7 +1682,7 @@ echo "==> Creating container '$CONTAINER_NAME'"
 echo "    sandbox  : $SANDBOX_NAME  ($SANDBOX_ROOT)"
 echo "    project  : $PROJECT_DIR"
 echo "    proxy    : http://$BRIDGE_IP:$TINYPROXY_PORT  (allowlist: $ALLOWLIST_FILE, ro in container)"
-echo "    inference: $INFERENCE_LABEL at http://$HOST_IP:$INFERENCE_PORT"
+echo "    inference: $INFERENCE_LABEL at http://$HOST_IP:$INFERENCE_PORT$INFERENCE_STATUS"
 $LOCAL_SEARCH_ENABLED && echo "    search   : SearXNG on $AGENT_NET_NAME"
 
 rm -rf "$TMP_WORK"
