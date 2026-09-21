@@ -70,3 +70,13 @@ def test_docpython_symlink_created():
         "docpython symlink not created in Dockerfile; expected a symlink from "
         "/opt/doc-tools/venv/bin/python to /usr/local/bin/docpython"
     )
+
+
+# ── searxng MCP shim assertions ───────────────────────────────────────────────
+
+def test_searxng_mcp_pinned_below_v2():
+    # server.py imports mcp.server.fastmcp, which mcp 2.x removed.
+    assert "'mcp[cli]<2'" in _TEXT, (
+        "searxng MCP shim must pin 'mcp[cli]<2'; mcp 2.x renamed FastMCP and "
+        "the shim fails on import"
+    )
