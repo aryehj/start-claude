@@ -758,13 +758,21 @@ else
     # Warn if the running VM sizing differs from what was requested.
     running_json=$(colima list -p "$COLIMA_PROFILE" --json 2>/dev/null || true)
     if [[ -n "$running_json" ]]; then
-      running_cpu=$(printf '%s' "$running_json" | python3 -c 'import json,sys;d=json.loads(sys.stdin.read());print(d.get("cpus",""))' 2>/dev/null || echo "")
-      running_mem=$(printf '%s' "$running_json" | python3 -c 'import json,sys;d=json.loads(sys.stdin.read());m=d.get("memory","");print(m)' 2>/dev/null || echo "")
+      # One parse for both fields; colima reports memory in bytes.
+      running_sizing=$(printf '%s' "$running_json" | python3 -c '
+import json, sys
+d = json.loads(sys.stdin.read())
+cpus = d.get("cpus", "")
+mem = d.get("memory") or 0
+gib = int(mem) // 2**30 if mem else ""
+print(f"{cpus}|{gib}")
+' 2>/dev/null || true)
+      IFS='|' read -r running_cpu running_mem_gib <<<"$running_sizing"
       if [[ -n "$running_cpu" && "$running_cpu" != "$CLAUDE_AGENT_CPUS" ]]; then
         echo "warning: running VM has $running_cpu CPUs; requested $CLAUDE_AGENT_CPUS. Use --rebuild to resize." >&2
       fi
-      if [[ -n "$running_mem" && "$running_mem" != *"${CLAUDE_AGENT_MEMORY_GB}"* ]]; then
-        echo "warning: running VM memory is $running_mem; requested ${CLAUDE_AGENT_MEMORY_GB}GiB. Use --rebuild to resize." >&2
+      if [[ -n "$running_mem_gib" && "$running_mem_gib" -ne "$CLAUDE_AGENT_MEMORY_GB" ]]; then
+        echo "warning: running VM memory is ${running_mem_gib}GiB; requested ${CLAUDE_AGENT_MEMORY_GB}GiB. Use --rebuild to resize." >&2
       fi
     fi
   fi

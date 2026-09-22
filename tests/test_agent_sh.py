@@ -501,3 +501,32 @@ def test_cloud_api_keys_forwarded():
     assert re.search(r'DOCKER_ENV_ARGS\+=\(-e "\$key"\)', _SCRIPT_TEXT), (
         "cloud API keys must be forwarded with value-less -e"
     )
+
+
+def _vm_sizing_parser() -> str:
+    m = re.search(r"running_sizing=\$\(.*?python3 -c '(.*?)'", _SCRIPT_TEXT, re.DOTALL)
+    assert m, "running_sizing python parser not found"
+    return m.group(1)
+
+
+def test_vm_memory_compared_as_integer_gib():
+    # colima list --json reports memory in bytes; a substring match against the
+    # requested GiB ("8" in "12884901888") never warns.
+    assert '*"${CLAUDE_AGENT_MEMORY_GB}"*' not in _SCRIPT_TEXT, (
+        "memory mismatch still uses a substring glob against a byte count"
+    )
+    import subprocess, sys
+    code = _vm_sizing_parser()
+    cases = {
+        '{"cpus": 6, "memory": 12884901888}': "6|12",
+        '{"cpus": 2, "memory": 8589934592}': "2|8",
+        '{"cpus": 4}': "4|",
+        '{"memory": 6442450944}': "|6",
+    }
+    for payload, expected in cases.items():
+        out = subprocess.run([sys.executable, "-c", code], input=payload,
+                             capture_output=True, text=True, check=True).stdout.strip()
+        assert out == expected, f"{payload} -> {out!r}, expected {expected!r}"
+    assert re.search(r'"\$running_mem_gib"\s+-ne\s+"\$CLAUDE_AGENT_MEMORY_GB"', _SCRIPT_TEXT), (
+        "memory mismatch must be an integer comparison against CLAUDE_AGENT_MEMORY_GB"
+    )
