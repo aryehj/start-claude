@@ -857,7 +857,12 @@ stored_hash=\$(sudo cat /etc/tinyproxy/filter.hash 2>/dev/null || true)
 echo "TINYPROXY_STORED_HASH=\$stored_hash"
 PROBE_EOF
 
-PROBE_OUTPUT=$(colima ssh -p "$COLIMA_PROFILE" -- sh < "$TMP_WORK/vm-probe.sh" 2>/dev/null | tr -d '\r')
+if ! PROBE_OUTPUT=$(colima ssh -p "$COLIMA_PROFILE" -- sh < "$TMP_WORK/vm-probe.sh" 2>"$TMP_WORK/probe-stderr"); then
+  echo "error: could not run the network probe inside Colima VM '$COLIMA_PROFILE':" >&2
+  cat "$TMP_WORK/probe-stderr" >&2
+  exit 1
+fi
+PROBE_OUTPUT=$(printf '%s' "$PROBE_OUTPUT" | tr -d '\r')
 
 # Parse KEY=value lines emitted by the probe.
 _probe_val() { printf '%s\n' "$PROBE_OUTPUT" | grep "^$1=" | cut -d= -f2-; }

@@ -530,3 +530,17 @@ def test_vm_memory_compared_as_integer_gib():
     assert re.search(r'"\$running_mem_gib"\s+-ne\s+"\$CLAUDE_AGENT_MEMORY_GB"', _SCRIPT_TEXT), (
         "memory mismatch must be an integer comparison against CLAUDE_AGENT_MEMORY_GB"
     )
+
+
+def test_vm_probe_failure_is_reported():
+    # Under set -eo pipefail, a failed probe with stderr discarded killed the
+    # script with no message at all.
+    assert not re.search(r'PROBE_OUTPUT=\$\(colima ssh[^\n]*2>/dev/null', _SCRIPT_TEXT), (
+        "batch VM probe still discards colima ssh stderr"
+    )
+    start = _SCRIPT_TEXT.find('vm-probe.sh" 2>')
+    assert start != -1, "batch VM probe must capture colima ssh stderr"
+    window = _SCRIPT_TEXT[start:start + 400]
+    assert "error: could not run" in window and "exit 1" in window, (
+        "batch VM probe failure must print an error (with ssh stderr) and exit"
+    )
