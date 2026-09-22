@@ -469,3 +469,14 @@ def test_firewall_chain_applied_atomically():
     assert fw.find("iptables-restore") < fw.find("-j CLAUDE_AGENT 2>/dev/null"), (
         "DOCKER-USER jump rules must be installed after the chain is populated"
     )
+
+
+def test_docker_context_not_persisted():
+    # `docker context use` writes currentContext into ~/.docker/config.json and
+    # redirects every later docker command on the Mac. DOCKER_CONTEXT is per-process.
+    assert "docker context use" not in _SCRIPT_TEXT, (
+        "`docker context use` rewrites the user's global docker config"
+    )
+    assert re.search(r'export DOCKER_CONTEXT="colima-\$COLIMA_PROFILE"', _SCRIPT_TEXT), (
+        "DOCKER_CONTEXT must be exported for the script's docker calls"
+    )

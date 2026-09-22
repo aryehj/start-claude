@@ -770,9 +770,14 @@ else
   fi
 fi
 
-# Point the local docker CLI at Colima's socket for this profile.
-if ! docker context use "colima-$COLIMA_PROFILE" &>/dev/null; then
-  echo "warning: could not switch docker context to colima-$COLIMA_PROFILE; assuming current context talks to the right daemon." >&2
+# Point this script's docker CLI calls (and the final exec) at Colima's socket
+# for this profile. DOCKER_CONTEXT is per-process; switching contexts globally would
+# rewrite currentContext in ~/.docker/config.json and redirect every later
+# docker command on the Mac.
+if docker context inspect "colima-$COLIMA_PROFILE" &>/dev/null; then
+  export DOCKER_CONTEXT="colima-$COLIMA_PROFILE"
+else
+  echo "warning: docker context colima-$COLIMA_PROFILE not found; assuming current context talks to the right daemon." >&2
 fi
 
 # Now that docker is reachable, honor --rebuild / --reset-container by removing
