@@ -73,8 +73,11 @@ OPTIONS:
                          allowlist.txt and reload tinyproxy. Fast path; does
                          not restart the container.
   --reseed-allowlist     Overwrite the sandbox's allowlist.txt with the
-                         built-in default, then reload. Use after pulling repo
+                         built-in default (previous file kept as
+                         allowlist.txt.bak), then reload. Use after pulling repo
                          updates that added new entries to the default list.
+                         --reload-allowlist and --reseed-allowlist cannot be
+                         combined with --rebuild or --reset-container.
   --reseed-global-claudemd  Overwrite the sandbox's CLAUDE.md with the repo
                          template (default is seed-if-missing).
   --memory=VALUE         VM memory (e.g. 8, 8G, 8GB). Default: 8 GiB.
@@ -124,6 +127,10 @@ ENVIRONMENT:
   GIT_USER_EMAIL         Default git email (overridden by --git-email).
   OMLX_API_KEY           API key for omlx (passed into the container when
                          --backend=omlx).
+  ANTHROPIC_API_KEY      Forwarded into the container when set (Pi cloud
+  OPENAI_API_KEY         providers).
+  CLAUDE_SKILLS_ARCHIVE_URL  Tarball that skills are synced from on a fresh
+                         container. Default: upstream main.
   CLAUDE_AGENT_DEFAULT_MODEL      Default OpenCode model (set via env var; no CLI flag).
   CLAUDE_AGENT_PLAN_MODEL         OpenCode plan-agent model (overridden by --plan-model).
   CLAUDE_AGENT_EXEC_MODEL         OpenCode exec/build-agent model (overridden by --exec-model).
@@ -172,6 +179,11 @@ if $RESET_CONTAINER && $REBUILD; then
   echo "error: --reset-container and --rebuild are mutually exclusive." >&2
   echo "  --reset-container removes the container but keeps the image (cheap)." >&2
   echo "  --rebuild removes both the container and image (full rebuild)." >&2
+  exit 1
+fi
+if $RELOAD_ALLOWLIST && ($REBUILD || $RESET_CONTAINER); then
+  echo "error: --reload-allowlist / --reseed-allowlist cannot be combined with --rebuild or --reset-container." >&2
+  echo "  Run them separately. Every normal run already pushes allowlist edits to tinyproxy." >&2
   exit 1
 fi
 
@@ -338,6 +350,10 @@ if ! command -v docker &>/dev/null; then
   echo "error: 'docker' not found. Install with: brew install colima docker" >&2
   exit 1
 fi
+if ! command -v python3 &>/dev/null; then
+  echo "error: 'python3' not found. Install the Xcode Command Line Tools: xcode-select --install" >&2
+  exit 1
+fi
 if [[ ! -d "$PROJECT_DIR" ]]; then
   echo "error: project dir '$PROJECT_DIR' does not exist." >&2
   exit 1
@@ -350,6 +366,10 @@ fi
 # ── seed allowlist (first run only) ──────────────────────────────────────────
 mkdir -p "$(dirname "$ALLOWLIST_FILE")"
 if [[ ! -f "$ALLOWLIST_FILE" ]] || $RESEED_ALLOWLIST; then
+  if [[ -f "$ALLOWLIST_FILE" ]]; then
+    cp "$ALLOWLIST_FILE" "$ALLOWLIST_FILE.bak"
+    echo "==> Backed up existing allowlist to $ALLOWLIST_FILE.bak"
+  fi
   cat > "$ALLOWLIST_FILE" <<'ALLOWLIST'
 # start-agent allowlist — edit on the macOS host.
 # Apply changes:  start-agent.sh --reload-allowlist
@@ -731,7 +751,7 @@ remove_containers() {
 # Container + image removal happens AFTER the VM is up so that `docker`
 # actually has something to talk to; deleting the VM itself must happen BEFORE
 # `colima start` so the start-up path recreates a clean VM.
-if $REBUILD && ! $RELOAD_ALLOWLIST; then
+if $REBUILD; then
   echo
   read -r -p "Also delete and recreate the Colima VM '$COLIMA_PROFILE'? This is NOT reversible. [y/N] " confirm
   if [[ "${confirm:-}" =~ ^[Yy]$ ]]; then
@@ -791,13 +811,13 @@ fi
 # Now that docker is reachable, honor --rebuild / --reset-container by removing
 # containers (and the image, for --rebuild) from the VM's docker runtime.
 # The VM itself was handled earlier (--rebuild only).
-if $REBUILD && ! $RELOAD_ALLOWLIST; then
+if $REBUILD; then
   remove_containers "--rebuild"
   if docker image inspect "$IMAGE_TAG" &>/dev/null; then
     echo "==> --rebuild: removing image '$IMAGE_TAG'"
     docker image rm "$IMAGE_TAG" >/dev/null
   fi
-elif $RESET_CONTAINER && ! $RELOAD_ALLOWLIST; then
+elif $RESET_CONTAINER; then
   remove_containers "--reset-container"
   echo "==> --reset-container: image '$IMAGE_TAG' kept intact"
 fi

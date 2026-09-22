@@ -276,6 +276,9 @@ auth and memory state.
 ## Usage
 
 ```bash
+# One-time: create a sandbox, then put projects under $SANDBOX/projects/
+start-agent.sh --init-sandbox ~/sandboxes/default
+
 # From inside your project directory
 start-agent.sh
 
@@ -297,6 +300,11 @@ start-agent.sh --reset-container
 
 # Apply edits to the allowlist without touching the running container
 start-agent.sh --reload-allowlist
+
+# Replace the allowlist with the built-in default (old file saved as
+# allowlist.txt.bak), then reload. Neither allowlist flag combines with
+# --rebuild or --reset-container.
+start-agent.sh --reseed-allowlist
 
 # Disable SearXNG (also disables OpenCode websearch; SearXNG runs by default)
 start-agent.sh --disable-search
@@ -686,7 +694,8 @@ noted.
 |--------|--------------|------------|
 | `test-agent-firewall.sh` | Firewall smoke tests from inside `claude-agent` (default-deny, proxy allow/deny, Ollama carve-out, env wiring, inter-container port isolation) | Run from inside the container: `bash tests/test-agent-firewall.sh` |
 | `test-cross-vm-isolation.sh` | Cross-VM isolation: `claude-agent` and `research` containers cannot reach each other by name, port, or via `host.docker.internal:3000`. Positive test confirms inference carve-out still works. Skips if either VM is not running. | `./tests/test-cross-vm-isolation.sh` |
-| `test_agent_sh.py` | Static check: no `docker run` in `start-agent.sh` publishes a host port | `uv run --with pytest pytest tests/test_agent_sh.py` |
+| `test_agent_sh.py` | Static invariants for `start-agent.sh`: no host-port publish, sandbox trust boundary, Pi and skills wiring, warm-reattach batching, atomic firewall apply, secret handling, flag hygiene | `uv run --with pytest pytest tests/test_agent_sh.py` |
+| `test_dockerfile.py` | Static checks: pi and opencode CLI install lines in `claude-agent.Dockerfile` | `uv run --with pytest pytest tests/test_dockerfile.py` |
 | `test_research.py` | Unit tests for `research.py` pure helpers (`compose_denylist`, `denylist_to_squid_acl`, `_prune_subdomains`, etc.) | `uv run --with pytest pytest tests/test_research.py` |
 | `test_settings_template.py` | Validates `templates/global-claude-settings.json` is well-formed JSON, has required keys, and `git push` is absent from the allow list | `uv run --with pytest pytest tests/test_settings_template.py` |
 | `test_sandbox_allowlist.py` | Validates `templates/sandbox-allowlist.txt` is well-formed and that `start-claude.sh` injects `sandbox.network.allowedDomains` with correct `*.d` expansion | `uv run --with pytest pytest tests/test_sandbox_allowlist.py` |
@@ -696,7 +705,7 @@ noted.
 The pytest suites can be run together:
 
 ```bash
-uv run --with pytest pytest tests/test_agent_sh.py tests/test_research.py tests/test_settings_template.py tests/test_sandbox_allowlist.py
+uv run --with pytest pytest tests/test_agent_sh.py tests/test_dockerfile.py tests/test_research.py tests/test_settings_template.py tests/test_sandbox_allowlist.py
 ```
 
 ## Environment variable reference (research.py)
@@ -718,6 +727,7 @@ uv run --with pytest pytest tests/test_agent_sh.py tests/test_research.py tests/
 | `CLAUDE_AGENT_MEMORY` | `8` | VM memory in GiB (overridden by `--memory`) |
 | `CLAUDE_AGENT_CPUS` | `6` | VM CPU count (overridden by `--cpus`) |
 | `OMLX_API_KEY` | *(unset)* | API key for omlx; passed into the container when `--backend=omlx` |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | *(unset)* | Forwarded into the container when set on the host (Pi cloud providers) |
 | `CLAUDE_AGENT_DISABLE_SEARCH` | *(unset)* | Set to `1` to disable SearXNG (also disables OpenCode websearch; overridden by `--disable-search`) |
 | `CLAUDE_AGENT_DEFAULT_MODEL` | *(unset)* | Default model for both OpenCode and Pi (env var only — no CLI flag). Written to `opencode.json` and `~/.pi/agent/settings.json` on each run |
 | `CLAUDE_AGENT_PLAN_MODEL` | *(unset)* | OpenCode model for plan-mode agent (overridden by `--plan-model`) |

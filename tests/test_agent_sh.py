@@ -557,3 +557,42 @@ def test_exit_trap_kills_inference_probe():
     # The probe is a subshell; its colima ssh child must be killed too.
     assert 'pkill -P "$PROBE_PID"' in body, "on_exit must kill the probe's children"
     assert 'rm -rf "$TMP_WORK"' in body, "on_exit must still remove TMP_WORK"
+
+
+def test_reload_allowlist_rejects_rebuild_and_reset():
+    # --rebuild/--reset-container combined with --reload-allowlist used to drop
+    # the first flag silently; the combination must be rejected up front.
+    guard = re.search(
+        r"if \$RELOAD_ALLOWLIST && \(\$REBUILD \|\| \$RESET_CONTAINER\); then(.*?)\nfi",
+        _SCRIPT_TEXT, re.DOTALL,
+    )
+    assert guard, "no guard rejecting --reload-allowlist with --rebuild/--reset-container"
+    assert "exit" in guard.group(1) and "reload-allowlist" in guard.group(1)
+    # The old silent-drop conditions are dead once the guard exists.
+    assert "! $RELOAD_ALLOWLIST" not in _SCRIPT_TEXT, (
+        "leftover `&& ! $RELOAD_ALLOWLIST` conditions silently ignore --rebuild/--reset-container"
+    )
+
+
+def test_reseed_allowlist_backs_up_existing_file():
+    seed = _SCRIPT_TEXT.find("# ── seed allowlist")
+    heredoc = _SCRIPT_TEXT.find("<<'ALLOWLIST'", seed)
+    assert seed != -1 and heredoc != -1, "allowlist seed block not found"
+    before = _SCRIPT_TEXT[seed:heredoc]
+    assert re.search(r'cp "\$ALLOWLIST_FILE" "\$ALLOWLIST_FILE\.bak"', before), (
+        "--reseed-allowlist must back up the curated allowlist before overwriting it"
+    )
+
+
+def test_python3_in_preflight():
+    pre = _SCRIPT_TEXT.find("# ── preflight")
+    end = _SCRIPT_TEXT.find("# ── seed allowlist", pre)
+    assert "command -v python3" in _SCRIPT_TEXT[pre:end], (
+        "python3 is a hard host dependency but is not checked in preflight"
+    )
+
+
+def test_usage_documents_env_vars():
+    body = _function_body("usage")
+    for var in ("CLAUDE_SKILLS_ARCHIVE_URL", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+        assert var in body, f"usage() does not document {var}"
