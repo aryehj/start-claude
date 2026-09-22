@@ -544,3 +544,16 @@ def test_vm_probe_failure_is_reported():
     assert "error: could not run" in window and "exit 1" in window, (
         "batch VM probe failure must print an error (with ssh stderr) and exit"
     )
+
+
+def test_exit_trap_kills_inference_probe():
+    # A set -e failure after the probe launches must not leave `colima ssh curl`
+    # running detached; the EXIT trap has to reap it along with TMP_WORK.
+    assert re.search(r"^trap on_exit EXIT$", _SCRIPT_TEXT, re.MULTILINE), (
+        "TMP_WORK cleanup must go through the on_exit trap handler"
+    )
+    body = _function_body("on_exit")
+    assert "PROBE_PID" in body and "kill" in body, "on_exit does not kill the inference probe"
+    # The probe is a subshell; its colima ssh child must be killed too.
+    assert 'pkill -P "$PROBE_PID"' in body, "on_exit must kill the probe's children"
+    assert 'rm -rf "$TMP_WORK"' in body, "on_exit must still remove TMP_WORK"

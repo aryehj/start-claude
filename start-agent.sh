@@ -804,7 +804,17 @@ fi
 
 # ── temp work dir (probe script, config files, firewall script) ───────────────
 TMP_WORK=$(mktemp -d)
-trap 'rm -rf "$TMP_WORK"' EXIT
+PROBE_PID=""
+# Also reap the backgrounded inference probe (launched below): it is a
+# subshell, so kill its `colima ssh` children first, then the subshell.
+on_exit() {
+  if [[ -n "${PROBE_PID:-}" ]]; then
+    pkill -P "$PROBE_PID" 2>/dev/null || true
+    kill "$PROBE_PID" 2>/dev/null || true
+  fi
+  rm -rf "$TMP_WORK"
+}
+trap on_exit EXIT
 
 # ── batch VM probe: all read-only facts in one SSH round-trip ─────────────────
 # Replaces separate vm_ssh calls for bridge, host IP, agent-net CIDR,
@@ -912,7 +922,6 @@ fi
 # up-to-3s curl timeout overlaps tinyproxy push, firewall apply, and host-side
 # Python config injection. wait_inference_probe() collects the result before any
 # exec call so no orphaned process survives exec.
-PROBE_PID=""
 # Up to 3 attempts, 1s apart: a single 3s curl false-fails when the server is
 # momentarily slow (starting up, loading a model). Still backgrounded, so the
 # extra time overlaps other work.
@@ -1123,10 +1132,7 @@ colima ssh -p "$COLIMA_PROFILE" -- sudo sh < "$TMP_WORK/firewall-apply.sh"
 if $RELOAD_ALLOWLIST; then
   entry_count=$(grep -cv -E '^\s*(#|$)' "$ALLOWLIST_FILE" || echo 0)
   echo "==> Allowlist reloaded ($entry_count entries, sandbox: $SANDBOX_NAME)"
-  [[ -n "${PROBE_PID:-}" ]] && { kill "$PROBE_PID" 2>/dev/null || true; wait "$PROBE_PID" 2>/dev/null || true; }
-  rm -rf "$TMP_WORK"
-  trap - EXIT
-  exit 0
+  exit 0  # on_exit kills the unread inference probe and removes TMP_WORK
 fi
 
 # ── build the image if missing ───────────────────────────────────────────────
