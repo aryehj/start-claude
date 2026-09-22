@@ -525,7 +525,8 @@ backend-specific behavior:
    downstream references (iptables carve-out, preflight probe, OpenCode
    config, container env) use `$INFERENCE_PORT`.
 2. **API key.** `OMLX_API_KEY` from the host env is passed into the
-   container as an env var and written into the OpenCode provider config's
+   container as an env var (value-less `-e OMLX_API_KEY`, so the secret never
+   appears in the `docker` argv) and written into the OpenCode provider config's
    `apiKey` field. Missing key is a warning, not a hard error (the user may
    run omlx without auth during local testing).
 3. **Container env vars.** `OLLAMA_HOST` is only set for the `ollama`

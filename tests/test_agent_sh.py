@@ -480,3 +480,24 @@ def test_docker_context_not_persisted():
     assert re.search(r'export DOCKER_CONTEXT="colima-\$COLIMA_PROFILE"', _SCRIPT_TEXT), (
         "DOCKER_CONTEXT must be exported for the script's docker calls"
     )
+
+
+def test_secrets_not_in_docker_argv():
+    # -e NAME=value puts the secret in the docker argv (visible in host `ps`);
+    # value-less -e NAME makes docker read it from its own environment.
+    assert not re.search(r'-e\s+"?\w*(API_KEY|TOKEN)\w*=', _SCRIPT_TEXT), (
+        "secret passed as -e NAME=value; use value-less -e NAME passthrough"
+    )
+    assert re.search(r"DOCKER_ENV_ARGS\+=\(-e OMLX_API_KEY\)", _SCRIPT_TEXT), (
+        "OMLX_API_KEY must be forwarded with value-less -e"
+    )
+
+
+def test_cloud_api_keys_forwarded():
+    # CLAUDE.md, README and ADR-036 promise Pi can use cloud providers via
+    # host-forwarded keys; both docker run and docker exec consume DOCKER_ENV_ARGS.
+    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+        assert key in _SCRIPT_TEXT, f"{key} is not forwarded into the container"
+    assert re.search(r'DOCKER_ENV_ARGS\+=\(-e "\$key"\)', _SCRIPT_TEXT), (
+        "cloud API keys must be forwarded with value-less -e"
+    )

@@ -1580,11 +1580,20 @@ case "$BACKEND" in
     ;;
   omlx)
     DOCKER_ENV_ARGS+=(-e "OMLX_HOST=http://$HOST_IP:$INFERENCE_PORT")
+    # Value-less -e: docker reads the value from its own environment, keeping
+    # the secret out of the docker argv (visible in host `ps`).
     if [[ -n "${OMLX_API_KEY:-}" ]]; then
-      DOCKER_ENV_ARGS+=(-e "OMLX_API_KEY=$OMLX_API_KEY")
+      export OMLX_API_KEY
+      DOCKER_ENV_ARGS+=(-e OMLX_API_KEY)
     fi
     ;;
 esac
+# Cloud provider keys for Pi (ADR-036), forwarded only when set on the host.
+for key in ANTHROPIC_API_KEY OPENAI_API_KEY; do
+  if [[ -n "${!key:-}" ]]; then
+    DOCKER_ENV_ARGS+=(-e "$key")
+  fi
+done
 
 # ── inject project settings ───────────────────────────────────────────────────
 # Force sandbox off — claude-agent.Dockerfile omits the sandbox deps
