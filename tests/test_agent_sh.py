@@ -435,3 +435,37 @@ def test_inference_probe_retries():
     assert "NOT reachable at startup" in _SCRIPT_TEXT, (
         "summary line must flag a failed probe instead of printing inference as healthy"
     )
+
+
+# ── batch 1: security and correctness ─────────────────────────────────────────
+
+def _firewall_script() -> str:
+    start = _SCRIPT_TEXT.find("<<FWEOF")
+    assert start != -1, "firewall-apply.sh heredoc not found"
+    end = _SCRIPT_TEXT.find("\nFWEOF", start)
+    assert end != -1, "firewall-apply.sh heredoc not terminated"
+    return _SCRIPT_TEXT[start:end]
+
+
+def test_firewall_chain_applied_atomically():
+    # Flush + separate -A calls leave CLAUDE_AGENT empty (egress allowed) until
+    # the final REJECT lands. iptables-restore --noflush swaps the chain in one commit.
+    fw = _firewall_script()
+    assert "iptables-restore --noflush" in fw, (
+        "CLAUDE_AGENT chain must be applied via iptables-restore --noflush"
+    )
+    assert ":CLAUDE_AGENT - [0:0]" in fw, "restore stanza must declare :CLAUDE_AGENT"
+    assert "iptables -F CLAUDE_AGENT" not in fw, "non-atomic flush still present"
+    assert not re.search(r"iptables\s+-A\s+CLAUDE_AGENT", fw), (
+        "individual `iptables -A CLAUDE_AGENT` calls still present"
+    )
+    # Catch-all REJECT and COMMIT must both be in the stanza, REJECT last.
+    reject = fw.find("-A CLAUDE_AGENT -j REJECT")
+    commit = fw.find("COMMIT")
+    assert reject != -1 and commit != -1 and reject < commit, (
+        "restore stanza must end with the catch-all REJECT followed by COMMIT"
+    )
+    # The jump rules need the chain to exist, so they must follow the restore.
+    assert fw.find("iptables-restore") < fw.find("-j CLAUDE_AGENT 2>/dev/null"), (
+        "DOCKER-USER jump rules must be installed after the chain is populated"
+    )

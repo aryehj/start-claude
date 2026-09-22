@@ -359,10 +359,13 @@ Option 3.
   (which the docker daemon explicitly leaves alone on restart) carries a
   single `-s $BRIDGE_CIDR -j CLAUDE_AGENT` jump. The child chain holds the
   RETURN rules (established/related, proxy port, host inference port,
-  bridge DNS) and a catch-all REJECT. Re-applying is atomic: `iptables -F
-  CLAUDE_AGENT` wipes prior state, then `-A` repopulates in order. No
-  comment-tag matching, no rule-number arithmetic, no risk of leaving
-  stale rules co-resident with new ones.
+  bridge DNS) and a catch-all REJECT. Re-applying is atomic: the chain is
+  rendered as an `iptables-restore --noflush` stanza whose `:CLAUDE_AGENT`
+  declaration flushes and repopulates only that chain in one commit, so it
+  is never observably empty. (An earlier `iptables -F` followed by separate
+  `-A` calls left the chain empty — and bridge egress allowed — until the
+  final REJECT landed.) No comment-tag matching, no rule-number arithmetic,
+  no risk of leaving stale rules co-resident with new ones.
 - **Re-apply on every run** instead of persisting. The firewall script is
   regenerated on the host and streamed into `sudo sh` over `colima ssh` on
   every invocation. No state drift between "rules the host script thinks
