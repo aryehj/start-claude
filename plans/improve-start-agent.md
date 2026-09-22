@@ -2,7 +2,7 @@
 
 ## Status
 
-- [ ] Batch 1: security and correctness, small diffs (A1, A3, A4, B1, B4, B6, B7, C3)
+- [x] Batch 1: security and correctness, small diffs (A1, A3, A4, B1, B4, B6, B7, C3)
 - [ ] Batch 2: container lifecycle (B2, B3, SearXNG pin + `--restart`)
 - [ ] Batch 3: allowlist (B5 validation, then shared template)
 - [ ] Batch 4: perf (C1, C2, C4)
