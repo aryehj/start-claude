@@ -596,3 +596,38 @@ def test_usage_documents_env_vars():
     body = _function_body("usage")
     for var in ("CLAUDE_SKILLS_ARCHIVE_URL", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
         assert var in body, f"usage() does not document {var}"
+
+
+# ── batch 2: firewall gaps ────────────────────────────────────────────────────
+
+def _probe_script() -> str:
+    start = _SCRIPT_TEXT.find("<<PROBE_EOF")
+    assert start != -1, "vm-probe.sh heredoc not found"
+    end = _SCRIPT_TEXT.find("\nPROBE_EOF", start)
+    assert end != -1, "vm-probe.sh heredoc not terminated"
+    return _SCRIPT_TEXT[start:end]
+
+
+def _restore_stanza(fw: str) -> str:
+    start = fw.find("echo '*filter'")
+    end = fw.find("iptables-restore --noflush", start)
+    assert start != -1 and end != -1, "iptables-restore stanza not found"
+    return fw[start:end]
+
+
+def test_agent_net_cidr_probed_regardless_of_search():
+    # A container left on claude-agent-net by an earlier search-enabled run must
+    # still get the DOCKER-USER jump when this run passes --disable-search.
+    probe = _probe_script()
+    assert 'echo "AGENT_NET_CIDR=' in probe, "probe no longer reports AGENT_NET_CIDR"
+    assert "LOCAL_SEARCH_ENABLED" not in probe, (
+        "agent-net CIDR probe is still gated on search; the jump is skipped "
+        "for a reattached claude-agent-net container under --disable-search"
+    )
+    fw = _firewall_script()
+    jump = fw.find('-s "\\$AGENT_NET_CIDR" -j CLAUDE_AGENT 2>/dev/null')
+    assert jump != -1, "DOCKER-USER jump for AGENT_NET_CIDR not found"
+    guard = fw.rfind("if ", 0, jump)
+    assert "LOCAL_SEARCH_ENABLED" not in fw[guard:jump], (
+        "DOCKER-USER jump for AGENT_NET_CIDR must not depend on the search flag"
+    )

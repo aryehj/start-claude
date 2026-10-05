@@ -843,7 +843,6 @@ trap on_exit EXIT
 cat > "$TMP_WORK/vm-probe.sh" <<PROBE_EOF
 #!/bin/sh
 AGENT_NET_NAME="$AGENT_NET_NAME"
-LOCAL_SEARCH_ENABLED="$LOCAL_SEARCH_ENABLED"
 
 # Bridge gateway + subnet in one inspect (eliminates the former duplicate call).
 bridge_info=\$(docker network inspect bridge \\
@@ -862,12 +861,12 @@ if [ -z "\$host_ip" ]; then
 fi
 echo "HOST_IP=\$host_ip"
 
-# Agent-net CIDR (only needed when local search is enabled).
-if [ "\$LOCAL_SEARCH_ENABLED" = "true" ]; then
-  agent_cidr=\$(docker network inspect "\$AGENT_NET_NAME" \\
-    -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || true)
-  echo "AGENT_NET_CIDR=\$agent_cidr"
-fi
+# Agent-net CIDR whenever the network exists, whatever the search flag says:
+# a container created with search on stays on claude-agent-net, and without
+# this the firewall would install no DOCKER-USER jump for its source CIDR.
+agent_cidr=\$(docker network inspect "\$AGENT_NET_NAME" \\
+  -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || true)
+echo "AGENT_NET_CIDR=\$agent_cidr"
 
 # Tinyproxy package + service status.
 tp_status=\$(dpkg-query -W -f='\${Status}' tinyproxy 2>/dev/null || true)
