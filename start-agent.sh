@@ -327,7 +327,7 @@ fi
 COLIMA_PROFILE="claude-agent"
 CONTAINER_NAME="claude-agent"
 IMAGE_TAG="claude-agent:latest"
-DOCKERFILE_PATH="$(cd "$(dirname "$0")" && pwd)/dockerfiles/claude-agent.Dockerfile"
+DOCKERFILE_PATH="$SCRIPT_DIR/dockerfiles/claude-agent.Dockerfile"
 DOCKERFILE_DIR="$(dirname "$DOCKERFILE_PATH")"
 CLAUDE_CONFIG_DIR="$SANDBOX_ROOT/.sandbox_config/claude"
 CLAUDE_JSON_FILE="$SANDBOX_ROOT/.sandbox_config/claude.json"
@@ -976,7 +976,7 @@ mkdir -p "$CLAUDE_CONFIG_DIR" "$OPENCODE_CONFIG_DIR" "$OPENCODE_DATA_DIR" "$PI_C
 # mount puts this file in scope for all containers. Seed-if-missing;
 # --reseed-global-claudemd forces overwrite to pick up template updates.
 GLOBAL_CLAUDEMD_FILE="$CLAUDE_CONFIG_DIR/CLAUDE.md"
-GLOBAL_CLAUDEMD_TEMPLATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/templates/global-claude.md"
+GLOBAL_CLAUDEMD_TEMPLATE="$SCRIPT_DIR/templates/global-claude.md"
 if [[ -f "$GLOBAL_CLAUDEMD_TEMPLATE" ]]; then
   if $RESEED_GLOBAL_CLAUDEMD; then
     cp "$GLOBAL_CLAUDEMD_TEMPLATE" "$GLOBAL_CLAUDEMD_FILE"

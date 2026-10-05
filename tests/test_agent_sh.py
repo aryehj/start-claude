@@ -1026,3 +1026,10 @@ def test_agent_run_has_no_resource_limits():
     agent_block = next(b for b in _BLOCKS if "IMAGE_TAG" in b)
     assert "--memory" not in agent_block
     assert "--cpus" not in agent_block
+
+
+def test_script_dir_computed_once():
+    assert 'dirname "$0"' not in _SCRIPT_TEXT
+    assert _SCRIPT_TEXT.count('dirname "${BASH_SOURCE[0]}"') == 1
+    assert 'DOCKERFILE_PATH="$SCRIPT_DIR/dockerfiles/claude-agent.Dockerfile"' in _SCRIPT_TEXT
+    assert 'GLOBAL_CLAUDEMD_TEMPLATE="$SCRIPT_DIR/templates/global-claude.md"' in _SCRIPT_TEXT
