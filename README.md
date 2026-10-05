@@ -394,18 +394,29 @@ because those flags do not touch existing files in `.sandbox_config/claude/`.
 
 ## Egress allowlist
 
-Everything outbound from the container is denied by default. Three egress
+Everything outbound from the container is denied by default. Two egress
 paths are open:
 
 1. `HTTP(S)_PROXY` → in-VM tinyproxy, which enforces a regex filter generated
    from a human-editable domain allowlist.
 2. Inference server → the macOS host on the backend's port (`11434` for
    Ollama, `8000` for omlx).
-3. DNS to the docker bridge gateway.
 
-The enforcement lives in the `DOCKER-USER` iptables chain inside the Colima
-VM. The container has no `CAP_NET_ADMIN` and cannot touch the rules even if
-fully compromised. See `ADR.md` §ADR-010 for the threat model.
+With search enabled, the agent can also reach `searxng:8080` on
+`claude-agent-net`. External DNS is blackholed: the agent container's
+resolver is `192.0.2.1` (never routed), so names like `example.com` do not
+resolve locally. Tools that honor the proxy hand the hostname to tinyproxy,
+and container names (`searxng`) still resolve through Docker's embedded DNS.
+Services on the VM itself (its sshd, its dnsmasq) are closed to containers.
+
+The enforcement lives in two iptables chains inside the Colima VM:
+`CLAUDE_AGENT` (from `DOCKER-USER`, for traffic leaving the VM) and
+`CLAUDE_AGENT_IN` (from `INPUT`, for traffic to the VM's own addresses). The
+container has no `CAP_NET_ADMIN` and cannot touch the rules even if fully
+compromised. See `ADR.md` §ADR-010 for the threat model.
+
+A container created before the DNS blackhole existed keeps its old resolver;
+the script warns on reattach. Recreate it with `start-agent.sh --reset-container`.
 
 ### Editing the allowlist
 

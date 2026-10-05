@@ -423,6 +423,36 @@ container's namespace), inference and `searxng:8080` (FORWARD), and
 `colima ssh` / `docker build --network=host` (source is not a container
 CIDR).
 
+### Update (2026-10-05): external DNS is blackholed for the agent container
+
+With all direct egress rejected, arbitrary external names still resolved
+inside the container (`getent hosts example.com` in 0.16 s). Docker's
+embedded DNS forwards names it does not own from the **VM's** network
+namespace (`# ExtServers: [host(192.168.5.1)]` in the container's
+`resolv.conf`), so those queries never traverse FORWARD and `CLAUDE_AGENT`
+cannot see them. That is an information leak and a low-bandwidth covert
+channel.
+
+The agent container is created with `--dns 192.0.2.1` (RFC 5737, never
+routed). With an explicit `--dns`, the embedded resolver forwards external
+queries from the container's namespace, where they hit the `CLAUDE_AGENT`
+REJECT. On the default bridge (no embedded resolver) the container queries
+`192.0.2.1` directly, with the same result. Nothing on the proxy path needs
+local resolution: curl, git, npm, uv, pip and Node with
+`NODE_USE_ENV_PROXY=1` send the hostname to tinyproxy in the `CONNECT`, and
+every `NO_PROXY` entry is an IP, `localhost`, or `searxng`. Container-name
+resolution is untouched. The direct route to the VM's dnsmasq
+(`192.168.5.1:53`) is closed by `CLAUDE_AGENT_IN`; the blackhole alone would
+have left it open.
+
+SearXNG keeps the default resolver: it is not the adversary and reaches
+engines via `outgoing.proxies`.
+
+`--dns` is a create-time flag. On reattach the script reads
+`.HostConfig.Dns` and, if the blackhole is absent, warns and names
+`start-agent.sh --reset-container`. It does not recreate the container
+automatically, because its root filesystem may hold tools the user installed.
+
 ## ADR-009: Set git identity via environment variables, not just gitconfig
 
 **Date:** 2026-04-08

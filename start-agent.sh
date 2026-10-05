@@ -340,6 +340,10 @@ SEARXNG_CONTAINER="searxng"
 SEARXNG_DIR="$SANDBOX_ROOT/.sandbox_config/searxng"
 SEARXNG_SETTINGS_FILE="$SEARXNG_DIR/settings.yml"
 AGENT_NET_NAME="claude-agent-net"
+# RFC 5737 TEST-NET-1, never routed. The agent container resolves external names
+# through this, so queries leave from the container's namespace and hit the
+# CLAUDE_AGENT REJECT. Everything on the proxy path hands hostnames to tinyproxy.
+DNS_BLACKHOLE="192.0.2.1"
 
 # ── preflight ────────────────────────────────────────────────────────────────
 if ! command -v colima &>/dev/null; then
@@ -1725,6 +1729,12 @@ if docker container inspect "$CONTAINER_NAME" &>/dev/null; then
   # (sandbox switched), recreate; otherwise just re-exec with the right -w.
   existing_projects_mount=$(docker container inspect -f '{{range .Mounts}}{{if eq .Destination "'"$SANDBOX_ROOT/projects"'"}}{{.Source}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)
   if [[ "$existing_projects_mount" == "$SANDBOX_ROOT/projects" ]]; then
+    # --dns is create-time only; a container from before the blackhole keeps
+    # resolving external names until it is recreated.
+    existing_dns=$(docker container inspect -f '{{json .HostConfig.Dns}}' "$CONTAINER_NAME" 2>/dev/null || true)
+    if [[ "$existing_dns" != *"\"$DNS_BLACKHOLE\""* ]]; then
+      echo "warning: container '$CONTAINER_NAME' predates the DNS blackhole and can still resolve external names. Recreate it with: start-agent.sh --reset-container" >&2
+    fi
     running_state=$(docker container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo "false")
     if [[ "$running_state" == "true" ]]; then
       if docker top "$CONTAINER_NAME" 2>/dev/null | grep -q '/bin/bash'; then
@@ -1764,6 +1774,7 @@ exec docker run \
   --memory "${CLAUDE_AGENT_MEMORY_GB}g" \
   --cpus "$CLAUDE_AGENT_CPUS" \
   --add-host=host.docker.internal:host-gateway \
+  --dns "$DNS_BLACKHOLE" \
   ${NETWORK_ARGS[@]+"${NETWORK_ARGS[@]}"} \
   -v "$SANDBOX_ROOT/projects:$SANDBOX_ROOT/projects" \
   -v "$CLAUDE_CONFIG_DIR:/root/.claude" \

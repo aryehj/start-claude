@@ -673,3 +673,31 @@ def test_dead_bridge_rules_removed_from_forward_chain():
     assert not re.search(r"-A CLAUDE_AGENT -d \\\$BRIDGE_IP", stanza), (
         "dead `-A CLAUDE_AGENT -d $BRIDGE_IP` rules still present"
     )
+
+
+def test_agent_container_dns_blackholed():
+    assert re.search(r'^DNS_BLACKHOLE="192\.0\.2\.1"', _SCRIPT_TEXT, re.MULTILINE), (
+        "DNS_BLACKHOLE must be the RFC 5737 TEST-NET-1 address"
+    )
+    agent_block = next((b for b in _BLOCKS if "IMAGE_TAG" in b), None)
+    assert agent_block is not None, "claude-agent docker run block not found"
+    assert '--dns "$DNS_BLACKHOLE"' in agent_block, (
+        "agent container must use the blackhole resolver so external names do not resolve"
+    )
+    searxng_block = next((b for b in _BLOCKS if "SEARXNG_CONTAINER" in b), None)
+    assert searxng_block is not None and "--dns" not in searxng_block, (
+        "SearXNG reaches engines via outgoing.proxies; leave its resolver alone"
+    )
+
+
+def test_reattach_warns_when_dns_blackhole_missing():
+    start = _SCRIPT_TEXT.find('if docker container inspect "$CONTAINER_NAME"')
+    end = _SCRIPT_TEXT.find("# Fresh container:", start)
+    assert start != -1 and end != -1, "reattach block not found"
+    block = _SCRIPT_TEXT[start:end]
+    assert "{{json .HostConfig.Dns}}" in block, "reattach does not inspect the container's resolver"
+    assert "DNS_BLACKHOLE" in block and "--reset-container" in block, (
+        "reattach must warn and name --reset-container when the blackhole is absent"
+    )
+    attach = block.find("attach_existing")
+    assert block.find("HostConfig.Dns") < attach, "DNS check must run before attaching"
