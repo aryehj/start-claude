@@ -80,8 +80,12 @@ COPY searxng-mcp/server.py /opt/searxng-mcp/server.py
 # Dedicated venv — Debian bookworm's system Python is PEP 668 externally
 # managed, so `uv pip install --system` hard-fails. The venv is baked into the
 # image and invoked directly (see start-agent.sh command wiring).
+# mcp is pinned <2: server.py uses the v1 `mcp.server.fastmcp.FastMCP` API,
+# which mcp 2.x renamed to `mcp.server.mcpserver.MCPServer`. Unpinned, a
+# rebuild silently pulls 2.x and the shim dies on import (opencode shows an
+# MCP status error for `searxng`). Bump deliberately alongside a port.
 RUN uv venv /opt/searxng-mcp/venv \
- && uv pip install --python /opt/searxng-mcp/venv/bin/python 'mcp[cli]' httpx
+ && uv pip install --python /opt/searxng-mcp/venv/bin/python 'mcp[cli]<2' httpx
 
 # ── doc-tools Python venv ─────────────────────────────────────────────────────
 # Baked venv so python-docx/openpyxl/python-pptx are present without a runtime

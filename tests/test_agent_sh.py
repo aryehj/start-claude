@@ -417,3 +417,21 @@ def test_wait_inference_probe_before_exec():
     assert "wait_inference_probe" in fresh_section, (
         "wait_inference_probe not called before exec docker run in fresh-container section"
     )
+
+
+def test_unknown_flag_rejected():
+    # Without a `-*)` arm, a typo like --rebuilt falls into POSITIONAL, becomes
+    # PROJECT_DIR, and fails later with a cryptic `cd: --: invalid option`.
+    assert re.search(r"^\s*-\*\)\s.*unknown option", _SCRIPT_TEXT, re.MULTILINE), (
+        "arg parser has no `-*)` arm rejecting unknown options"
+    )
+
+
+def test_inference_probe_retries():
+    # A single 3s curl false-fails when the inference server is momentarily slow.
+    assert "probe_retry vm_ssh curl" in _SCRIPT_TEXT, (
+        "inference probe must go through probe_retry, not a single curl attempt"
+    )
+    assert "NOT reachable at startup" in _SCRIPT_TEXT, (
+        "summary line must flag a failed probe instead of printing inference as healthy"
+    )
