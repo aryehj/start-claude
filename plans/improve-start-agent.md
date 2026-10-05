@@ -72,8 +72,21 @@ at `172.18.0.3` on `claude-agent-net`):
 | TCP `172.17.0.1:8888` | open (tinyproxy, expected) |
 | TCP `192.168.5.2:22`, `1.1.1.1:443` | `No route to host` (the chain's REJECT, expected) |
 
-Not verified: whether `192.168.5.1:53` answers queries sent to it directly, and whether
-`192.168.5.1` is a VM-local address. See F2.
+Observed the same day in the VM (`ip -4 addr`, `ss -lntup`, `iptables -S INPUT`):
+
+| Fact | Detail |
+|---|---|
+| VM-local addresses | `192.168.5.1` (eth0), `192.168.64.2` (col0), `172.17.0.1` (docker0), `172.18.0.1` (the `claude-agent-net` bridge) |
+| dnsmasq | udp and tcp 53 on `192.168.5.1` and `127.0.0.1`; this is the resolver embedded DNS forwards to |
+| sshd | tcp 22 on `0.0.0.0` and `[::]`, so reachable on every address above |
+| tinyproxy | tcp 8888 on `172.17.0.1` only |
+| INPUT chain | `-P INPUT ACCEPT`, no rules |
+
+IPv6 is not a second path: the container's `eth0` has `disable_ipv6=1` and no v6 address, so
+`ip6tables` needs no matching rules.
+
+Not verified: that dnsmasq answers a query sent straight to `192.168.5.1:53` from a container.
+It accepts the TCP connection and nothing filters INPUT, so assume it does.
 
 Two structural facts explain the table:
 
@@ -101,15 +114,10 @@ that one really is search-only. L1 then makes the network always exist. Land F1 
 lines and closes the hole on its own.
 
 ### F2. Govern INPUT: containers can reach VM-local services
-**First, in the VM** (the user runs these on the Mac; the implementing session has no VM access):
-```
-colima ssh -p claude-agent -- ip -4 addr
-colima ssh -p claude-agent -- sudo ss -lntup
-colima ssh -p claude-agent -- sudo iptables -S INPUT
-```
-Confirm `192.168.5.1` is a local address and note what listens on 53 and 22. If `192.168.5.1`
-is **not** VM-local, stop and work out which path that traffic takes before writing rules; the
-design below assumes it is.
+INPUT is `ACCEPT` with no rules, so a container can open a connection to the VM's sshd on any
+of its four addresses and to dnsmasq on `192.168.5.1:53`. sshd still needs a key the container
+does not have, so this is attack surface rather than an open door; dnsmasq is a working
+resolver that bypasses F3.
 
 **Fix:** add a second chain, `CLAUDE_AGENT_IN`, declared in the **same** `iptables-restore
 --noflush` stanza as `CLAUDE_AGENT` so both swap in one commit:
@@ -126,6 +134,9 @@ iptables -C INPUT -s "$BRIDGE_CIDR"    -j CLAUDE_AGENT_IN || iptables -I INPUT 1
 iptables -C INPUT -s "$AGENT_NET_CIDR" -j CLAUDE_AGENT_IN || iptables -I INPUT 1 -s "$AGENT_NET_CIDR" -j CLAUDE_AGENT_IN
 ```
 Then delete the three dead `-d $BRIDGE_IP` rules from `CLAUDE_AGENT`.
+
+The jumps match on **source** CIDR only, never on destination, so one pair of rules covers all
+four VM-local addresses, including `192.168.64.2` on col0.
 
 Things that must keep working, and why they do:
 - Agent and SearXNG to tinyproxy at `$BRIDGE_IP:$TINYPROXY_PORT`: the one RETURN rule.
@@ -352,7 +363,8 @@ is a large fraction of the total, and the gain is marginal.)
 - F1: with a search-enabled container, `colima stop -p claude-agent`, start with
   `--disable-search`, and confirm test 1 (`test_default_deny`) still passes.
 - F2: `colima ssh -p claude-agent -- sudo iptables -S CLAUDE_AGENT_IN` shows the three rules;
-  gateway port 22 refuses from the container; `colima ssh` from the Mac still works.
+  from the container, port 22 refuses on `172.17.0.1`, `172.18.0.1`, `192.168.5.1` and
+  `192.168.64.2`, and `192.168.5.1:53` refuses; `colima ssh` from the Mac still works.
 - F3: the three checks listed under F3.
 - L1: an old bridge-only container gains `claude-agent-net` on the next run and
   `getent hosts searxng` resolves in it.
