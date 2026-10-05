@@ -1545,8 +1545,6 @@ trap - EXIT
 exec docker run \
   --name "$CONTAINER_NAME" \
   -it \
-  --memory "${CLAUDE_AGENT_MEMORY_GB}g" \
-  --cpus "$CLAUDE_AGENT_CPUS" \
   --add-host=host.docker.internal:host-gateway \
   --dns "$DNS_BLACKHOLE" \
   --network "$AGENT_NET_NAME" \

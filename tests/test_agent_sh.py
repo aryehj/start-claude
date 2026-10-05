@@ -1020,3 +1020,9 @@ def test_single_colima_list_call():
     calls = [l for l in _code_lines() if re.search(r"\bcolima list\b", l)]
     assert len(calls) == 1, f"expected one colima list call, found {calls}"
 
+
+def test_agent_run_has_no_resource_limits():
+    # Both equalled the whole VM (and the requested, not the running, size).
+    agent_block = next(b for b in _BLOCKS if "IMAGE_TAG" in b)
+    assert "--memory" not in agent_block
+    assert "--cpus" not in agent_block
