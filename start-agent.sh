@@ -473,15 +473,6 @@ vm_sh() {
   printf '%s\n' "$1" | colima ssh -p "$COLIMA_PROFILE" -- bash
 }
 
-# Copy a host-side file into the VM at $2 with mode $3 (default 644).
-# colima ssh re-quotes argv, but the command itself has no shell
-# metacharacters, and the file payload rides on stdin — so no quoting games.
-vm_put_file() {
-  local src="$1" dest="$2" mode="${3:-644}"
-  colima ssh -p "$COLIMA_PROFILE" -- sudo tee "$dest" >/dev/null < "$src"
-  colima ssh -p "$COLIMA_PROFILE" -- sudo chmod "$mode" "$dest"
-}
-
 remove_containers() {
   local label="$1"
   if docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1; then
@@ -700,39 +691,42 @@ probe_retry() {
   done
   return 1
 }
-echo "==> Probing $INFERENCE_LABEL at http://$HOST_IP:$INFERENCE_PORT from inside VM"
-case "$BACKEND" in
-  ollama)
-    {
-      if ! probe_retry vm_ssh curl -sf --max-time 3 "http://$HOST_IP:$INFERENCE_PORT/api/tags"; then
-        cat <<WARN
+# Skipped under --reload-allowlist, which exits before reading the result.
+if ! $RELOAD_ALLOWLIST; then
+  echo "==> Probing $INFERENCE_LABEL at http://$HOST_IP:$INFERENCE_PORT from inside VM"
+  case "$BACKEND" in
+    ollama)
+      {
+        if ! probe_retry vm_ssh curl -sf --max-time 3 "http://$HOST_IP:$INFERENCE_PORT/api/tags"; then
+          cat <<WARN
 warning: Ollama not reachable at http://$HOST_IP:$INFERENCE_PORT from inside the
 Colima VM. Ensure Ollama is running on the macOS host and bound to 0.0.0.0.
 On the host, run once:
     launchctl setenv OLLAMA_HOST 0.0.0.0:$INFERENCE_PORT
 and restart the Ollama app. Continuing without local inference.
 WARN
-      fi
-    } >"$TMP_WORK/probe-warning" 2>&1 &
-    PROBE_PID=$!
-    ;;
-  omlx)
-    OMLX_CURL_ARGS=(-sf --max-time 3)
-    [[ -n "${OMLX_API_KEY:-}" ]] && OMLX_CURL_ARGS+=(-H "Authorization: Bearer $OMLX_API_KEY")
-    {
-      if ! probe_retry vm_ssh curl "${OMLX_CURL_ARGS[@]}" "http://$HOST_IP:$INFERENCE_PORT/v1/models"; then
-        cat <<WARN
+        fi
+      } >"$TMP_WORK/probe-warning" 2>&1 &
+      PROBE_PID=$!
+      ;;
+    omlx)
+      OMLX_CURL_ARGS=(-sf --max-time 3)
+      [[ -n "${OMLX_API_KEY:-}" ]] && OMLX_CURL_ARGS+=(-H "Authorization: Bearer $OMLX_API_KEY")
+      {
+        if ! probe_retry vm_ssh curl "${OMLX_CURL_ARGS[@]}" "http://$HOST_IP:$INFERENCE_PORT/v1/models"; then
+          cat <<WARN
 warning: omlx not reachable at http://$HOST_IP:$INFERENCE_PORT from inside the
 Colima VM. Ensure omlx is running on the host with:
     omlx serve --model-dir ~/models
 or via: brew services start omlx
 Continuing without local inference.
 WARN
-      fi
-    } >"$TMP_WORK/probe-warning" 2>&1 &
-    PROBE_PID=$!
-    ;;
-esac
+        fi
+      } >"$TMP_WORK/probe-warning" 2>&1 &
+      PROBE_PID=$!
+      ;;
+  esac
+fi
 
 # ── SearXNG settings.yml seed (first run only, local-search path) ────────────
 if $LOCAL_SEARCH_ENABLED; then
@@ -816,24 +810,36 @@ generate_filter_file "$TMP_WORK/filter"
 # any allowlist edit (which changes filter) triggers a push automatically.
 # The stored hash is read by the batch probe from /etc/tinyproxy/filter.hash.
 NEW_PROXY_HASH=$(cat "$TMP_WORK/tinyproxy.conf" "$TMP_WORK/filter" | shasum -a 256 | awk '{print $1}')
+# Write the VM-side push script: both files and the hash ride in it as base64
+# (only [A-Za-z0-9+/=], so safe inside single quotes), followed by the
+# reload-or-restart, so the whole push costs one colima ssh handshake.
+write_tinyproxy_push() {
+  cat > "$TMP_WORK/tinyproxy-push.sh" <<PUSHEOF
+set -e
+printf '%s' '$(base64 < "$TMP_WORK/tinyproxy.conf" | tr -d '\n')' | base64 -d > /etc/tinyproxy/tinyproxy.conf
+printf '%s' '$(base64 < "$TMP_WORK/filter" | tr -d '\n')' | base64 -d > /etc/tinyproxy/filter
+chmod 644 /etc/tinyproxy/tinyproxy.conf /etc/tinyproxy/filter
+# Persist the new hash so the next warm reattach can skip the push.
+printf '%s\n' '$NEW_PROXY_HASH' > /etc/tinyproxy/filter.hash
+# Reload (no connection drop) when tinyproxy is already running; start it otherwise.
+if [ "$TINYPROXY_ACTIVE" = "true" ]; then
+  systemctl reload tinyproxy 2>/dev/null || systemctl restart tinyproxy
+else
+  # restart, not start: on a freshly recreated VM dpkg's postinst auto-starts
+  # tinyproxy with its default config *before* the probe-derived TINYPROXY_ACTIVE
+  # (read pre-install, so "false") is consulted here. start/enable --now are
+  # no-ops against that already-running unit and never load the config pushed
+  # above, leaving egress broken until --reload-allowlist. restart loads the
+  # pushed config whether the unit was auto-started or not yet running.
+  systemctl enable tinyproxy >/dev/null 2>&1 || true
+  systemctl restart tinyproxy
+fi
+PUSHEOF
+}
+
 if $RELOAD_ALLOWLIST || [[ "$NEW_PROXY_HASH" != "$TINYPROXY_STORED_HASH" || "$TINYPROXY_ACTIVE" != "true" ]]; then
-  vm_put_file "$TMP_WORK/tinyproxy.conf" /etc/tinyproxy/tinyproxy.conf
-  vm_put_file "$TMP_WORK/filter"         /etc/tinyproxy/filter
-  # Persist new hash so next warm reattach can skip the push.
-  printf '%s\n' "$NEW_PROXY_HASH" | colima ssh -p "$COLIMA_PROFILE" -- sudo tee /etc/tinyproxy/filter.hash >/dev/null
-  # Reload (no connection drop) when tinyproxy is already running; start it otherwise.
-  if [[ "$TINYPROXY_ACTIVE" == "true" ]]; then
-    vm_ssh sudo systemctl reload tinyproxy 2>/dev/null || vm_ssh sudo systemctl restart tinyproxy
-  else
-    # restart, not start: on a freshly recreated VM dpkg's postinst auto-starts
-    # tinyproxy with its default config *before* the probe-derived TINYPROXY_ACTIVE
-    # (read pre-install, so "false") is consulted here. `start`/`enable --now` are
-    # no-ops against that already-running unit and never load the config pushed
-    # above, leaving egress broken until --reload-allowlist. `restart` loads the
-    # pushed config whether the unit was auto-started or not yet running.
-    vm_ssh sudo systemctl enable tinyproxy >/dev/null 2>&1 || true
-    vm_ssh sudo systemctl restart tinyproxy
-  fi
+  write_tinyproxy_push
+  colima ssh -p "$COLIMA_PROFILE" -- sudo sh < "$TMP_WORK/tinyproxy-push.sh"
 fi
 
 # ── iptables rules in the VM (CLAUDE_AGENT and CLAUDE_AGENT_IN chains) ───────
@@ -914,7 +920,7 @@ colima ssh -p "$COLIMA_PROFILE" -- sudo sh < "$TMP_WORK/firewall-apply.sh"
 if $RELOAD_ALLOWLIST; then
   entry_count=$(wc -l < "$TMP_WORK/filter" | tr -d ' ')
   echo "==> Allowlist reloaded ($entry_count entries, sandbox: $SANDBOX_NAME)"
-  exit 0  # on_exit reaps the unread inference probe and removes TMP_WORK
+  exit 0  # on_exit removes TMP_WORK (no inference probe on this path)
 fi
 
 # ── build the image if missing ───────────────────────────────────────────────

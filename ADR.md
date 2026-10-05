@@ -2863,6 +2863,19 @@ Three independent optimizations, shipped together:
 - The inference probe warning is emitted to stderr before the container is attached,
   preserving the user-visible behavior, just without the serial delay.
 
+### Amendment (2026-10-05): one-handshake push, no probe on `--reload-allowlist`
+
+`--reload-allowlist` was still paying about nine handshakes plus one to three for an
+inference probe it never read: mount check, batch probe, `vm_put_file` × 2 (two calls
+each), the hash `tee`, the reload, and the firewall apply. The push now writes one
+script, `$TMP_WORK/tinyproxy-push.sh`, carrying `tinyproxy.conf`, `filter` and the
+new hash as base64 payloads followed by the reload-or-restart, and runs it with a
+single `colima ssh -- sudo sh`. `vm_put_file` is gone. The inference probe is not
+launched under `--reload-allowlist`, since that path exits before reading it.
+`--reload-allowlist` now costs four handshakes (mount check, batch probe, push,
+firewall apply); a warm reattach that does push costs one instead of four to six for
+the push itself.
+
 ## ADR-046: Warm-reattach SSH round-trip reduction in `research.py`
 
 **Status:** Accepted

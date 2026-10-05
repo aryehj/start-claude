@@ -347,6 +347,13 @@ def test_batch_probe_covers_dpkg_query():
     )
 
 
+def _tinyproxy_push_block() -> str:
+    start = _SCRIPT_TEXT.find('if $RELOAD_ALLOWLIST || [[ "$NEW_PROXY_HASH"')
+    assert start != -1, "hash-gated tinyproxy push block not found"
+    end = _SCRIPT_TEXT.find("\nfi\n", start)
+    return _SCRIPT_TEXT[start:end]
+
+
 def test_tinyproxy_push_hash_gated():
     # The tinyproxy config push must be conditional on a hash comparison so
     # unchanged configs are not pushed on warm reattach.
@@ -356,17 +363,14 @@ def test_tinyproxy_push_hash_gated():
     assert "filter.hash" in _SCRIPT_TEXT, (
         "filter.hash marker file not found; stored hash not being persisted in VM"
     )
-    # The vm_put_file calls for tinyproxy.conf and filter must be inside a conditional block.
-    # We locate the vm_put_file tinyproxy.conf call and check it's preceded by an if/then.
-    lines = _SCRIPT_TEXT.splitlines()
-    put_lines = [i for i, l in enumerate(lines) if "vm_put_file" in l and "tinyproxy.conf" in l]
-    assert put_lines, "vm_put_file tinyproxy.conf not found"
-    for lineno in put_lines:
-        context = "\n".join(lines[max(0, lineno - 15):lineno + 1])
-        assert re.search(r'\bif\b', context), (
-            f"vm_put_file tinyproxy.conf at line {lineno + 1} does not appear inside "
-            "a conditional block; tinyproxy push must be hash-gated"
-        )
+    # The one push handshake runs inside the hash gate, and nothing else
+    # writes the tinyproxy files.
+    push_runs = [l for l in _SCRIPT_TEXT.splitlines()
+                 if "colima ssh" in l and "tinyproxy-push.sh" in l]
+    assert len(push_runs) == 1, f"expected one tinyproxy push handshake, found {push_runs}"
+    assert push_runs[0] in _tinyproxy_push_block(), (
+        "tinyproxy push runs outside the hash-gated block"
+    )
 
 
 def test_tinyproxy_reload_not_unconditional_restart():
@@ -597,7 +601,7 @@ def test_reload_allowlist_rejects_rebuild_and_reset():
     assert guard, "no guard rejecting --reload-allowlist with --rebuild/--reset-container"
     assert "exit" in guard.group(1) and "reload-allowlist" in guard.group(1)
     # The old silent-drop conditions are dead once the guard exists.
-    assert "! $RELOAD_ALLOWLIST" not in _SCRIPT_TEXT, (
+    assert "&& ! $RELOAD_ALLOWLIST" not in _SCRIPT_TEXT, (
         "leftover `&& ! $RELOAD_ALLOWLIST` conditions silently ignore --rebuild/--reset-container"
     )
 
@@ -942,3 +946,71 @@ def test_template_entries_pass_filter_generator(tmp_path):
     assert err == "", f"template entries rejected by the filter generator:\n{err}"
     entries = [l for l in (r.split("#", 1)[0].strip() for r in text.splitlines()) if l]
     assert len(lines) == len(entries)
+
+
+# ── batch 5: perf and cleanup ────────────────────────────────────────────────
+
+def _code_lines() -> list[str]:
+    return [l for l in _SCRIPT_TEXT.splitlines() if not l.lstrip().startswith("#")]
+
+
+def _render_push_script(tmp_path, active: str) -> str:
+    """Run write_tinyproxy_push on sample files; return the generated VM script."""
+    import subprocess
+    conf = tmp_path / "tinyproxy.conf"
+    filt = tmp_path / "filter"
+    conf.write_text('Port 8888\nFilter "/etc/tinyproxy/filter"\n')
+    filt.write_text("".join(f"(^|\\.)host{i}-x\\.example$\n" for i in range(300)))
+    fn = "write_tinyproxy_push() " + _function_body("write_tinyproxy_push")
+    subprocess.run(
+        ["bash", "-c", f"set -eo pipefail\n{fn}\nwrite_tinyproxy_push"],
+        env={"PATH": "/usr/bin:/bin", "TMP_WORK": str(tmp_path),
+             "NEW_PROXY_HASH": "abc123", "TINYPROXY_ACTIVE": active},
+        check=True,
+    )
+    return (tmp_path / "tinyproxy-push.sh").read_text()
+
+
+def _run_push_script(tmp_path, script: str) -> list[str]:
+    """Execute the VM script against a fake /etc/tinyproxy; return systemctl calls."""
+    import subprocess
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    log = tmp_path / "systemctl.log"
+    stub = f'systemctl() {{ echo "$*" >> "{log}"; }}\n'
+    script = stub + script.replace("/etc/tinyproxy/", f"{etc}/")
+    subprocess.run(["sh"], input=script, text=True, check=True)
+    return log.read_text().splitlines() if log.exists() else []
+
+
+def test_tinyproxy_push_round_trips_files(tmp_path):
+    # P1: both files and the hash ride in one script as base64 payloads.
+    script = _render_push_script(tmp_path, "true")
+    calls = _run_push_script(tmp_path, script)
+    etc = tmp_path / "etc"
+    assert (etc / "tinyproxy.conf").read_bytes() == (tmp_path / "tinyproxy.conf").read_bytes()
+    assert (etc / "filter").read_bytes() == (tmp_path / "filter").read_bytes()
+    assert (etc / "filter.hash").read_text() == "abc123\n"
+    assert (etc / "filter").stat().st_mode & 0o777 == 0o644
+    assert calls == ["reload tinyproxy"], calls
+
+
+def test_tinyproxy_push_restarts_when_inactive(tmp_path):
+    script = _render_push_script(tmp_path, "false")
+    calls = _run_push_script(tmp_path, script)
+    assert calls == ["enable tinyproxy", "restart tinyproxy"], calls
+
+
+def test_vm_put_file_gone():
+    # Two handshakes per file; the single push script replaces it.
+    assert "vm_put_file" not in _SCRIPT_TEXT
+
+
+def test_inference_probe_skipped_on_reload():
+    # --reload-allowlist exits before anything reads the probe result.
+    start = _SCRIPT_TEXT.find("# ── inference backend preflight")
+    end = _SCRIPT_TEXT.find("# ── SearXNG settings.yml seed", start)
+    section = _SCRIPT_TEXT[start:end]
+    guard = section.find("if ! $RELOAD_ALLOWLIST; then")
+    assert guard != -1, "inference probe launch is not skipped under --reload-allowlist"
+    assert guard < section.find('case "$BACKEND" in') < section.rfind("\nfi\n")
