@@ -1088,12 +1088,14 @@ if $RELOAD_ALLOWLIST || [[ "$NEW_PROXY_HASH" != "$TINYPROXY_STORED_HASH" || "$TI
   fi
 fi
 
-# ── iptables rules in the VM (CLAUDE_AGENT child chain of DOCKER-USER) ───────
-# All rules live in a dedicated CLAUDE_AGENT chain, which DOCKER-USER jumps to
-# for bridge-sourced traffic. The chain is replaced in a single
-# `iptables-restore --noflush` commit: declaring :CLAUDE_AGENT flushes and
-# repopulates only that chain, so there is never a window where it is empty
-# (an empty chain falls through DOCKER-USER and allows all bridge egress).
+# ── iptables rules in the VM (CLAUDE_AGENT and CLAUDE_AGENT_IN chains) ───────
+# Container traffic leaving the VM traverses FORWARD, where DOCKER-USER jumps
+# to CLAUDE_AGENT. Container traffic to a VM-local address (either bridge
+# gateway, 192.168.5.1, col0) traverses INPUT instead, where CLAUDE_AGENT_IN
+# governs it: only tinyproxy is reachable, not the VM's sshd or dnsmasq.
+# Both chains are replaced in a single `iptables-restore --noflush` commit:
+# declaring a chain flushes and repopulates only that chain, so there is never
+# a window where either is empty (an empty chain falls through and allows all).
 cat > "$TMP_WORK/firewall-apply.sh" <<FWEOF
 #!/bin/sh
 set -e
@@ -1109,22 +1111,26 @@ LOCAL_SEARCH_ENABLED="$LOCAL_SEARCH_ENABLED"
 sudo iptables -N DOCKER-USER 2>/dev/null || true
 sudo iptables -C FORWARD -j DOCKER-USER 2>/dev/null || sudo iptables -I FORWARD 1 -j DOCKER-USER
 
-# Create-or-replace CLAUDE_AGENT atomically, rules in order.
+# Create-or-replace CLAUDE_AGENT and CLAUDE_AGENT_IN atomically, rules in order.
 {
   echo '*filter'
   echo ':CLAUDE_AGENT - [0:0]'
+  echo ':CLAUDE_AGENT_IN - [0:0]'
   echo "-A CLAUDE_AGENT -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
-  echo "-A CLAUDE_AGENT -d \$BRIDGE_IP -p tcp --dport \$TINYPROXY_PORT -j RETURN"
   echo "-A CLAUDE_AGENT -d \$HOST_IP -p tcp --dport \$INFERENCE_PORT -j RETURN"
-  echo "-A CLAUDE_AGENT -d \$BRIDGE_IP -p udp --dport 53 -j RETURN"
-  echo "-A CLAUDE_AGENT -d \$BRIDGE_IP -p tcp --dport 53 -j RETURN"
   # Allow inter-container traffic on port 8080 for claude-agent → searxng MCP.
   # Both containers are on AGENT_NET_CIDR (claude-agent-net user-defined network).
-  # SearXNG → tinyproxy at BRIDGE_IP:8888 is already covered by the rule above.
+  # SearXNG → tinyproxy at BRIDGE_IP:8888 is INPUT traffic (CLAUDE_AGENT_IN).
   if [ "\$LOCAL_SEARCH_ENABLED" = "true" ] && [ -n "\$AGENT_NET_CIDR" ]; then
     echo "-A CLAUDE_AGENT -s \$AGENT_NET_CIDR -d \$AGENT_NET_CIDR -p tcp --dport 8080 -j RETURN"
   fi
   echo "-A CLAUDE_AGENT -j REJECT --reject-with icmp-admin-prohibited"
+  # INPUT side: agent and SearXNG reach tinyproxy on the docker0 gateway; every
+  # other VM-local service (sshd on all addresses, dnsmasq on 192.168.5.1:53)
+  # is refused.
+  echo "-A CLAUDE_AGENT_IN -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
+  echo "-A CLAUDE_AGENT_IN -d \$BRIDGE_IP -p tcp --dport \$TINYPROXY_PORT -j RETURN"
+  echo "-A CLAUDE_AGENT_IN -j REJECT --reject-with icmp-admin-prohibited"
   echo 'COMMIT'
 } | sudo iptables-restore --noflush
 
@@ -1133,14 +1139,23 @@ sudo iptables -C FORWARD -j DOCKER-USER 2>/dev/null || sudo iptables -I FORWARD 
 sudo iptables -C DOCKER-USER -s "\$BRIDGE_CIDR" -j CLAUDE_AGENT 2>/dev/null \
   || sudo iptables -I DOCKER-USER 1 -s "\$BRIDGE_CIDR" -j CLAUDE_AGENT
 
-# Also jump for user-defined agent network traffic. Note: claude-agent-net →
-# tinyproxy ($BRIDGE_IP:$TINYPROXY_PORT) does NOT go through FORWARD — $BRIDGE_IP
-# is a local address on the VM's docker0 interface, so that traffic hits the INPUT
-# chain instead and is not controlled here. This jump is load-bearing for the
-# claude-agent → searxng:8080 intra-network path, which DOES traverse FORWARD.
+# Also jump for user-defined agent network traffic. claude-agent-net → tinyproxy
+# ($BRIDGE_IP:$TINYPROXY_PORT) does NOT go through FORWARD — $BRIDGE_IP is a
+# local address on the VM's docker0 interface, so that traffic hits INPUT and
+# CLAUDE_AGENT_IN below. This jump covers egress and the claude-agent →
+# searxng:8080 intra-network path, which DOES traverse FORWARD.
 if [ -n "\$AGENT_NET_CIDR" ]; then
   sudo iptables -C DOCKER-USER -s "\$AGENT_NET_CIDR" -j CLAUDE_AGENT 2>/dev/null \
     || sudo iptables -I DOCKER-USER 2 -s "\$AGENT_NET_CIDR" -j CLAUDE_AGENT
+fi
+
+# INPUT jumps match on source CIDR only, so one rule per container network
+# covers every VM-local destination address.
+sudo iptables -C INPUT -s "\$BRIDGE_CIDR" -j CLAUDE_AGENT_IN 2>/dev/null \
+  || sudo iptables -I INPUT 1 -s "\$BRIDGE_CIDR" -j CLAUDE_AGENT_IN
+if [ -n "\$AGENT_NET_CIDR" ]; then
+  sudo iptables -C INPUT -s "\$AGENT_NET_CIDR" -j CLAUDE_AGENT_IN 2>/dev/null \
+    || sudo iptables -I INPUT 1 -s "\$AGENT_NET_CIDR" -j CLAUDE_AGENT_IN
 fi
 FWEOF
 

@@ -631,3 +631,45 @@ def test_agent_net_cidr_probed_regardless_of_search():
     assert "LOCAL_SEARCH_ENABLED" not in fw[guard:jump], (
         "DOCKER-USER jump for AGENT_NET_CIDR must not depend on the search flag"
     )
+
+
+def test_input_chain_applied_atomically():
+    # Container → VM-local address (bridge gateways, 192.168.5.1) traverses INPUT,
+    # not FORWARD. CLAUDE_AGENT_IN governs it and is swapped in the same commit.
+    fw = _firewall_script()
+    stanza = _restore_stanza(fw)
+    assert ":CLAUDE_AGENT_IN - [0:0]" in stanza, (
+        "CLAUDE_AGENT_IN must be declared in the same restore stanza as CLAUDE_AGENT"
+    )
+    assert "-A CLAUDE_AGENT_IN -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN" in stanza
+    assert "-A CLAUDE_AGENT_IN -d \\$BRIDGE_IP -p tcp --dport \\$TINYPROXY_PORT -j RETURN" in stanza
+    reject = stanza.find("-A CLAUDE_AGENT_IN -j REJECT --reject-with icmp-admin-prohibited")
+    commit = stanza.find("COMMIT")
+    assert reject != -1 and reject < commit, "CLAUDE_AGENT_IN must end in a catch-all REJECT"
+    in_rules = re.findall(r"-A CLAUDE_AGENT_IN [^\"]*", stanza)
+    assert len(in_rules) == 3, f"CLAUDE_AGENT_IN should hold exactly 3 rules, got {in_rules}"
+    assert not re.search(r"iptables\s+-A\s+CLAUDE_AGENT_IN", fw), (
+        "individual `iptables -A CLAUDE_AGENT_IN` calls still present"
+    )
+
+
+def test_input_chain_jumps_by_source_only():
+    fw = _firewall_script()
+    restore = fw.find("iptables-restore")
+    for cidr in ("BRIDGE_CIDR", "AGENT_NET_CIDR"):
+        check = f'iptables -C INPUT -s "\\${cidr}" -j CLAUDE_AGENT_IN 2>/dev/null'
+        insert = f'iptables -I INPUT 1 -s "\\${cidr}" -j CLAUDE_AGENT_IN'
+        assert check in fw and insert in fw, f"idempotent INPUT jump for {cidr} missing"
+        assert fw.find(check) > restore, "INPUT jumps must follow the restore that creates the chain"
+    jump_lines = [l for l in fw.splitlines() if "-j CLAUDE_AGENT_IN" in l]
+    assert all(" -d " not in l for l in jump_lines), (
+        "INPUT jumps must match on source CIDR only so every VM-local address is covered"
+    )
+
+
+def test_dead_bridge_rules_removed_from_forward_chain():
+    # $BRIDGE_IP is VM-local, so these FORWARD-chain rules could never match.
+    stanza = _restore_stanza(_firewall_script())
+    assert not re.search(r"-A CLAUDE_AGENT -d \\\$BRIDGE_IP", stanza), (
+        "dead `-A CLAUDE_AGENT -d $BRIDGE_IP` rules still present"
+    )

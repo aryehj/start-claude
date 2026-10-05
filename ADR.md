@@ -358,8 +358,10 @@ Option 3.
 - **iptables** rules live in a dedicated `CLAUDE_AGENT` chain. `DOCKER-USER`
   (which the docker daemon explicitly leaves alone on restart) carries a
   single `-s $BRIDGE_CIDR -j CLAUDE_AGENT` jump. The child chain holds the
-  RETURN rules (established/related, proxy port, host inference port,
-  bridge DNS) and a catch-all REJECT. Re-applying is atomic: the chain is
+  RETURN rules (established/related, host inference port, the search-only
+  intra-network `8080` path) and a catch-all REJECT. Traffic to VM-local
+  addresses is governed separately by `CLAUDE_AGENT_IN` on INPUT (see the
+  2026-10-05 update below). Re-applying is atomic: the chain is
   rendered as an `iptables-restore --noflush` stanza whose `:CLAUDE_AGENT`
   declaration flushes and repopulates only that chain in one commit, so it
   is never observably empty. (An earlier `iptables -F` followed by separate
@@ -381,8 +383,8 @@ Option 3.
 - The LLM inside the container has no write path to the iptables rules or
   the allowlist. Modifying either requires a container escape plus VM root.
 - All outbound traffic except the established-return path, the proxy port,
-  the Ollama port, and DNS to the bridge gateway is REJECTed at the VM
-  level. Applications inside the container that don't honor `HTTPS_PROXY` /
+  and the Ollama port is REJECTed at the VM level, whether it is bound for
+  the internet (FORWARD) or for a service on the VM itself (INPUT). Applications inside the container that don't honor `HTTPS_PROXY` /
   `HTTP_PROXY` will simply fail to reach anything — an acceptable price,
   and arguably a feature (no silent bypass). *(Node.js apps — Claude Code
   and OpenCode — are handled by ADR-013's `global-agent` bootstrap.)*
@@ -393,6 +395,33 @@ Option 3.
 - Per-rule granularity is coarse (hostname match only). If the allowlist
   grows past ~200 entries or needs per-path / per-method semantics, squid
   with `acl ... dstdomain` is the conventional upgrade.
+
+### Update (2026-10-05): INPUT is governed by `CLAUDE_AGENT_IN`
+
+`CLAUDE_AGENT` hangs off DOCKER-USER, which is FORWARD only. Traffic from a
+container to an address that is local to the VM — either bridge gateway
+(`172.17.0.1`, the `claude-agent-net` gateway), `192.168.5.1` on eth0,
+`192.168.64.2` on col0 — is delivered through INPUT instead, and INPUT was
+`ACCEPT` with no rules. Observed from inside a running container: the VM's
+sshd answered on every one of those addresses, and dnsmasq accepted
+connections on `192.168.5.1:53`, a working resolver outside the allowlist.
+The `-d $BRIDGE_IP` RETURN rules for the proxy port and DNS in `CLAUDE_AGENT`
+could never match, for the same reason.
+
+A second chain, `CLAUDE_AGENT_IN`, is declared in the same
+`iptables-restore --noflush` stanza as `CLAUDE_AGENT`, so both swap in one
+commit. It holds established/related, a RETURN for
+`$BRIDGE_IP:$TINYPROXY_PORT`, and a catch-all REJECT. INPUT jumps to it for
+each container source CIDR (`$BRIDGE_CIDR`, and `claude-agent-net`'s CIDR when
+the network exists) with the same idempotent `-C || -I` pattern as the
+DOCKER-USER jumps. The jumps match on source only, so one rule per network
+covers every VM-local address. The dead `-d $BRIDGE_IP` rules were removed
+from `CLAUDE_AGENT`.
+
+Unaffected: container-name DNS (Docker's embedded resolver runs inside the
+container's namespace), inference and `searxng:8080` (FORWARD), and
+`colima ssh` / `docker build --network=host` (source is not a container
+CIDR).
 
 ## ADR-009: Set git identity via environment variables, not just gitconfig
 
