@@ -708,3 +708,47 @@ def test_firewall_smoke_covers_dns_and_input():
     for fn in ("test_external_dns_blackholed", "test_container_dns", "test_vm_local_services_closed"):
         assert f"{fn}() {{" in smoke, f"{fn} not defined in test-agent-firewall.sh"
         assert re.search(rf"^{fn}$", smoke, re.MULTILINE), f"{fn} defined but never called"
+
+
+# ── batch 3: container lifecycle ──────────────────────────────────────────────
+
+def _reattach_block() -> str:
+    start = _SCRIPT_TEXT.find('if docker container inspect "$CONTAINER_NAME"')
+    end = _SCRIPT_TEXT.find("# Fresh container:", start)
+    assert start != -1 and end != -1, "reattach block not found"
+    return _SCRIPT_TEXT[start:end]
+
+
+
+
+def test_agent_container_always_on_agent_net():
+    # One topology whatever the search flag says: toggling --disable-search
+    # against an existing container must not leave it on the wrong network.
+    agent_block = next((b for b in _BLOCKS if "IMAGE_TAG" in b), None)
+    assert agent_block is not None, "claude-agent docker run block not found"
+    assert '--network "$AGENT_NET_NAME"' in agent_block, (
+        "agent container must always join claude-agent-net"
+    )
+    assert "NETWORK_ARGS" not in _SCRIPT_TEXT, "search-conditional NETWORK_ARGS still present"
+
+
+def test_agent_net_created_regardless_of_search():
+    start = _SCRIPT_TEXT.find("# ── user-defined network")
+    end = _SCRIPT_TEXT.find("# ── inference backend preflight", start)
+    assert start != -1 and end != -1, "agent-net section not found"
+    section = _SCRIPT_TEXT[start:end]
+    assert 'docker network create "$AGENT_NET_NAME"' in section
+    assert "LOCAL_SEARCH_ENABLED" not in section, (
+        "claude-agent-net creation is still gated on the search flag"
+    )
+
+
+def test_reattach_connects_missing_agent_net():
+    block = _reattach_block()
+    assert ".NetworkSettings.Networks" in block, "reattach does not inspect the container's networks"
+    connect = block.find('docker network connect "$AGENT_NET_NAME" "$CONTAINER_NAME"')
+    assert connect != -1, "reattach must connect an old container to claude-agent-net"
+    assert connect < block.find("attach_existing"), "network connect must run before docker start"
+    assert "docker network disconnect" not in _SCRIPT_TEXT, (
+        "never disconnect: it can strand the container without a network and cuts live shells"
+    )

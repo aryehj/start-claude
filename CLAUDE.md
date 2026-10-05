@@ -97,6 +97,7 @@ If the named container already exists, it just starts and re-attaches it.
 - **`--reset-container` semantics.** Removes the container (and SearXNG container) but keeps the image and VM intact; mutually exclusive with `--rebuild`. Use when only container state needs resetting — avoids network egress for a full image rebuild.
 - **`NODE_USE_ENV_PROXY=1` makes Node honor the proxy natively.** Node 24 undici reads `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` when this flag is set — no shim packages needed. See ADR-013.
 - **webfetch allowed, websearch denied by default.** `opencode.json` generated with `permission.webfetch: "allow"` and `permission.websearch: "deny"`; webfetch egress bounded by the tinyproxy allowlist.
+- **One network topology.** The agent container always joins `claude-agent-net`, whatever the search flag says; `--disable-search` only controls SearXNG, the `8080` RETURN rule, and the MCP block. Older bridge-only containers are joined to the network on reattach via `docker network connect` (never `disconnect`). See ADR-048.
 - **SearXNG-backed websearch runs by default.** `searxng` container started alongside `claude-agent`; fans out through tinyproxy via `outgoing.proxies` (SearXNG silently ignores `HTTPS_PROXY`). See ADR-014. Pass `--disable-search` to skip.
 - **`host.docker.internal:host-gateway` set on `docker run`.** Belt-and-suspenders for Colima, where the mapping is not automatic.
 - **`docker build` runs with `--network=host`.** Bypasses the DOCKER-USER REJECT rule that blocks `apt-get update` in build-step containers. See ADR-011.

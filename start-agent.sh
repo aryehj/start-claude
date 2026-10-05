@@ -928,17 +928,17 @@ echo "==> VM network: bridge=$BRIDGE_IP cidr=$BRIDGE_CIDR host=$HOST_IP"
 # not on the default bridge. claude-agent-net provides this without changing
 # tinyproxy's Listen address — VM routing lets containers on this network reach
 # $BRIDGE_IP:$TINYPROXY_PORT through the default bridge interface.
-if $LOCAL_SEARCH_ENABLED; then
-  if [[ -z "$AGENT_NET_CIDR" ]]; then
-    vm_ssh docker network create "$AGENT_NET_NAME" >/dev/null
-    AGENT_NET_CIDR=$(vm_ssh docker network inspect "$AGENT_NET_NAME" -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null | tr -d '\r' || true)
-  fi
-  if [[ -z "$AGENT_NET_CIDR" ]]; then
-    AGENT_NET_CIDR="172.20.0.0/24"
-    echo "warning: could not discover $AGENT_NET_NAME CIDR; falling back to $AGENT_NET_CIDR" >&2
-  fi
-  echo "==> Agent network: $AGENT_NET_NAME cidr=$AGENT_NET_CIDR"
+# Created whatever the search flag says: the agent container is always on it,
+# so toggling --disable-search never leaves it on the wrong network.
+if [[ -z "$AGENT_NET_CIDR" ]]; then
+  vm_ssh docker network create "$AGENT_NET_NAME" >/dev/null
+  AGENT_NET_CIDR=$(vm_ssh docker network inspect "$AGENT_NET_NAME" -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null | tr -d '\r' || true)
 fi
+if [[ -z "$AGENT_NET_CIDR" ]]; then
+  AGENT_NET_CIDR="172.20.0.0/24"
+  echo "warning: could not discover $AGENT_NET_NAME CIDR; falling back to $AGENT_NET_CIDR" >&2
+fi
+echo "==> Agent network: $AGENT_NET_NAME cidr=$AGENT_NET_CIDR"
 
 # ── inference backend preflight (non-fatal, overlaps later work) ──────────────
 # Launched here — right after HOST_IP is known — as a background job so the
@@ -1735,6 +1735,15 @@ if docker container inspect "$CONTAINER_NAME" &>/dev/null; then
     if [[ "$existing_dns" != *"\"$DNS_BLACKHOLE\""* ]]; then
       echo "warning: container '$CONTAINER_NAME' predates the DNS blackhole and can still resolve external names. Recreate it with: start-agent.sh --reset-container" >&2
     fi
+    # Containers created with search disabled sat on the default bridge. Join
+    # them to claude-agent-net (additive; works stopped or running). Never
+    # disconnect: it can strand the container and cuts live shells.
+    existing_networks=$(docker container inspect -f '{{json .NetworkSettings.Networks}}' "$CONTAINER_NAME" 2>/dev/null || true)
+    if [[ "$existing_networks" != *"\"$AGENT_NET_NAME\""* ]]; then
+      echo "==> Connecting '$CONTAINER_NAME' to $AGENT_NET_NAME"
+      docker network connect "$AGENT_NET_NAME" "$CONTAINER_NAME" \
+        || echo "warning: could not connect '$CONTAINER_NAME' to $AGENT_NET_NAME; search will not resolve. Recreate it with: start-agent.sh --reset-container" >&2
+    fi
     running_state=$(docker container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo "false")
     if [[ "$running_state" == "true" ]]; then
       if docker top "$CONTAINER_NAME" 2>/dev/null | grep -q '/bin/bash'; then
@@ -1752,11 +1761,6 @@ fi
 sync_skills
 seed_agent_skills
 
-NETWORK_ARGS=()
-if $LOCAL_SEARCH_ENABLED; then
-  NETWORK_ARGS=(--network "$AGENT_NET_NAME")
-fi
-
 wait_inference_probe
 
 echo "==> Creating container '$CONTAINER_NAME'"
@@ -1764,6 +1768,7 @@ echo "    sandbox  : $SANDBOX_NAME  ($SANDBOX_ROOT)"
 echo "    project  : $PROJECT_DIR"
 echo "    proxy    : http://$BRIDGE_IP:$TINYPROXY_PORT  (allowlist: $ALLOWLIST_FILE, ro in container)"
 echo "    inference: $INFERENCE_LABEL at http://$HOST_IP:$INFERENCE_PORT$INFERENCE_STATUS"
+echo "    network  : $AGENT_NET_NAME"
 $LOCAL_SEARCH_ENABLED && echo "    search   : SearXNG on $AGENT_NET_NAME"
 
 rm -rf "$TMP_WORK"
@@ -1775,7 +1780,7 @@ exec docker run \
   --cpus "$CLAUDE_AGENT_CPUS" \
   --add-host=host.docker.internal:host-gateway \
   --dns "$DNS_BLACKHOLE" \
-  ${NETWORK_ARGS[@]+"${NETWORK_ARGS[@]}"} \
+  --network "$AGENT_NET_NAME" \
   -v "$SANDBOX_ROOT/projects:$SANDBOX_ROOT/projects" \
   -v "$CLAUDE_CONFIG_DIR:/root/.claude" \
   -v "$CLAUDE_JSON_FILE:/root/.claude.json" \

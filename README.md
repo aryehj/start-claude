@@ -547,7 +547,9 @@ arXiv, GitHub code search, Stack Exchange. Add an engine by editing
 `settings.yml` **and** `allowlist.txt` — both files must change, by design.
 
 Pass `--disable-search` (or set `CLAUDE_AGENT_DISABLE_SEARCH=1`) to skip
-SearXNG entirely. This also disables OpenCode websearch.
+SearXNG entirely. This also disables OpenCode websearch. The agent container
+stays on `claude-agent-net` either way, so the flag can be toggled against an
+existing container.
 
 See `ADR.md` §ADR-014 for the threat model and design rationale.
 

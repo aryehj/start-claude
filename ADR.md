@@ -3053,3 +3053,43 @@ The guardrail ADR-044 rests on is untouched: `--unshare-net` is gated solely on
 - ADR-043's sandbox remains the mechanism; this record documents that its secure
   path is unavailable under Apple Containers' `/proc` masking while the container
   runs as root.
+
+---
+
+## ADR-048: `start-agent.sh` container lifecycle: one network, start failures, pinned SearXNG
+
+**Date:** 2026-10-05
+**Status:** Accepted
+
+### Context
+
+Three lifecycle gaps in `start-agent.sh`:
+
+1. **Network topology depended on the search flag.** The agent container joined
+   `claude-agent-net` when search was enabled and the default bridge when it was
+   not, and reattach only compared the projects mount. Toggling `--disable-search`
+   against an existing container left it on the wrong network: search silently
+   failed one way round, and (before the ADR-010 Batch 2 fix) the firewall jump
+   for its source CIDR was skipped the other way round.
+
+### Decision
+
+**One topology.** `claude-agent-net` is created on every run and the agent
+container always joins it. The search flag now controls only whether SearXNG
+runs, whether the `8080` RETURN rule is emitted, and whether the MCP block is
+written. Existing containers not on the network are migrated on reattach with
+`docker network connect` (additive, works on stopped and running containers).
+`docker network disconnect` is never used: without a paired `connect bridge` it
+can leave a container with no network, and it cuts live shells. A migrated
+container keeps its default-bridge interface too; both source CIDRs are already
+covered by the `CLAUDE_AGENT` and `CLAUDE_AGENT_IN` jumps.
+
+This supersedes the last sentence of ADR-014's "User-defined network" paragraph
+(containers on the default bridge when search is off).
+
+### Consequences
+
+- `--disable-search` is safe to toggle against an existing container in either
+  direction.
+- Old bridge-only containers gain a second interface on the next run; if the
+  connect fails, the script warns and names `--reset-container`.
