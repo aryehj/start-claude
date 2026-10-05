@@ -337,6 +337,10 @@ AGENTS_SKILLS_DIR="$SANDBOX_ROOT/.sandbox_config/agents/skills"
 ALLOWLIST_FILE="$SANDBOX_ROOT/.sandbox_config/allowlist.txt"
 TINYPROXY_PORT=8888
 SEARXNG_CONTAINER="searxng"
+# Pinned by digest (the image running and known good on 2026-10-05). Bump it
+# deliberately when engines stop returning results: pull the new tag in the VM,
+# take `docker image inspect -f '{{index .RepoDigests 0}}'`, and --reset-container.
+SEARXNG_IMAGE="docker.io/searxng/searxng@sha256:c9100c29c14a77d5289263a671580226c3b8a396a1a0130d2f500f57076a0119"
 SEARXNG_DIR="$SANDBOX_ROOT/.sandbox_config/searxng"
 SEARXNG_SETTINGS_FILE="$SEARXNG_DIR/settings.yml"
 AGENT_NET_NAME="claude-agent-net"
@@ -1209,7 +1213,7 @@ if $LOCAL_SEARCH_ENABLED; then
       --name "$SEARXNG_CONTAINER" \
       --network "$AGENT_NET_NAME" \
       -v "$SEARXNG_SETTINGS_FILE:/etc/searxng/settings.yml:ro" \
-      docker.io/searxng/searxng >/dev/null
+      "$SEARXNG_IMAGE" >/dev/null
     echo "    searxng: created"
   fi
 else

@@ -793,3 +793,16 @@ def test_no_restart_policy_on_runtime_containers():
     # dockerd would start them at VM boot, before the firewall is installed.
     for block in _BLOCKS:
         assert "--restart" not in block, "restart policy found on a docker run:\n" + block
+
+
+def test_searxng_image_pinned_by_digest():
+    m = re.search(
+        r'^SEARXNG_IMAGE="docker\.io/searxng/searxng@sha256:[0-9a-f]{64}"$',
+        _SCRIPT_TEXT, re.MULTILINE,
+    )
+    assert m, "SEARXNG_IMAGE must be pinned by sha256 digest"
+    runs = [b for b in _BLOCKS if "SEARXNG_CONTAINER" in b]
+    assert runs and '"$SEARXNG_IMAGE"' in runs[0], "SearXNG docker run must use $SEARXNG_IMAGE"
+    refs = [l for l in _SCRIPT_TEXT.splitlines()
+            if "searxng/searxng" in l and not l.lstrip().startswith("#")]
+    assert len(refs) == 1, f"unpinned SearXNG image reference remains: {refs}"

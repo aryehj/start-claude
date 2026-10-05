@@ -3076,6 +3076,8 @@ Three lifecycle gaps in `start-agent.sh`:
    container that cannot start (the `RWLayer nil` case from ADR-041) died with
    Docker's bare "container is not running". SearXNG's `docker start … || true`
    hid the failure entirely.
+3. **SearXNG was the only unpinned runtime image.** `docker.io/searxng/searxng`
+   resolved to whatever `latest` was when the container was first created.
 
 ### Decision
 
@@ -3112,6 +3114,11 @@ containers at VM boot, before any rule exists. On the agent container it would
 also turn `exit` into a restart, because its main process is an interactive
 `bash`. The script already starts SearXNG on every run.
 
+**Pin SearXNG by digest.** One constant, `SEARXNG_IMAGE`, holds
+`docker.io/searxng/searxng@sha256:…`, taken on 2026-10-05 from the image already
+running and known to work. Bump it deliberately when engines stop returning
+results. `research.py` still runs its SearXNG unpinned (a follow-up).
+
 ### Consequences
 
 - `--disable-search` is safe to toggle against an existing container in either
@@ -3121,3 +3128,5 @@ also turn `exit` into a restart, because its main process is an interactive
 - A failed agent-container start ends the run with Docker's own error and a
   remedy, instead of a misleading "container is not running".
 - A broken SearXNG container is replaced on the next run without user action.
+- SearXNG upgrades are explicit. An existing SearXNG container keeps the image
+  it was created from until it is recreated (`--reset-container`).
