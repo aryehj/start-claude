@@ -8,6 +8,7 @@ from research import (
     _prune_subdomains,
     compose_denylist,
     denylist_to_squid_acl,
+    find_shadowing_route_devs,
     patch_vane_searxng_url,
     prune_orphan_cache_files,
     render_iptables_apply_script,
@@ -482,3 +483,30 @@ if __name__ == "__main__":
                 failed += 1
     print(f"\n{passed} passed, {failed} failed")
     sys.exit(1 if failed else 0)
+
+
+# ── find_shadowing_route_devs ─────────────────────────────────────────────────
+
+NET_ID = "ae57abf46c0abd013004c6c11a0ceca621857f55589fc1ef2272d3882ad74dfe"
+
+
+def test_shadowing_none_when_only_own_bridge():
+    assert find_shadowing_route_devs("br-ae57abf46c0a ", NET_ID) == []
+
+
+def test_shadowing_detects_stale_bridge():
+    devs = "br-4fd5c49c99e8 br-ae57abf46c0a "
+    assert find_shadowing_route_devs(devs, NET_ID) == ["br-4fd5c49c99e8"]
+
+
+def test_shadowing_dedupes_repeated_devs():
+    devs = "br-4fd5c49c99e8 br-4fd5c49c99e8 br-ae57abf46c0a"
+    assert find_shadowing_route_devs(devs, NET_ID) == ["br-4fd5c49c99e8"]
+
+
+def test_shadowing_empty_when_network_id_unknown():
+    assert find_shadowing_route_devs("br-4fd5c49c99e8 br-ae57abf46c0a", "") == []
+
+
+def test_shadowing_empty_route_list():
+    assert find_shadowing_route_devs("", NET_ID) == []

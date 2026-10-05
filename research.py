@@ -805,6 +805,15 @@ research_cidr=$(docker network inspect %RESEARCH_NET% \
   -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || true)
 echo "RESEARCH_NET_CIDR=$research_cidr"
 
+# research-net ID + every device holding a route inside its subnet. A stale
+# bridge from a previous network can keep a route for the same subnet and win
+# route selection, blackholing host->container traffic (incl. published ports).
+if [ -n "$research_cidr" ]; then
+  echo "RESEARCH_NET_ID=$(docker network inspect %RESEARCH_NET% -f '{{.Id}}' 2>/dev/null || true)"
+  echo "RESEARCH_NET_ROUTE_DEVS=$(ip -o route show root "$research_cidr" 2>/dev/null \
+    | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | tr '\n' ' ')"
+fi
+
 # Squid package + service status.
 if command -v squid >/dev/null 2>&1; then echo "SQUID_INSTALLED=true"; else echo "SQUID_INSTALLED=false"; fi
 if systemctl is-active --quiet squid 2>/dev/null; then echo "SQUID_ACTIVE=true"; else echo "SQUID_ACTIVE=false"; fi
@@ -887,6 +896,43 @@ def ensure_docker_network(config: VmConfig, facts: dict) -> None:
 
     config.research_net_cidr = cidr
     print(f"==> Research network: {RESEARCH_NET_NAME} cidr={cidr}")
+
+    shadowing = find_shadowing_route_devs(
+        facts.get("RESEARCH_NET_ROUTE_DEVS", ""), facts.get("RESEARCH_NET_ID", "")
+    )
+    if shadowing:
+        print(
+            f"warning: interface(s) {', '.join(shadowing)} also route {cidr} in the VM.\n"
+            f"These are likely stale bridges from a removed docker network; they can\n"
+            f"win route selection and make Vane unreachable at http://localhost:{config.vane_port}\n"
+            f"(connection reset). Verify with:\n"
+            f"    colima ssh -p {config.profile_name} -- ip route get <vane-container-ip>\n"
+            f"and remove each stale interface with:\n"
+            + "".join(
+                f"    colima ssh -p {config.profile_name} -- sudo ip link delete {dev}\n"
+                for dev in shadowing
+            ),
+            file=sys.stderr,
+            end="",
+        )
+
+
+def find_shadowing_route_devs(route_devs: str, network_id: str) -> list:
+    """Return devices other than research-net's own bridge that route its subnet.
+
+    route_devs is the space-separated `dev` column of `ip route show root <cidr>`;
+    network_id is research-net's full docker ID. Docker names a network's bridge
+    `br-<first 12 hex chars of ID>`. Returns [] when the ID is unknown, so a
+    failed probe never produces a false warning.
+    """
+    if not network_id:
+        return []
+    own_bridge = f"br-{network_id[:12]}"
+    seen: list = []
+    for dev in route_devs.split():
+        if dev != own_bridge and dev not in seen:
+            seen.append(dev)
+    return seen
 
 
 def install_squid(config: VmConfig, facts: dict) -> None:
