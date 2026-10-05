@@ -4,7 +4,7 @@
 
 - [x] Batch 1: security and correctness, small diffs (A1, A3, A4, B1, B4, B6, B7, C3)
 - [x] Batch 2: close the firewall gaps (F1 agent-net jump, F2 INPUT chain, F3 DNS blackhole, F4 smoke tests) — implemented (ca69bce, 4c7d42d, 1e65222, b0fc3be); check after the live smoke on the Mac passes
-- [ ] Batch 3: container lifecycle (L1 one topology, L2 start-failure handling, L3 SearXNG pin) — implemented (bd4bdf6, 06b7f51, 887d943); check after the live smoke on the Mac passes
+- [x] Batch 3: container lifecycle (L1 one topology, L2 start-failure handling, L3 SearXNG pin) — implemented (bd4bdf6, 06b7f51, 887d943); check after the live smoke on the Mac passes
 - [ ] Batch 4: allowlist (W1 validation, W2 shared template)
 - [ ] Batch 5: perf and cleanup (P1 reload handshakes, P2 `colima list` dedupe, P3 drop no-op limits, P4 `SCRIPT_DIR`)
 <!-- mark [x] as items land -->
