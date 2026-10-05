@@ -701,3 +701,10 @@ def test_reattach_warns_when_dns_blackhole_missing():
     )
     attach = block.find("attach_existing")
     assert block.find("HostConfig.Dns") < attach, "DNS check must run before attaching"
+
+
+def test_firewall_smoke_covers_dns_and_input():
+    smoke = (SCRIPT.parent / "tests" / "test-agent-firewall.sh").read_text()
+    for fn in ("test_external_dns_blackholed", "test_container_dns", "test_vm_local_services_closed"):
+        assert f"{fn}() {{" in smoke, f"{fn} not defined in test-agent-firewall.sh"
+        assert re.search(rf"^{fn}$", smoke, re.MULTILINE), f"{fn} defined but never called"

@@ -2,11 +2,11 @@
 # test-agent-firewall.sh — validate the start-agent.sh egress allowlist from
 # inside the running claude-agent container.
 #
-# Covers 5 of the 6 smoke tests documented in README.md. The 6th (allowlist
-# hot-reload) requires host-side actions and is not included here.
+# Covers every smoke test documented in README.md except allowlist hot-reload,
+# which requires host-side actions and is not included here.
 #
 # Exit 0 if every test either passes or is legitimately skipped (Ollama not
-# running). Exit 1 on any failure.
+# running, search disabled). Exit 1 on any failure.
 
 set -u
 
@@ -152,12 +152,84 @@ test_searxng_port_isolation() {
   fi
 }
 
+# ── 7. External DNS blackholed ───────────────────────────────────────────────
+# The agent container resolves through 192.0.2.1 (never routed), so external
+# names must not resolve. It should fail fast (REJECT), not after a resolver
+# timeout; a slow failure means queries are not leaving from the container's
+# namespace.
+test_external_dns_blackholed() {
+  local start end ms
+  start=$(date +%s%N)
+  if getent hosts example.com >/dev/null 2>&1; then
+    fail "external-dns-blackholed" "example.com resolved — DNS is a channel past the allowlist"
+    return
+  fi
+  end=$(date +%s%N)
+  ms=$(( (end - start) / 1000000 ))
+  if (( ms < 2000 )); then
+    pass "external-dns-blackholed: example.com did not resolve (${ms} ms)"
+  else
+    fail "external-dns-blackholed" "blocked, but took ${ms} ms (resolver timeout, not a REJECT)"
+  fi
+}
+
+# ── 8. Container-name DNS ────────────────────────────────────────────────────
+# Docker's embedded DNS must still resolve searxng on claude-agent-net.
+# Skip when search is disabled (the script strips the searxng MCP block).
+test_container_dns() {
+  if ! grep -q '"searxng"' /root/.config/opencode/opencode.json 2>/dev/null; then
+    skip "container-dns" "search disabled (no searxng MCP in opencode.json)"
+    return
+  fi
+  if getent hosts searxng >/dev/null 2>&1; then
+    pass "container-dns: searxng resolves"
+  else
+    fail "container-dns" "searxng does not resolve; embedded DNS is broken"
+  fi
+}
+
+# ── 9. VM-local services closed ──────────────────────────────────────────────
+# Traffic to the VM's own addresses goes through INPUT (CLAUDE_AGENT_IN): the
+# proxy port must connect, the VM's sshd must not.
+tcp_open() { timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null; }
+
+test_vm_local_services_closed() {
+  local proxy="${HTTPS_PROXY#http://}"
+  proxy="${proxy%/}"
+  local bridge_ip="${proxy%:*}" proxy_port="${proxy##*:}"
+  local gw_hex gw
+  gw_hex=$(awk '$2 == "00000000" { print $3; exit }' /proc/net/route)
+  if [[ -z "$bridge_ip" || -z "$gw_hex" ]]; then
+    fail "vm-local-services-closed" "could not determine proxy address or default gateway"
+    return
+  fi
+  gw=$(printf '%d.%d.%d.%d' "0x${gw_hex:6:2}" "0x${gw_hex:4:2}" "0x${gw_hex:2:2}" "0x${gw_hex:0:2}")
+
+  if tcp_open "$bridge_ip" "$proxy_port"; then
+    pass "vm-local-services-closed: proxy $bridge_ip:$proxy_port connects"
+  else
+    fail "vm-local-services-closed" "proxy $bridge_ip:$proxy_port refused; CLAUDE_AGENT_IN RETURN rule missing?"
+  fi
+
+  local addr
+  for addr in $(printf '%s\n' "$gw" "$bridge_ip" | sort -u); do
+    if tcp_open "$addr" 22; then
+      fail "vm-local-services-closed" "VM sshd reachable at $addr:22; CLAUDE_AGENT_IN not applied"
+    else
+      pass "vm-local-services-closed: $addr:22 refused"
+    fi
+  done
+}
+
 test_default_deny
 test_allowed_via_proxy
 test_denied_via_proxy
 test_ollama_carveout
 test_env_wiring
 test_searxng_port_isolation
+test_external_dns_blackholed
+test_container_dns
+test_vm_local_services_closed
 
 echo
 printf '==> %s%d passed%s, %s%d failed%s, %s%d skipped%s\n' \

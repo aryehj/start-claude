@@ -20,7 +20,7 @@ skills/                      — reusable Claude Code skills (back up of ~/.clau
 skills-agents/               — small-model ports of scope/build/wrap for Pi and OpenCode (seeded to ~/.agents/skills/)
 plans/                       — implementation plans written by /scope skill
 tests/                       — unit tests and infra smoke tests
-  test-agent-firewall.sh               — in-container firewall smoke tests for start-agent.sh (5 of 6 README cases + inter-container port isolation)
+  test-agent-firewall.sh               — in-container firewall smoke tests for start-agent.sh (all README cases but hot-reload: egress, DNS blackhole, VM-local services)
   test-cross-vm-isolation.sh           — host-driven cross-VM isolation test: claude-agent ↔ research cannot reach each other
   test_agent_sh.py                     — static checks: no host-port publish, pi integration invariants, sandbox trust-boundary
   test_dockerfile.py                   — static checks: pi and opencode CLI install lines in claude-agent.Dockerfile

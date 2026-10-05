@@ -449,14 +449,17 @@ dataset upload from inside the container.
 
 Run `tests/test-agent-firewall.sh` from inside the container to verify
 default-deny, allowlisted host, denied host, Ollama carve-out, env wiring,
-and inter-container port isolation:
+inter-container port isolation, the external DNS blackhole, container-name
+DNS, and that VM-local services (sshd) are closed while the proxy port is
+open:
 
 ```bash
 bash tests/test-agent-firewall.sh
 ```
 
 Exit 0 means all tests passed (the Ollama carve-out test is skipped, not
-failed, when Ollama isn't running on the host).
+failed, when Ollama isn't running on the host; the search tests are skipped
+under `--disable-search`).
 
 **Allowlist hot-reload.** The host-side fast path must update the filter
 without restarting the container. From the macOS host:
@@ -703,7 +706,7 @@ noted.
 
 | Script | What it tests | How to run |
 |--------|--------------|------------|
-| `test-agent-firewall.sh` | Firewall smoke tests from inside `claude-agent` (default-deny, proxy allow/deny, Ollama carve-out, env wiring, inter-container port isolation) | Run from inside the container: `bash tests/test-agent-firewall.sh` |
+| `test-agent-firewall.sh` | Firewall smoke tests from inside `claude-agent` (default-deny, proxy allow/deny, Ollama carve-out, env wiring, inter-container port isolation, DNS blackhole, container-name DNS, VM-local services closed) | Run from inside the container: `bash tests/test-agent-firewall.sh` |
 | `test-cross-vm-isolation.sh` | Cross-VM isolation: `claude-agent` and `research` containers cannot reach each other by name, port, or via `host.docker.internal:3000`. Positive test confirms inference carve-out still works. Skips if either VM is not running. | `./tests/test-cross-vm-isolation.sh` |
 | `test_agent_sh.py` | Static invariants for `start-agent.sh`: no host-port publish, sandbox trust boundary, Pi and skills wiring, warm-reattach batching, atomic firewall apply, secret handling, flag hygiene | `uv run --with pytest pytest tests/test_agent_sh.py` |
 | `test_dockerfile.py` | Static checks: pi and opencode CLI install lines in `claude-agent.Dockerfile` | `uv run --with pytest pytest tests/test_dockerfile.py` |
