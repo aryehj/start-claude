@@ -1014,3 +1014,9 @@ def test_inference_probe_skipped_on_reload():
     guard = section.find("if ! $RELOAD_ALLOWLIST; then")
     assert guard != -1, "inference probe launch is not skipped under --reload-allowlist"
     assert guard < section.find('case "$BACKEND" in') < section.rfind("\nfi\n")
+
+
+def test_single_colima_list_call():
+    calls = [l for l in _code_lines() if re.search(r"\bcolima list\b", l)]
+    assert len(calls) == 1, f"expected one colima list call, found {calls}"
+

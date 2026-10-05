@@ -428,10 +428,6 @@ PYEOF
 }
 
 # ── Colima VM bring-up ───────────────────────────────────────────────────────
-colima_profile_running() {
-  colima list -p "$COLIMA_PROFILE" --json 2>/dev/null | grep -q '"Running"'
-}
-
 destroy_colima_vm() {
   echo "==> Destroying Colima VM '$COLIMA_PROFILE'"
   colima delete -p "$COLIMA_PROFILE" --force 2>/dev/null || true
@@ -498,7 +494,10 @@ if $REBUILD; then
 fi
 
 # ── ensure the VM is running ─────────────────────────────────────────────────
-if ! colima_profile_running; then
+# One `colima list` serves both the running check and the sizing warning.
+# Taken after --rebuild's optional VM delete, so it is never stale.
+COLIMA_LIST_JSON=$(colima list -p "$COLIMA_PROFILE" --json 2>/dev/null || true)
+if ! grep -q '"Running"' <<<"$COLIMA_LIST_JSON"; then
   start_colima_vm
 else
   # Detect sandbox switch by checking whether $SANDBOX_ROOT appears in the
@@ -512,10 +511,9 @@ else
     start_colima_vm
   else
     # Warn if the running VM sizing differs from what was requested.
-    running_json=$(colima list -p "$COLIMA_PROFILE" --json 2>/dev/null || true)
-    if [[ -n "$running_json" ]]; then
+    if [[ -n "$COLIMA_LIST_JSON" ]]; then
       # One parse for both fields; colima reports memory in bytes.
-      running_sizing=$(printf '%s' "$running_json" | python3 -c '
+      running_sizing=$(printf '%s' "$COLIMA_LIST_JSON" | python3 -c '
 import json, sys
 d = json.loads(sys.stdin.read())
 cpus = d.get("cpus", "")
