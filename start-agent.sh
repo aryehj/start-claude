@@ -571,11 +571,14 @@ fi
 TMP_WORK=$(mktemp -d)
 PROBE_PID=""
 # Also reap the backgrounded inference probe (launched below): it is a
-# subshell, so kill its `colima ssh` children first, then the subshell.
+# subshell, so kill its `colima ssh` children first, then the subshell. The
+# silenced wait reaps it here; otherwise macOS bash prints a "Terminated: 15"
+# job notice, with the probe's source, when it reaps it later.
 on_exit() {
   if [[ -n "${PROBE_PID:-}" ]]; then
     pkill -P "$PROBE_PID" 2>/dev/null || true
     kill "$PROBE_PID" 2>/dev/null || true
+    wait "$PROBE_PID" 2>/dev/null || true
   fi
   rm -rf "$TMP_WORK"
 }
@@ -911,7 +914,7 @@ colima ssh -p "$COLIMA_PROFILE" -- sudo sh < "$TMP_WORK/firewall-apply.sh"
 if $RELOAD_ALLOWLIST; then
   entry_count=$(wc -l < "$TMP_WORK/filter" | tr -d ' ')
   echo "==> Allowlist reloaded ($entry_count entries, sandbox: $SANDBOX_NAME)"
-  exit 0  # on_exit kills the unread inference probe and removes TMP_WORK
+  exit 0  # on_exit reaps the unread inference probe and removes TMP_WORK
 fi
 
 # ── build the image if missing ───────────────────────────────────────────────

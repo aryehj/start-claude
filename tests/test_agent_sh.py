@@ -561,6 +561,32 @@ def test_exit_trap_kills_inference_probe():
     assert 'rm -rf "$TMP_WORK"' in body, "on_exit must still remove TMP_WORK"
 
 
+def test_exit_trap_reaps_probe_silently(tmp_path):
+    # Killing the probe from the EXIT trap made macOS bash print a job notice
+    # ("line N: PID Terminated: 15 { if ! probe_retry ...") on every early exit,
+    # e.g. --reload-allowlist. Reaping it with a stderr-silenced `wait` stops
+    # that. Linux bash 5 never prints the notice, so pin the shape statically...
+    body = _function_body("on_exit")
+    kill = body.find('kill "$PROBE_PID"')
+    reap = body.find('wait "$PROBE_PID" 2>/dev/null')
+    assert kill != -1 and reap > kill, "on_exit must reap the killed probe with a silenced wait"
+    # ...and run the real on_exit against a probe that outlives its children
+    # (probe_retry sleeps and retries), to prove the wait cannot hang.
+    script = (
+        f'TMP_WORK="{tmp_path}/work"; mkdir -p "$TMP_WORK"\n'
+        '{ while :; do sleep 1; done; } >/dev/null 2>&1 &\n'
+        'PROBE_PID=$!\n'
+        f'on_exit() {body}\n'
+        'trap on_exit EXIT\n'
+        'sleep 0.2\n'
+        'exit 0\n'
+    )
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    assert proc.returncode == 0
+    assert "Terminated" not in proc.stderr, proc.stderr
+    assert not (tmp_path / "work").exists()
+
+
 def test_reload_allowlist_rejects_rebuild_and_reset():
     # --rebuild/--reset-container combined with --reload-allowlist used to drop
     # the first flag silently; the combination must be rejected up front.
