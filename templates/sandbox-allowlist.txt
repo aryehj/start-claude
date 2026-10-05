@@ -1,19 +1,23 @@
-# sandbox-allowlist.txt — default-deny egress allowlist for Claude Code's
-# bubblewrap sandbox (sandbox.network.allowedDomains in settings.local.json).
+# sandbox-allowlist.txt — default-deny egress allowlist, shared by both
+# launchers. One bare domain per line; a domain 'd' covers 'd' and every
+# subdomain of 'd'. Comments start with '#'. Blank lines are ignored.
 #
-# start-claude.sh reads this file and expands each bare domain 'd' to both
-# 'd' (exact match) and '*.d' (all subdomains, any depth) when building the
-# allowedDomains array. Edit this file here in the template, then run:
-#   start-claude.sh --reseed-sandbox-allowlist
-# to apply the update to a project's settings.local.json.
+# start-agent.sh seeds a copy to $SANDBOX/.sandbox_config/allowlist.txt on
+# first run; tinyproxy suffix-matches it. Edit that copy on the macOS host and
+# run `start-agent.sh --reload-allowlist`. `start-agent.sh --reseed-allowlist`
+# resets the copy to this template.
 #
-# Philosophy (mirrors start-agent.sh allowlist):
+# start-claude.sh expands each 'd' to 'd' and '*.d' in the project's
+# .claude/settings.local.json (sandbox.network.allowedDomains).
+# `start-claude.sh --reseed-sandbox-allowlist` resets that list to this
+# template.
+#
+# Philosophy:
 #   - Read-only hosts only.
 #   - Write-capable hosts (github.com, container registries, huggingface.co,
-#     data upload repos) are intentionally omitted.
-#   - HTTPS git push to github.com is blocked under default config; add
-#     github.com to your project's settings.local.json to re-enable.
-#   - Comments start with '#'. Blank lines are ignored.
+#     data upload repos) are intentionally omitted, so HTTPS git push to
+#     github.com is blocked by default. Add the write host to your local copy
+#     (allowlist.txt or settings.local.json) to re-enable it.
 
 # === Anthropic / AI coding agents ===
 anthropic.com
@@ -23,11 +27,10 @@ opencode.ai
 
 # === Source control & code hosting ===
 # Read-only hosts only. github.com / gitlab.com / bitbucket.org are
-# intentionally omitted because the sandbox allowlist can't distinguish
+# intentionally omitted because a domain allowlist can't distinguish
 # reads from writes (PRs, pushes, issue comments). Tarball/raw fetches go
-# through codeload/githubusercontent. If you need `gh` or HTTPS push from
-# inside the sandbox, add the write host explicitly to your project's
-# settings.local.json.
+# through codeload/githubusercontent. If you need `gh` or HTTPS push, add the
+# write host explicitly to your local copy.
 githubusercontent.com
 githubassets.com
 codeload.github.com
@@ -55,7 +58,7 @@ hex.pm
 # === Container / image registries ===
 # Omitted by default (docker.io / quay.io / ghcr.io) — writes (image push)
 # aren't distinguishable from reads. Add back per-host if you pull images
-# from inside the sandbox.
+# from inside the container or sandbox.
 
 # === OS package repos ===
 debian.org
@@ -65,7 +68,7 @@ astral.sh
 
 # === Model & dataset hubs ===
 # huggingface.co omitted — supports model/dataset uploads. Add back if
-# you need HF downloads from inside the sandbox.
+# you need HF downloads from inside the container or sandbox.
 ollama.com
 
 # === General web & reference ===
@@ -271,7 +274,7 @@ justia.com
 oyez.org
 
 # === Major universities ===
-# Starter set; add institutions to your project's settings.local.json as needed.
+# Starter set; add institutions to your local copy as needed.
 mit.edu
 stanford.edu
 harvard.edu

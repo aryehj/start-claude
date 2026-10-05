@@ -576,11 +576,14 @@ def test_reload_allowlist_rejects_rebuild_and_reset():
     )
 
 
+_SEED_LINE = 'cat "$ALLOWLIST_TEMPLATE" > "$ALLOWLIST_FILE"'
+
+
 def test_reseed_allowlist_backs_up_existing_file():
     seed = _SCRIPT_TEXT.find("# ── seed allowlist")
-    heredoc = _SCRIPT_TEXT.find("<<'ALLOWLIST'", seed)
-    assert seed != -1 and heredoc != -1, "allowlist seed block not found"
-    before = _SCRIPT_TEXT[seed:heredoc]
+    write = _SCRIPT_TEXT.find(_SEED_LINE, seed)
+    assert seed != -1 and write != -1, "allowlist seed block not found"
+    before = _SCRIPT_TEXT[seed:write]
     assert re.search(r'cp "\$ALLOWLIST_FILE" "\$ALLOWLIST_FILE\.bak"', before), (
         "--reseed-allowlist must back up the curated allowlist before overwriting it"
     )
@@ -879,3 +882,37 @@ def test_reload_summary_counts_generated_filter():
     body = block.group(1)
     assert '"$TMP_WORK/filter"' in body, "reload summary must count the generated filter"
     assert '"$ALLOWLIST_FILE"' not in body, "reload summary must not grep the source allowlist"
+
+
+# ── shared allowlist template (W2) ───────────────────────────────────────────
+
+_TEMPLATE = SCRIPT.parent / "templates" / "sandbox-allowlist.txt"
+
+
+def test_allowlist_seeded_from_shared_template():
+    assert "<<'ALLOWLIST'" not in _SCRIPT_TEXT, "inline allowlist heredoc must be gone"
+    assert 'ALLOWLIST_TEMPLATE="$SCRIPT_DIR/templates/sandbox-allowlist.txt"' in _SCRIPT_TEXT
+    seed = _SCRIPT_TEXT.find("# ── seed allowlist")
+    end = _SCRIPT_TEXT.find("\nfi\n", seed)
+    block = "\n".join(l for l in _SCRIPT_TEXT[seed:end].splitlines()
+                      if not l.lstrip().startswith("#"))
+    # Written into the existing file, never replaced: allowlist.txt is a
+    # single-file bind mount, and a new inode would strand the container.
+    assert _SEED_LINE in block
+    assert not re.search(r"(^|\s)mv\s", block), "seed must not mv over the bind-mounted file"
+
+
+def test_allowlist_template_in_preflight():
+    pre = _SCRIPT_TEXT.find("# ── preflight")
+    end = _SCRIPT_TEXT.find("# ── seed allowlist", pre)
+    assert '-f "$ALLOWLIST_TEMPLATE"' in _SCRIPT_TEXT[pre:end], (
+        "the shared allowlist template is a hard dependency but is not checked in preflight"
+    )
+
+
+def test_template_entries_pass_filter_generator(tmp_path):
+    text = _TEMPLATE.read_text()
+    lines, err = _run_filter_generator(tmp_path, text)
+    assert err == "", f"template entries rejected by the filter generator:\n{err}"
+    entries = [l for l in (r.split("#", 1)[0].strip() for r in text.splitlines()) if l]
+    assert len(lines) == len(entries)

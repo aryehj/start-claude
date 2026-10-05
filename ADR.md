@@ -2769,7 +2769,9 @@ rather than being elided.
 - Refactoring `start-agent.sh` to share `templates/sandbox-allowlist.txt`. Its
   enforcement path (tinyproxy suffix matching, `:ro` mount) differs from the sandbox
   wildcard semantics; sharing the file would couple two independent mechanisms.
-  Noted as a possible later DRY step.
+  Noted as a possible later DRY step. *Superseded by ADR-049, which shares the
+  file: both mechanisms read bare domains with subdomain coverage, so the entries
+  mean the same thing to each.*
 
 ### Consequences
 
@@ -3133,14 +3135,14 @@ results. `research.py` still runs its SearXNG unpinned (a follow-up).
 
 ---
 
-## ADR-049: `start-agent.sh` allowlist: validated entries
+## ADR-049: `start-agent.sh` allowlist: validated entries, one shared template
 
 **Date:** 2026-10-05
 **Status:** Accepted
 
 ### Context
 
-`generate_filter_file` turned every non-comment line of `allowlist.txt` into
+**Validation.** `generate_filter_file` turned every non-comment line of `allowlist.txt` into
 `(^|\.)<re.escape(line)>$`. A pasted `https://foo.com` or `foo.com/path`
 became a pattern that can never match a hostname, so the entry silently did
 nothing and the user saw an unexplained 403. A single label such as `com`
@@ -3148,9 +3150,13 @@ would have allowed a whole TLD. `re.escape` also emitted `\-` for hyphenated
 domains (`rust-lang.org`), which POSIX ERE leaves undefined (glibc tolerates
 it; tinyproxy's regex library is not guaranteed to).
 
+**Two copies of one list.** The seed heredoc in `start-agent.sh` and
+`templates/sandbox-allowlist.txt` (ADR-044) carried the same 227 entries,
+maintained by hand. Only the header and a few comment lines differed.
+
 ### Decision
 
-Per non-comment line, the generator:
+**Validation.** Per non-comment line, the generator:
 
 1. Lowercases, and drops a leading `*.` and a trailing `.`, so entries copied
    from `sandbox.network.allowedDomains`-style lists keep working. Suffix
@@ -3165,8 +3171,26 @@ Per non-comment line, the generator:
 The `--reload-allowlist` summary counts the lines of the generated filter
 rather than the non-comment lines of the source, so it reports live entries.
 
+**One template.** `start-agent.sh` seeds (and `--reseed-allowlist` reseeds)
+`allowlist.txt` from `templates/sandbox-allowlist.txt`, the file
+`start-claude.sh` already reads. The filename stays, so `start-claude.sh`, its
+tests and ADR-044 need no rename. The header and the per-script comment lines
+are reworded to describe both consumers. The template is checked in preflight.
+The seed writes **into** the existing file (`cat template > allowlist.txt`),
+never `mv`: the file is a single-file bind mount, and a new inode would leave
+the container looking at the old one. The `.bak` backup is unchanged. This
+supersedes ADR-044's non-goal of keeping the two lists separate: both
+mechanisms take bare domains and cover subdomains (tinyproxy by suffix match,
+`start-claude.sh` by expanding `d` to `d` and `*.d`), so an entry means the
+same thing to each.
+
 ### Consequences
 
 - A malformed entry is visible on every run instead of failing silently.
 - A rejected line is dropped, not repaired. Fixing it is the user's call.
+- One edit to the template reaches both launchers. Existing sandboxes and
+  projects keep their copies until `--reseed-allowlist` /
+  `--reseed-sandbox-allowlist`.
+- A test runs the filter generator over the template, so a template entry that
+  `start-agent.sh` would reject fails CI.
 

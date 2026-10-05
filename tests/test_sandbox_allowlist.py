@@ -54,6 +54,18 @@ def test_allowlist_excludes_github_com():
     )
 
 
+def test_allowlist_header_names_both_consumers():
+    """The template is shared by start-agent.sh and start-claude.sh; its header says so."""
+    header = []
+    for line in ALLOWLIST.read_text().splitlines():
+        if not line.startswith('#'):
+            break
+        header.append(line)
+    header = "\n".join(header)
+    assert 'start-agent.sh' in header and 'start-claude.sh' in header
+    assert '--reload-allowlist' in header and '--reseed-sandbox-allowlist' in header
+
+
 def test_allowlist_excludes_wildcards():
     """Template stores bare domains only; expansion to *.d is done by the script."""
     domains = _parse_domains()

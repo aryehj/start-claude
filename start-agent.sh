@@ -73,8 +73,9 @@ OPTIONS:
                          allowlist.txt and reload tinyproxy. Fast path; does
                          not restart the container.
   --reseed-allowlist     Overwrite the sandbox's allowlist.txt with the
-                         built-in default (previous file kept as
-                         allowlist.txt.bak), then reload. Use after pulling repo
+                         repo template templates/sandbox-allowlist.txt
+                         (previous file kept as allowlist.txt.bak), then
+                         reload. Use after pulling repo
                          updates that added new entries to the default list.
                          --reload-allowlist and --reseed-allowlist cannot be
                          combined with --rebuild or --reset-container.
@@ -335,6 +336,8 @@ OPENCODE_DATA_DIR="$SANDBOX_ROOT/.sandbox_config/opencode/data"
 PI_CONFIG_DIR="$SANDBOX_ROOT/.sandbox_config/pi"
 AGENTS_SKILLS_DIR="$SANDBOX_ROOT/.sandbox_config/agents/skills"
 ALLOWLIST_FILE="$SANDBOX_ROOT/.sandbox_config/allowlist.txt"
+# Shared with start-claude.sh, which turns it into sandbox.network.allowedDomains.
+ALLOWLIST_TEMPLATE="$SCRIPT_DIR/templates/sandbox-allowlist.txt"
 TINYPROXY_PORT=8888
 SEARXNG_CONTAINER="searxng"
 # Pinned by digest (the image running and known good on 2026-10-05). Bump it
@@ -370,6 +373,10 @@ if [[ ! -f "$DOCKERFILE_PATH" ]]; then
   echo "error: Dockerfile not found at $DOCKERFILE_PATH" >&2
   exit 1
 fi
+if [[ ! -f "$ALLOWLIST_TEMPLATE" ]]; then
+  echo "error: allowlist template not found at $ALLOWLIST_TEMPLATE" >&2
+  exit 1
+fi
 
 # ── seed allowlist (first run only) ──────────────────────────────────────────
 mkdir -p "$(dirname "$ALLOWLIST_FILE")"
@@ -378,294 +385,9 @@ if [[ ! -f "$ALLOWLIST_FILE" ]] || $RESEED_ALLOWLIST; then
     cp "$ALLOWLIST_FILE" "$ALLOWLIST_FILE.bak"
     echo "==> Backed up existing allowlist to $ALLOWLIST_FILE.bak"
   fi
-  cat > "$ALLOWLIST_FILE" <<'ALLOWLIST'
-# start-agent allowlist — edit on the macOS host.
-# Apply changes:  start-agent.sh --reload-allowlist
-# Suffix match:   'github.com' also matches 'api.github.com'.
-# Comments start with '#'.
-
-# === Anthropic / AI coding agents ===
-anthropic.com
-claude.ai
-claude.com
-opencode.ai
-
-# === Source control & code hosting ===
-# Read-only hosts only. github.com / gitlab.com / bitbucket.org are
-# intentionally omitted because the HTTP-proxy allowlist can't distinguish
-# reads from writes (PRs, pushes, issue comments). Tarball/raw fetches go
-# through codeload/githubusercontent. If you need `gh` or HTTPS push from
-# inside the container, add the write host explicitly.
-githubusercontent.com
-githubassets.com
-codeload.github.com
-git-scm.com
-
-# === Package registries ===
-npmjs.org
-npmjs.com
-yarnpkg.com
-nodejs.org
-pypi.org
-pythonhosted.org
-crates.io
-rust-lang.org
-rubygems.org
-ruby-lang.org
-packagist.org
-php.net
-pkg.go.dev
-proxy.golang.org
-golang.org
-go.dev
-hex.pm
-
-# === Container / image registries ===
-# Omitted by default (docker.io / quay.io / ghcr.io) — writes (image push)
-# aren't distinguishable from reads at the proxy. Add back if you pull
-# images from inside the container.
-
-# === OS package repos ===
-debian.org
-ubuntu.com
-deb.nodesource.com
-astral.sh
-
-# === Model & dataset hubs ===
-# huggingface.co omitted — supports model/dataset uploads. Add back if
-# you need HF downloads from inside the container.
-ollama.com
-
-# === General web & reference ===
-wikipedia.org
-wikimedia.org
-wikidata.org
-britannica.com
-mozilla.org
-developer.mozilla.org
-stackoverflow.com
-stackexchange.com
-archive.org
-archive.ph
-archive.today
-
-# === Search engines ===
-google.com
-duckduckgo.com
-bing.com
-search.brave.com
-api.qwant.com
-kagi.com
-# api.github.com — targeted entry for SearXNG's GitHub code-search engine.
-# Does NOT enable github.com web writes (push, PR, issue comments).
-api.github.com
-
-# === Biomedical / life sciences ===
-ncbi.nlm.nih.gov
-nlm.nih.gov
-nih.gov
-europepmc.org
-biorxiv.org
-medrxiv.org
-chemrxiv.org
-eartharxiv.org
-plos.org
-frontiersin.org
-mdpi.com
-biomedcentral.com
-elifesciences.org
-nature.com
-cell.com
-science.org
-sciencemag.org
-mayoclinic.org
-medlineplus.gov
-nice.org.uk
-
-# === Physical sciences, engineering, math, CS ===
-arxiv.org
-semanticscholar.org
-openalex.org
-dimensions.ai
-oa.mg
-core.ac.uk
-base-search.net
-doaj.org
-dblp.org
-acm.org
-ieee.org
-aps.org
-aip.org
-acs.org
-rsc.org
-iop.org
-ams.org
-pnas.org
-royalsocietypublishing.org
-jamanetwork.com
-nejm.org
-bmj.com
-thelancet.com
-paperswithcode.com
-openreview.net
-distill.pub
-
-# === Social sciences, humanities, general journals ===
-jstor.org
-ssrn.com
-crossref.org
-doi.org
-orcid.org
-sciencedirect.com
-springer.com
-link.springer.com
-springernature.com
-wiley.com
-onlinelibrary.wiley.com
-tandfonline.com
-sagepub.com
-cambridge.org
-oup.com
-muse.jhu.edu
-
-# === Data repositories & open science ===
-# Omitted by default — zenodo/figshare/osf/dataverse/datadryad/kaggle all
-# support authenticated uploads. Add back per-host if you need reads.
-
-# === Government / statistical / standards ===
-nasa.gov
-cdc.gov
-fda.gov
-nsf.gov
-census.gov
-noaa.gov
-usgs.gov
-bls.gov
-bea.gov
-loc.gov
-gov.uk
-who.int
-europa.eu
-sec.gov
-supremecourt.gov
-federalregister.gov
-congress.gov
-uscourts.gov
-govinfo.gov
-cfpb.gov
-ftc.gov
-gao.gov
-usda.gov
-epa.gov
-data.gov
-clinicaltrials.gov
-icpsr.umich.edu
-federalreserve.gov
-fred.stlouisfed.org
-worldbank.org
-imf.org
-oecd.org
-un.org
-unicef.org
-wto.org
-
-# === News & periodicals for research context ===
-nytimes.com
-economist.com
-ft.com
-reuters.com
-apnews.com
-bbc.com
-bbc.co.uk
-washingtonpost.com
-theatlantic.com
-newyorker.com
-theguardian.com
-wsj.com
-bloomberg.com
-npr.org
-politico.com
-propublica.org
-
-# === Science publications & magazines ===
-quantamagazine.org
-scientificamerican.com
-technologyreview.com
-arstechnica.com
-wired.com
-newscientist.com
-nautil.us
-aeon.co
-
-# === Community & discussion ===
-reddit.com
-news.ycombinator.com
-lesswrong.com
-lobste.rs
-metafilter.com
-slashdot.org
-
-# === Software & language docs ===
-readthedocs.io
-readthedocs.org
-hexdocs.pm
-elixir-lang.org
-kotlinlang.org
-scala-lang.org
-clojure.org
-haskell.org
-kubernetes.io
-docs.docker.com
-docs.kernel.org
-man7.org
-gnu.org
-devdocs.io
-
-# === Standards & specs ===
-w3.org
-whatwg.org
-ietf.org
-rfc-editor.org
-iso.org
-unicode.org
-schema.org
-ecma-international.org
-khronos.org
-
-# === Legal & regulatory ===
-courtlistener.com
-law.cornell.edu
-justia.com
-oyez.org
-
-# === Major universities ===
-# Starter set; add institutions to the sandbox's allowlist.txt as needed.
-mit.edu
-stanford.edu
-harvard.edu
-berkeley.edu
-princeton.edu
-yale.edu
-columbia.edu
-cmu.edu
-caltech.edu
-uchicago.edu
-cornell.edu
-upenn.edu
-northwestern.edu
-ucla.edu
-umich.edu
-ox.ac.uk
-cam.ac.uk
-ucl.ac.uk
-lse.ac.uk
-imperial.ac.uk
-ed.ac.uk
-ethz.ch
-epfl.ch
-mpg.de
-utoronto.ca
-ALLOWLIST
+  # Write into the existing file, never mv over it: allowlist.txt is a
+  # single-file bind mount, and a new inode would leave the container on the old one.
+  cat "$ALLOWLIST_TEMPLATE" > "$ALLOWLIST_FILE"
   if $RESEED_ALLOWLIST; then
     echo "==> Reseeded allowlist at $ALLOWLIST_FILE (sandbox: $SANDBOX_NAME)"
   else

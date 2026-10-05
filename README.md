@@ -122,7 +122,8 @@ project's `.claude/settings.local.json`. The default list covers Anthropic,
 common package registries (npm, PyPI, crates.io, etc.), and a broad set of
 reference, research, and documentation hosts. It is sourced from
 `templates/sandbox-allowlist.txt` in this repo; each bare domain `d` is expanded
-to both `d` (exact) and `*.d` (all subdomains).
+to both `d` (exact) and `*.d` (all subdomains). The same file seeds
+`start-agent.sh`'s allowlist.
 
 **Sandboxed bash commands** (`curl`, `git`, `uv`, etc.) can only reach hosts on
 this list — all others are blocked at the kernel level (network namespace +
@@ -301,7 +302,7 @@ start-agent.sh --reset-container
 # Apply edits to the allowlist without touching the running container
 start-agent.sh --reload-allowlist
 
-# Replace the allowlist with the built-in default (old file saved as
+# Replace the allowlist with templates/sandbox-allowlist.txt (old file saved as
 # allowlist.txt.bak), then reload. Neither allowlist flag combines with
 # --rebuild or --reset-container.
 start-agent.sh --reseed-allowlist
@@ -324,7 +325,8 @@ start-agent.sh --reseed-global-claudemd
 First run brings up the Colima VM (`claude-agent` profile) with
 `--mount $SANDBOX_ROOT:w`, installs `tinyproxy` inside it, builds
 `claude-agent:latest` from `dockerfiles/claude-agent.Dockerfile`, seeds
-the allowlist at `$SANDBOX_ROOT/.sandbox_config/allowlist.txt`, applies
+the allowlist at `$SANDBOX_ROOT/.sandbox_config/allowlist.txt` from
+`templates/sandbox-allowlist.txt`, applies
 iptables rules, and drops you into a bash shell inside the container.
 
 Subsequent runs from the same sandbox reattach in a few seconds. Switching
@@ -436,9 +438,11 @@ Suffix matching applies — `github.com` covers `api.github.com`,
 and a trailing `.` are dropped, and anything else (a URL such as
 `https://foo.com`, a path, a port, a single label such as `com`) is skipped
 with a `warning: allowlist.txt:N: ...` line on stderr. The
-`--reload-allowlist` summary counts the entries actually loaded. The file is seeded on first run with a permissive
-dev/research list (Anthropic, package registries, major scholarly publishers,
-etc.). Prune it to match your actual usage.
+`--reload-allowlist` summary counts the entries actually loaded. The file is
+seeded on first run from `templates/sandbox-allowlist.txt` (the list
+`start-claude.sh` also uses), a permissive dev/research list (Anthropic,
+package registries, major scholarly publishers, etc.). Prune it to match
+your actual usage.
 
 The seed intentionally **omits write-capable hosts** that can't be split from
 their read surface at the HTTP-proxy layer: `github.com`, `gitlab.com`,
