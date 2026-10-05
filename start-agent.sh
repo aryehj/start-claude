@@ -1188,8 +1188,22 @@ if ! docker image inspect "$IMAGE_TAG" &>/dev/null; then
 fi
 
 # ── SearXNG container lifecycle ──────────────────────────────────────────────
+# SearXNG is stateless (settings are bind-mounted), so a container that fails
+# to start, or exits straight away, is removed and recreated. No restart
+# policy: dockerd would start it at VM boot, before the firewall exists.
 if $LOCAL_SEARCH_ENABLED; then
   echo "==> Starting SearXNG container"
+  if docker container inspect "$SEARXNG_CONTAINER" &>/dev/null; then
+    searxng_err=""
+    if searxng_err=$(docker start "$SEARXNG_CONTAINER" 2>&1 >/dev/null) \
+        && [[ "$(docker container inspect -f '{{.State.Running}}' "$SEARXNG_CONTAINER" 2>/dev/null)" == "true" ]]; then
+      echo "    searxng: started (existing container)"
+    else
+      echo "warning: SearXNG container failed to start; recreating it." >&2
+      [[ -n "$searxng_err" ]] && printf '%s\n' "$searxng_err" | sed 's/^/    /' >&2
+      docker rm -f "$SEARXNG_CONTAINER" >/dev/null 2>&1 || true
+    fi
+  fi
   if ! docker container inspect "$SEARXNG_CONTAINER" &>/dev/null; then
     docker run -d \
       --name "$SEARXNG_CONTAINER" \
@@ -1197,9 +1211,6 @@ if $LOCAL_SEARCH_ENABLED; then
       -v "$SEARXNG_SETTINGS_FILE:/etc/searxng/settings.yml:ro" \
       docker.io/searxng/searxng >/dev/null
     echo "    searxng: created"
-  else
-    docker start "$SEARXNG_CONTAINER" >/dev/null || true
-    echo "    searxng: started (existing container)"
   fi
 else
   if docker container inspect "$SEARXNG_CONTAINER" &>/dev/null; then
@@ -1716,7 +1727,17 @@ wait_inference_probe() {
 
 attach_existing() {
   echo "==> Attaching to existing container '$CONTAINER_NAME'"
-  docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  # Report a failed start instead of letting docker exec die with a bare
+  # "container is not running". No automatic rm: the container's root
+  # filesystem may hold tools the user installed.
+  local start_err=""
+  if ! start_err=$(docker start "$CONTAINER_NAME" 2>&1 >/dev/null) \
+      || [[ "$(docker container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null)" != "true" ]]; then
+    echo "error: container '$CONTAINER_NAME' failed to start." >&2
+    [[ -n "$start_err" ]] && printf '%s\n' "$start_err" | sed 's/^/    /' >&2
+    echo "  If it keeps failing, recreate it (keeps the image): start-agent.sh --reset-container" >&2
+    exit 1
+  fi
   wait_inference_probe
   rm -rf "$TMP_WORK"
   trap - EXIT

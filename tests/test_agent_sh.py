@@ -719,6 +719,11 @@ def _reattach_block() -> str:
     return _SCRIPT_TEXT[start:end]
 
 
+def _searxng_lifecycle() -> str:
+    start = _SCRIPT_TEXT.find("# ── SearXNG container lifecycle")
+    end = _SCRIPT_TEXT.find("# ── host-side persistent state dirs", start)
+    assert start != -1 and end != -1, "SearXNG lifecycle section not found"
+    return _SCRIPT_TEXT[start:end]
 
 
 def test_agent_container_always_on_agent_net():
@@ -752,3 +757,39 @@ def test_reattach_connects_missing_agent_net():
     assert "docker network disconnect" not in _SCRIPT_TEXT, (
         "never disconnect: it can strand the container without a network and cuts live shells"
     )
+
+
+def test_agent_start_failure_reported_not_swallowed():
+    body = _function_body("attach_existing")
+    assert '>/dev/null 2>&1 || true' not in body, "attach_existing still swallows docker start failures"
+    assert "{{.State.Running}}" in body, "attach_existing must check the container is running"
+    assert "--reset-container" in body and "exit 1" in body, (
+        "a failed start must exit non-zero and name the --reset-container remedy"
+    )
+    assert "docker rm" not in body, (
+        "the agent container holds user-installed state; never auto-remove it"
+    )
+    assert body.find("{{.State.Running}}") < body.find("exec docker exec"), (
+        "running check must come before exec"
+    )
+
+
+def test_searxng_start_failure_self_heals():
+    section = _searxng_lifecycle()
+    assert 'docker start "$SEARXNG_CONTAINER" >/dev/null || true' not in section, (
+        "SearXNG start failure is still swallowed"
+    )
+    assert "{{.State.Running}}" in section, "SearXNG start must verify the container is running"
+    rm = section.find('docker rm -f "$SEARXNG_CONTAINER"')
+    run = section.find("docker run -d")
+    assert rm != -1 and run != -1 and rm < run, (
+        "a failed SearXNG start must remove the container and fall through to docker run"
+    )
+    runs = [b for b in _BLOCKS if "SEARXNG_CONTAINER" in b]
+    assert len(runs) == 1, f"expected one SearXNG docker run block, got {len(runs)}"
+
+
+def test_no_restart_policy_on_runtime_containers():
+    # dockerd would start them at VM boot, before the firewall is installed.
+    for block in _BLOCKS:
+        assert "--restart" not in block, "restart policy found on a docker run:\n" + block

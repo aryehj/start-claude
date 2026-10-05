@@ -3071,6 +3071,11 @@ Three lifecycle gaps in `start-agent.sh`:
    against an existing container left it on the wrong network: search silently
    failed one way round, and (before the ADR-010 Batch 2 fix) the firewall jump
    for its source CIDR was skipped the other way round.
+2. **Start failures were swallowed.** `attach_existing` ran
+   `docker start … >/dev/null 2>&1 || true` and then `exec docker exec`, so a
+   container that cannot start (the `RWLayer nil` case from ADR-041) died with
+   Docker's bare "container is not running". SearXNG's `docker start … || true`
+   hid the failure entirely.
 
 ### Decision
 
@@ -3087,9 +3092,32 @@ covered by the `CLAUDE_AGENT` and `CLAUDE_AGENT_IN` jumps.
 This supersedes the last sentence of ADR-014's "User-defined network" paragraph
 (containers on the default bridge when search is off).
 
+**Start failures: report for the agent container, self-heal for SearXNG.**
+Both capture `docker start`'s stderr and then check `.State.Running`.
+
+- *Agent container:* on failure, print the captured stderr and exit non-zero
+  naming `start-agent.sh --reset-container`. It is **not** removed
+  automatically: unlike `research.py`'s daemons it is a long-lived dev
+  environment whose root filesystem may hold tools the user installed, and many
+  start failures (missing network, mount not ready) are fixable without
+  destroying it.
+- *SearXNG:* stateless (settings are bind-mounted), so it gets `research.py`'s
+  `start_or_recreate` semantics: print the stderr, `docker rm -f`, and fall
+  through to the normal `docker run`.
+
+**No `--restart unless-stopped` on either container**, unlike ADR-041. The
+iptables rules are not persisted in the VM; the script installs them on every
+run before any container starts. A restart policy would have dockerd start the
+containers at VM boot, before any rule exists. On the agent container it would
+also turn `exit` into a restart, because its main process is an interactive
+`bash`. The script already starts SearXNG on every run.
+
 ### Consequences
 
 - `--disable-search` is safe to toggle against an existing container in either
   direction.
 - Old bridge-only containers gain a second interface on the next run; if the
   connect fails, the script warns and names `--reset-container`.
+- A failed agent-container start ends the run with Docker's own error and a
+  remedy, instead of a misleading "container is not running".
+- A broken SearXNG container is replaced on the next run without user action.
