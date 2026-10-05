@@ -954,38 +954,48 @@ def _code_lines() -> list[str]:
     return [l for l in _SCRIPT_TEXT.splitlines() if not l.lstrip().startswith("#")]
 
 
-def _render_push_script(tmp_path, active: str) -> str:
-    """Run write_tinyproxy_push on sample files; return the generated VM script."""
+_SAMPLE_CONF = 'Port 8888\nFilterDefaultDeny Yes\nFilter "/etc/tinyproxy/filter"\n'
+
+
+def _render_push_script(tmp_path, active: str, conf_text: str = _SAMPLE_CONF,
+                        path: str = "/usr/bin:/bin"):
+    """Run write_tinyproxy_push on sample files.
+
+    Returns (exit code, stderr, generated VM script or None).
+    """
     import subprocess
     conf = tmp_path / "tinyproxy.conf"
     filt = tmp_path / "filter"
-    conf.write_text('Port 8888\nFilter "/etc/tinyproxy/filter"\n')
+    conf.write_text(conf_text)
     filt.write_text("".join(f"(^|\\.)host{i}-x\\.example$\n" for i in range(300)))
     fn = "write_tinyproxy_push() " + _function_body("write_tinyproxy_push")
-    subprocess.run(
+    r = subprocess.run(
         ["bash", "-c", f"set -eo pipefail\n{fn}\nwrite_tinyproxy_push"],
-        env={"PATH": "/usr/bin:/bin", "TMP_WORK": str(tmp_path),
+        env={"PATH": path, "TMP_WORK": str(tmp_path),
              "NEW_PROXY_HASH": "abc123", "TINYPROXY_ACTIVE": active},
-        check=True,
+        capture_output=True, text=True,
     )
-    return (tmp_path / "tinyproxy-push.sh").read_text()
+    out = tmp_path / "tinyproxy-push.sh"
+    return r.returncode, r.stderr, (out.read_text() if out.exists() else None)
 
 
-def _run_push_script(tmp_path, script: str) -> list[str]:
+def _run_push_script(tmp_path, script: str, expect_ok: bool = True) -> list[str]:
     """Execute the VM script against a fake /etc/tinyproxy; return systemctl calls."""
     import subprocess
     etc = tmp_path / "etc"
-    etc.mkdir()
+    etc.mkdir(exist_ok=True)
     log = tmp_path / "systemctl.log"
     stub = f'systemctl() {{ echo "$*" >> "{log}"; }}\n'
     script = stub + script.replace("/etc/tinyproxy/", f"{etc}/")
-    subprocess.run(["sh"], input=script, text=True, check=True)
+    r = subprocess.run(["sh"], input=script, text=True, capture_output=True)
+    assert (r.returncode == 0) == expect_ok, r.stderr
     return log.read_text().splitlines() if log.exists() else []
 
 
 def test_tinyproxy_push_round_trips_files(tmp_path):
     # P1: both files and the hash ride in one script as base64 payloads.
-    script = _render_push_script(tmp_path, "true")
+    rc, err, script = _render_push_script(tmp_path, "true")
+    assert rc == 0, err
     calls = _run_push_script(tmp_path, script)
     etc = tmp_path / "etc"
     assert (etc / "tinyproxy.conf").read_bytes() == (tmp_path / "tinyproxy.conf").read_bytes()
@@ -996,9 +1006,57 @@ def test_tinyproxy_push_round_trips_files(tmp_path):
 
 
 def test_tinyproxy_push_restarts_when_inactive(tmp_path):
-    script = _render_push_script(tmp_path, "false")
+    rc, err, script = _render_push_script(tmp_path, "false")
+    assert rc == 0, err
     calls = _run_push_script(tmp_path, script)
     assert calls == ["enable tinyproxy", "restart tinyproxy"], calls
+
+
+def test_tinyproxy_push_aborts_when_encoding_fails(tmp_path):
+    # A failed $(base64 ...) inside the heredoc would silently ship an empty
+    # tinyproxy.conf, i.e. one without FilterDefaultDeny.
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    (stubs / "base64").write_text("#!/bin/sh\nexit 1\n")
+    (stubs / "base64").chmod(0o755)
+    rc, err, _ = _render_push_script(tmp_path, "true", path=f"{stubs}:/usr/bin:/bin")
+    assert rc != 0
+    assert "tinyproxy" in err
+
+
+def test_tinyproxy_push_aborts_on_empty_conf(tmp_path):
+    rc, err, _ = _render_push_script(tmp_path, "true", conf_text="")
+    assert rc != 0
+    assert "tinyproxy" in err
+
+
+def test_vm_refuses_conf_without_default_deny(tmp_path):
+    # Last line of defence in the VM: never install or load a config that
+    # would let tinyproxy proxy anywhere.
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    (etc / "tinyproxy.conf").write_text("previous\n")
+    (etc / "filter.hash").write_text("old\n")
+    rc, err, script = _render_push_script(tmp_path, "true", conf_text="Port 8888\n")
+    assert rc == 0, err
+    calls = _run_push_script(tmp_path, script, expect_ok=False)
+    assert calls == [], "tinyproxy must not be reloaded with a non-default-deny config"
+    assert (etc / "tinyproxy.conf").read_text() == "previous\n"
+    assert (etc / "filter.hash").read_text() == "old\n", "hash must not advance, so the next run re-pushes"
+
+
+def test_generated_conf_passes_vm_default_deny_check():
+    # The VM-side guard greps for this exact line; the host must emit it.
+    conf = re.search(r'tinyproxy\.conf" <<CONF\n(.*?)\nCONF\n', _SCRIPT_TEXT, re.DOTALL)
+    assert conf, "tinyproxy.conf heredoc not found"
+    assert "FilterDefaultDeny Yes" in conf.group(1).splitlines()
+
+
+def test_push_failure_stops_the_script():
+    block = _tinyproxy_push_block()
+    assert re.search(r"write_tinyproxy_push \|\| exit 1", block), (
+        "a failed write_tinyproxy_push must stop the script before the firewall and containers"
+    )
 
 
 def test_vm_put_file_gone():

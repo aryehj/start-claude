@@ -2876,6 +2876,13 @@ launched under `--reload-allowlist`, since that path exits before reading it.
 firewall apply); a warm reattach that does push costs one instead of four to six for
 the push itself.
 
+The payloads are encoded before the script is written, and a failed or empty
+encoding stops `start-agent.sh`: inside the heredoc, a failed `$(base64 ...)` would
+have shipped an empty `tinyproxy.conf`, which has no `FilterDefaultDeny` and would
+let tinyproxy proxy anywhere. The VM side also refuses any `tinyproxy.conf` without
+`FilterDefaultDeny Yes`, before installing it, writing the hash or reloading, so the
+running config stays in place and the next run pushes again.
+
 ## ADR-046: Warm-reattach SSH round-trip reduction in `research.py`
 
 **Status:** Accepted

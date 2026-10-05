@@ -811,11 +811,29 @@ NEW_PROXY_HASH=$(cat "$TMP_WORK/tinyproxy.conf" "$TMP_WORK/filter" | shasum -a 2
 # Write the VM-side push script: both files and the hash ride in it as base64
 # (only [A-Za-z0-9+/=], so safe inside single quotes), followed by the
 # reload-or-restart, so the whole push costs one colima ssh handshake.
+# Encoded up front, not inside the heredoc: a failed $(...) there would
+# silently ship an empty tinyproxy.conf, which has no FilterDefaultDeny.
 write_tinyproxy_push() {
+  local conf_b64 filter_b64
+  if ! conf_b64=$(base64 < "$TMP_WORK/tinyproxy.conf" | tr -d '\n') \
+     || ! filter_b64=$(base64 < "$TMP_WORK/filter" | tr -d '\n') \
+     || [[ -z "$conf_b64" ]]; then
+    echo "error: could not encode the tinyproxy config for the VM; not pushing it" >&2
+    return 1
+  fi
   cat > "$TMP_WORK/tinyproxy-push.sh" <<PUSHEOF
 set -e
-printf '%s' '$(base64 < "$TMP_WORK/tinyproxy.conf" | tr -d '\n')' | base64 -d > /etc/tinyproxy/tinyproxy.conf
-printf '%s' '$(base64 < "$TMP_WORK/filter" | tr -d '\n')' | base64 -d > /etc/tinyproxy/filter
+printf '%s' '$conf_b64' | base64 -d > /etc/tinyproxy/tinyproxy.conf.new
+# Never install a config without default-deny: tinyproxy would proxy anywhere.
+# Exiting here leaves the old config loaded and the old hash, so the next run
+# pushes again.
+if ! grep -qx 'FilterDefaultDeny Yes' /etc/tinyproxy/tinyproxy.conf.new; then
+  rm -f /etc/tinyproxy/tinyproxy.conf.new
+  echo "error: pushed tinyproxy.conf lacks FilterDefaultDeny Yes; refusing it" >&2
+  exit 1
+fi
+mv /etc/tinyproxy/tinyproxy.conf.new /etc/tinyproxy/tinyproxy.conf
+printf '%s' '$filter_b64' | base64 -d > /etc/tinyproxy/filter
 chmod 644 /etc/tinyproxy/tinyproxy.conf /etc/tinyproxy/filter
 # Persist the new hash so the next warm reattach can skip the push.
 printf '%s\n' '$NEW_PROXY_HASH' > /etc/tinyproxy/filter.hash
@@ -836,7 +854,7 @@ PUSHEOF
 }
 
 if $RELOAD_ALLOWLIST || [[ "$NEW_PROXY_HASH" != "$TINYPROXY_STORED_HASH" || "$TINYPROXY_ACTIVE" != "true" ]]; then
-  write_tinyproxy_push
+  write_tinyproxy_push || exit 1
   colima ssh -p "$COLIMA_PROFILE" -- sudo sh < "$TMP_WORK/tinyproxy-push.sh"
 fi
 
