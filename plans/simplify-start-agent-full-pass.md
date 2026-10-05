@@ -2,7 +2,7 @@
 
 ## Status
 
-- [ ] Phase 1: Extract the inline allowlist seed to `templates/agent-allowlist.txt`
+- [ ] Phase 1: Extract the inline allowlist seed — **moved to `plans/improve-start-agent.md` (W2)**, which shares `templates/sandbox-allowlist.txt` with `start-claude.sh` instead of adding `templates/agent-allowlist.txt`. Do not implement from this file.
 - [ ] Phase 2: Unify the OpenCode + Pi inference-config injection
 - [ ] Phase 3: Extract the iptables `firewall-apply.sh` heredoc to a template
 - [ ] Phase 4: Compact the argument parser

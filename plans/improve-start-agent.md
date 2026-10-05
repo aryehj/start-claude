@@ -3,11 +3,15 @@
 ## Status
 
 - [x] Batch 1: security and correctness, small diffs (A1, A3, A4, B1, B4, B6, B7, C3)
-- [ ] Batch 2: container lifecycle (B2, B3, SearXNG pin + `--restart`)
-- [ ] Batch 3: allowlist (B5 validation, then shared template)
-- [ ] Batch 4: perf (C1, C2, C4)
-- [ ] Decisions pending: A2 (DNS blackhole), B8 (skills source)
+- [ ] Batch 2: close the firewall gaps (F1 agent-net jump, F2 INPUT chain, F3 DNS blackhole, F4 smoke tests)
+- [ ] Batch 3: container lifecycle (L1 one topology, L2 start-failure handling, L3 SearXNG pin)
+- [ ] Batch 4: allowlist (W1 validation, W2 shared template)
+- [ ] Batch 5: perf and cleanup (P1 reload handshakes, P2 `colima list` dedupe, P3 drop no-op limits, P4 `SCRIPT_DIR`)
 <!-- mark [x] as items land -->
+
+Revised 2026-10-05 after a critique of the remaining batches. What changed, and why, is in
+"Revision notes" at the end. Batches 2 to 5 replace the old Batches 2 to 4 and the two
+"decisions pending" items.
 
 ## Implementation ground rules
 
@@ -17,242 +21,355 @@
   with passing static tests. No `Co-Authored-By` lines (see CLAUDE.md).
 - Keep the exact-string shapes `tests/test_agent_sh.py` anchors on (listed under Verification).
 - Update ADR.md / CLAUDE.md / README.md in the same commit as the behaviour they describe.
+- **Nothing may run in a container before the firewall is applied.** The iptables rules are not
+  persisted in the VM; the script installs them on every run, before any `docker start` /
+  `docker run`. Do not add restart policies, boot-time units, or reordering that breaks this.
+- Locations below are given as function names or anchor strings, not line numbers. The script
+  changes between batches; `grep` for the anchor.
 
 ## Context
 
-`start-agent.sh` (1708 lines) is the Colima-backed agent launcher. A full read of the script,
-its tests (`tests/test_agent_sh.py`, `tests/test-agent-firewall.sh`, `tests/test-cross-vm-isolation.sh`),
+`start-agent.sh` is the Colima-backed agent launcher. A full read of the script, its tests
+(`tests/test_agent_sh.py`, `tests/test-agent-firewall.sh`, `tests/test-cross-vm-isolation.sh`),
 the relevant ADRs, and the existing plans surfaced the findings below.
 
-**Already scoped elsewhere, not repeated here:** the readability refactor in
-`plans/simplify-start-agent-full-pass.md` (extract the 290-line allowlist heredoc to
-`templates/agent-allowlist.txt`, unify the two duplicated `discover_models()` Python blocks,
-extract the firewall heredoc, compact the arg parser, add a `main` driver). Those remain the
-right readability moves. Two of those items get a security/perf angle here (allowlist template
-sharing, firewall atomicity) that the existing plan does not cover.
+**Scoped elsewhere, not repeated here:** the readability refactor in
+`plans/simplify-start-agent-full-pass.md` (unify the two duplicated `discover_models()` Python
+blocks, extract the firewall heredoc, compact the arg parser, add a `main` driver). Its Phase 1
+(allowlist template extraction) is **moved into this plan** as W2, because the template should
+be shared with `start-claude.sh` rather than extracted to a second copy.
 
 **Deliberately removed before, do not re-add:** the SearXNG `outgoing.proxies` drift check and
 the 30-day image-staleness warning (`plans/_paused - simplify-start-agent.md`, steps 1 and 4).
 
-Findings are ranked by value within each group. Each has a concrete fix. Line numbers refer to
-the current `main` (`1d1da8f`).
+---
+
+## Batch 1 (landed)
+
+| Item | What | Commit |
+|---|---|---|
+| A1 | `CLAUDE_AGENT` chain applied atomically via `iptables-restore --noflush` | `dce284c` |
+| A3 | `DOCKER_CONTEXT` export instead of `docker context use` | `1d1a804` |
+| A4, B1 | Value-less `-e` for secrets; forward `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | `21216e8` |
+| B4 | VM memory compared as integer GiB | `55cbea3` |
+| B6 | VM probe failure reported instead of silent exit | `db71705` |
+| C3 | EXIT trap kills the background inference probe | `7f803ec` |
+| B7 | Flag hygiene (combination checks, allowlist backup, `python3` preflight, usage text) | `f173e4d` |
 
 ---
 
-## A. Security
+## Batch 2: close the firewall gaps
 
-### A1. Firewall re-apply is not atomic (contradicts CLAUDE.md and ADR-010)
-`start-agent.sh:1065-1094`: `iptables -F CLAUDE_AGENT` followed by six separate `iptables -A`
-calls. Between the flush and the final `REJECT`, the chain is empty, so any bridge egress in
-that window falls through DOCKER-USER and is **allowed**. This runs on every attach and every
-`--reload-allowlist`. CLAUDE.md line 84 and ADR-010 (`ADR.md:362`) both claim atomicity.
+Observed on 2026-10-05 from inside a running `claude-agent` container (search enabled, container
+at `172.18.0.3` on `claude-agent-net`):
 
-**Fix:** render the chain as an `iptables-restore --noflush` stanza and apply it in one commit:
+| Probe | Result |
+|---|---|
+| `getent hosts example.com` | resolves (0.16 s) |
+| `/etc/resolv.conf` | `nameserver 127.0.0.11`, `# ExtServers: [host(192.168.5.1)]` |
+| TCP `172.17.0.1:22` and `172.18.0.1:22` | open, banner `SSH-2.0-OpenSSH_9.6p1 Ubuntu` (the VM's sshd) |
+| TCP `192.168.5.1:53` | open |
+| TCP `172.17.0.1:8888` | open (tinyproxy, expected) |
+| TCP `192.168.5.2:22`, `1.1.1.1:443` | `No route to host` (the chain's REJECT, expected) |
+
+Not verified: whether `192.168.5.1:53` answers queries sent to it directly, and whether
+`192.168.5.1` is a VM-local address. See F2.
+
+Two structural facts explain the table:
+
+- Docker's embedded DNS forwards external names from the **host** network namespace (the
+  `host(...)` marker), so those queries never traverse FORWARD and `CLAUDE_AGENT` cannot see them.
+- Traffic from a container to a **VM-local address** (either bridge gateway, and apparently
+  `192.168.5.1`) is delivered through the INPUT chain, not FORWARD. `CLAUDE_AGENT` hangs off
+  DOCKER-USER, which is FORWARD only. So nothing governs container access to services listening
+  on the VM, and the three `-d $BRIDGE_IP` RETURN rules in `CLAUDE_AGENT` (tinyproxy port,
+  udp 53, tcp 53) can never match. The script's own comment above the agent-net jump
+  ("does NOT go through FORWARD") already says this for tinyproxy.
+
+### F1. The agent-net jump is skipped when search is disabled (fail-open)
+In the `vm-probe.sh` heredoc, `AGENT_NET_CIDR` is only read inside
+`if [ "$LOCAL_SEARCH_ENABLED" = "true" ]`. In the `firewall-apply.sh` heredoc, the
+`-s "$AGENT_NET_CIDR" -j CLAUDE_AGENT` jump is only installed when that variable is non-empty.
+Sequence that leaves egress unfiltered: container created with search enabled (so it is on
+`claude-agent-net`), VM restarted (rules gone), next run uses `--disable-search` or
+`CLAUDE_AGENT_DISABLE_SEARCH=1`. The container is reattached, still on `claude-agent-net`, and no
+jump covers its source CIDR. Found by reading the code; not reproduced live.
+
+**Fix:** remove the `LOCAL_SEARCH_ENABLED` guard around the `agent_cidr` read in the probe, so the
+jump is installed whenever the network exists. Keep the guard on the `--dport 8080` RETURN rule;
+that one really is search-only. L1 then makes the network always exist. Land F1 first: it is two
+lines and closes the hole on its own.
+
+### F2. Govern INPUT: containers can reach VM-local services
+**First, in the VM** (the user runs these on the Mac; the implementing session has no VM access):
 ```
-*filter
-:CLAUDE_AGENT - [0:0]
--A CLAUDE_AGENT -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-... (same rules as today) ...
--A CLAUDE_AGENT -j REJECT --reject-with icmp-admin-prohibited
-COMMIT
+colima ssh -p claude-agent -- ip -4 addr
+colima ssh -p claude-agent -- sudo ss -lntup
+colima ssh -p claude-agent -- sudo iptables -S INPUT
 ```
-With `--noflush`, declaring `:CLAUDE_AGENT` flushes and repopulates only that chain, atomically.
-Keep the idempotent `-C || -I` DOCKER-USER jump rules as separate commands (they are never
-removed, so they carry no window). Update the ADR-010 wording. Dovetails with Phase 3 of the
-existing simplify plan (firewall template).
+Confirm `192.168.5.1` is a local address and note what listens on 53 and 22. If `192.168.5.1`
+is **not** VM-local, stop and work out which path that traffic takes before writing rules; the
+design below assumes it is.
 
-### A2. Container DNS is an uncontrolled channel on the default (search-enabled) path
-When search is enabled the container sits on `claude-agent-net`, so its resolver is Docker's
-embedded DNS at 127.0.0.11. Embedded DNS forwards external names to the VM's upstream resolver
-from the daemon side, which never traverses FORWARD, so the CLAUDE_AGENT chain cannot see it.
-Result: arbitrary external hostnames resolve from inside the container even though all TCP/UDP
-egress is rejected. That is both an information leak and a low-bandwidth covert channel.
-Conversely, the two `--dport 53 -d $BRIDGE_IP` RETURN rules (`:1086-1087`) almost certainly
-match nothing on either network path and give a false impression that DNS is governed here.
+**Fix:** add a second chain, `CLAUDE_AGENT_IN`, declared in the **same** `iptables-restore
+--noflush` stanza as `CLAUDE_AGENT` so both swap in one commit:
+```
+:CLAUDE_AGENT_IN - [0:0]
+-A CLAUDE_AGENT_IN -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+-A CLAUDE_AGENT_IN -d $BRIDGE_IP -p tcp --dport $TINYPROXY_PORT -j RETURN
+-A CLAUDE_AGENT_IN -j REJECT --reject-with icmp-admin-prohibited
+```
+Jump to it from INPUT for each container source CIDR, using the same idempotent `-C || -I`
+pattern as the DOCKER-USER jumps, after the restore:
+```
+iptables -C INPUT -s "$BRIDGE_CIDR"    -j CLAUDE_AGENT_IN || iptables -I INPUT 1 -s "$BRIDGE_CIDR"    -j CLAUDE_AGENT_IN
+iptables -C INPUT -s "$AGENT_NET_CIDR" -j CLAUDE_AGENT_IN || iptables -I INPUT 1 -s "$AGENT_NET_CIDR" -j CLAUDE_AGENT_IN
+```
+Then delete the three dead `-d $BRIDGE_IP` rules from `CLAUDE_AGENT`.
 
-**Verify first** (inside the container): `getent hosts example.com` and `nslookup example.com`.
-If they resolve, the channel is real.
+Things that must keep working, and why they do:
+- Agent and SearXNG to tinyproxy at `$BRIDGE_IP:$TINYPROXY_PORT`: the one RETURN rule.
+- Container-name resolution (`searxng`): embedded DNS at `127.0.0.11` is handled inside the
+  container's own namespace, not via VM INPUT.
+- Inference at `$HOST_IP:$INFERENCE_PORT` and agent to `searxng:8080`: FORWARD, unchanged.
+- `colima ssh` from the Mac and `docker build --network=host`: source is not a container CIDR.
 
-**Candidate fix:** pass `--dns <blackhole>` on `docker run` (embedded DNS forwards external
-queries to the container's configured upstream; an RFC 5737 address such as `192.0.2.1` makes
-them time out). Nothing in the proxy path needs local resolution: curl, git, npm, uv, pip and
-Node with `NODE_USE_ENV_PROXY=1` all hand the hostname to tinyproxy via CONNECT. `searxng`
-still resolves because container names are answered by embedded DNS directly. Must be checked
-against `tests/test-agent-firewall.sh` (all six cases) plus a Claude Code login round-trip,
-because a tool that resolves before proxying would now hang for the timeout instead of failing
-fast. If the trade-off is rejected, document the channel as a known limitation in ADR-010 and
-delete the two dead `:53` rules.
+Test anchors: `test_firewall_chain_applied_atomically` matches the literal strings
+`-A CLAUDE_AGENT -j REJECT` and `-j CLAUDE_AGENT 2>/dev/null`; the `_IN` suffix keeps the new
+rules from colliding with either. Add a parallel static test for `CLAUDE_AGENT_IN`.
 
-### A3. `docker context use` permanently rewrites the user's host Docker config
-`start-agent.sh:774`: `docker context use colima-claude-agent` writes `currentContext` into
-`~/.docker/config.json`. After running the script, every plain `docker` command on the Mac
-targets the agent VM, and `research.py:858` does the same for its own profile, so the two
-scripts silently fight over the user's global context.
+### F3. Blackhole external DNS for the agent container
+The channel is confirmed (table above): arbitrary external names resolve from inside the
+container even though all direct egress is rejected. That is an information leak and a
+low-bandwidth covert channel.
 
-**Fix:** `export DOCKER_CONTEXT="colima-$COLIMA_PROFILE"` instead. The Docker CLI honours it
-for every `docker` call in the script, and the final `exec docker run|exec` inherits it. No
-persistent state is touched. Apply the same change to `research.py` in a follow-up.
+**Fix:** add `--dns 192.0.2.1` (RFC 5737, never routed) to the agent container's `docker run`
+(the block containing `"$IMAGE_TAG"`). With an explicit `--dns`, embedded DNS should forward
+external queries from the **container's** namespace instead of the host's, so they hit
+`CLAUDE_AGENT`'s REJECT and fail fast. Nothing on the proxy path needs local resolution: curl,
+git, npm, uv, pip and Node with `NODE_USE_ENV_PROXY=1` all hand the hostname to tinyproxy via
+CONNECT, and every `NO_PROXY` entry is an IP, `localhost`, or `searxng`.
 
-### A4. Secret passed on the command line
-`start-agent.sh:1575`: `-e "OMLX_API_KEY=$OMLX_API_KEY"` puts the key into the `docker` argv
-(visible in `ps` on the host for the life of the exec). Docker supports `-e OMLX_API_KEY` with
-no value, which reads it from the client environment. Same for the API keys in B1 below.
+Leave SearXNG's `docker run` alone: it is not the adversary and reaches engines through
+`outgoing.proxies`.
 
----
+Must be verified live before the commit is kept:
+- `getent hosts example.com` fails, and fails **fast** (under about a second). If it hangs for a
+  resolver timeout instead, the forwarding-namespace assumption is wrong; say so and stop.
+- `getent hosts searxng` still resolves.
+- A Claude Code login round-trip and one `opencode` / `pi` request still work.
 
-## B. Functionality and correctness
+F2 is what closes the direct route (`192.168.5.1:53`); F3 alone would leave it open. Land F2
+before F3.
 
-### B1. Cloud API keys are documented as forwarded but are not
-CLAUDE.md line 91, README line 484 and ADR-036 all say `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`
-are forwarded from the host so Pi can use cloud providers. `grep` finds neither name anywhere
-in `start-agent.sh`. Pi inside the container cannot see them.
+`--dns` is a create-time flag. An existing container keeps its old resolver until it is
+recreated. On reattach, read `{{json .HostConfig.Dns}}` from the existing container and, if the
+blackhole is absent, print a warning that names the fix (`start-agent.sh --reset-container`).
+Do not recreate automatically (see L2 for why).
 
-**Fix:** in `DOCKER_ENV_ARGS` (`:1546`), append `-e ANTHROPIC_API_KEY` / `-e OPENAI_API_KEY`
-(value-less passthrough, per A4) only when each is set on the host. Both `docker run` and
-`docker exec` already consume the same array, so reattach picks them up too.
+### F4. Smoke tests
+Add to `tests/test-agent-firewall.sh`, following the existing `test_*` / `pass` / `fail` /
+`skip` shape:
+- External DNS is blackholed: `getent hosts example.com` must fail.
+- Container-name DNS works: `getent hosts searxng` must succeed (skip when search is disabled).
+- VM-local services are closed: TCP connect to the default gateway on port 22 must fail, while
+  the proxy port on `$BRIDGE_IP` still connects.
 
-### B2. Toggling `--disable-search` does not update an existing container's network
-The reattach check (`:1651-1668`) only compares the projects mount. A container created with
-search disabled sits on the default bridge; if the user later runs without the flag, the script
-writes the searxng MCP block into `opencode.json` and starts SearXNG on `claude-agent-net`, but
-the agent container is not on that network, so `searxng` never resolves and websearch fails
-silently. The reverse leaves a stale network attachment.
+Update the header comment's "5 of the 6" count and the README test table.
 
-**Fix:** before `attach_existing`, inspect `.NetworkSettings.Networks` for `claude-agent-net`
-membership; `docker network connect` / `disconnect` to match `$LOCAL_SEARCH_ENABLED` (both work
-on stopped containers). Cheaper than recreating.
-
-### B3. Broken containers are not self-healed (research.py already does this, ADR-041)
-`attach_existing` (`:1644`) runs `docker start ... || true` then `exec docker exec`, so a
-container that fails to start (the `RWLayer nil` case ADR-041 documents) dies with Docker's
-"container is not running" instead of being recreated. `docker start "$SEARXNG_CONTAINER" || true`
-(`:1135`) has the same problem and additionally hides the failure entirely (search just stops
-working). Neither container has `--restart unless-stopped`.
-
-**Fix:** port the `start_or_recreate` semantics from `research.py:697`: after `docker start`,
-check `.State.Running`; on failure print the captured stderr, `docker rm -f`, and fall through to
-the fresh-create path (for the agent container this means skipping `attach_existing` and
-continuing to the `docker run` below). Add `--restart unless-stopped` to both `docker run`
-calls. Keep the `IMAGE_TAG` and `SEARXNG_CONTAINER` `docker run` blocks as single
-backslash-continued commands so `tests/test_agent_sh.py` keeps finding them.
-
-### B4. VM memory-mismatch warning compares a substring of a byte count
-`start-agent.sh:766`: `"$running_mem" != *"${CLAUDE_AGENT_MEMORY_GB}"*`. `colima list --json`
-reports memory in bytes (e.g. `8589934592`), so the check asks whether the digit "8" appears in
-that string. Requesting 8 GiB against a 12 GiB VM (`12884901888`) never warns; requesting 4 GiB
-against a 6 GiB VM (`6442450944`) never warns. `research.py:749` has the identical bug.
-
-**Fix:** parse once with Python, convert `memory // 2**30`, compare integers. Also collapse the
-two `python3 -c` invocations and the second `colima list --json` call (see C2).
-
-### B5. Allowlist entries are never validated
-`generate_filter_file` (`:651`) regex-escapes whatever is on the line. A pasted `https://foo.com`
-or `foo.com/path` becomes a regex that can never match a hostname, so the entry silently does
-nothing and the user sees an unexplained 403. `re.escape` also emits `\-` for hyphenated domains
-(`rust-lang.org`), which is undefined in POSIX ERE (glibc tolerates it; it is not guaranteed).
-
-**Fix:** in the Python generator, accept only `^[A-Za-z0-9.-]+$` (lowercased), print
-`warning: allowlist.txt:N: '...' is not a bare domain, skipped` to stderr for anything else,
-and escape only `.` by hand. Run the same validation on `--reload-allowlist` so the entry count
-it prints reflects live entries. Consider sharing the template with `start-claude.sh`: the
-embedded list and `templates/sandbox-allowlist.txt` are currently byte-identical 227-entry
-copies maintained by hand (Phase 1 of the simplify plan should point both scripts at one file).
-
-### B6. Silent death when the VM probe fails
-`start-agent.sh:847`: `PROBE_OUTPUT=$(colima ssh ... 2>/dev/null | tr -d '\r')`. Under
-`set -eo pipefail` a failed `colima ssh` aborts the script with no message at all (stderr is
-discarded). Add an explicit `|| { echo "error: could not run probe in VM"; exit 1; }` and let
-ssh's stderr through on failure.
-
-### B7. Flag hygiene
-- `--rebuild --reload-allowlist` and `--reset-container --reload-allowlist` silently drop the
-  first flag (`:734`, `:781`, `:787`). Reject the combination like the existing
-  `--reset-container`/`--rebuild` check at `:171`.
-- `--reseed-allowlist` overwrites the user's curated file with no backup. Write
-  `allowlist.txt.bak` first and say so.
-- `python3` is a hard host dependency (four heredocs) but is not in preflight (`:333-348`);
-  a Mac without the Xcode CLT fails halfway through after the VM has already started. Add it.
-- README "Usage" block omits `--reseed-allowlist` and `--init-sandbox`; the tests table still
-  describes `test_agent_sh.py` as a single host-port check (it has 33 tests) and omits
-  `test_dockerfile.py`. `usage()` omits `CLAUDE_SKILLS_ARCHIVE_URL`.
-
-### B8. Skills sync fetches GitHub even though the repo checkout is the source (decision needed)
-`sync_skills` (`:1516`) downloads the upstream tarball on every fresh container, while the
-sibling `seed_agent_skills` copies from the local `skills-agents/`. Fresh containers therefore
-need GitHub reachability and can seed a different skills version than the checkout that seeded
-everything else. ADR-005 chose upstream deliberately (stale local checkouts). Recommendation:
-local `$SCRIPT_DIR/skills` first, upstream only when `CLAUDE_SKILLS_ARCHIVE_URL` is set or the
-local dir is missing; amend ADR-005. This changes documented behaviour, so it is the user's call.
+### Docs for Batch 2
+ADR-010 currently lists "bridge DNS" among the allowed destinations in three places and does not
+mention INPUT. Amend it in the F2 and F3 commits: FORWARD-only coverage was the gap, INPUT is now
+governed by `CLAUDE_AGENT_IN`, external DNS is blackholed for the agent container. Update the
+CLAUDE.md "Egress allowlist" bullet to name both chains.
 
 ---
 
-## C. Performance (warm reattach and `--reload-allowlist`)
+## Batch 3: container lifecycle
 
-ADR-045 already cut the warm path to roughly three SSH handshakes. What is left:
+### L1. One network topology, whatever the search flag says
+Today the agent container is on `claude-agent-net` when search is enabled and on the default
+bridge when it is not, and the reattach check (the block starting
+`if docker container inspect "$CONTAINER_NAME"`) only compares the projects mount. Toggling
+`--disable-search` against an existing container therefore leaves it on the wrong network:
+search silently fails one way round, and F1's hole opens the other way round.
 
-### C1. `--reload-allowlist` still costs 9 to 11 SSH handshakes
-Mount check (1) + probe (1) + `vm_put_file` x2 files at 2 each (4) + hash (1) + reload (1) +
-firewall (1) + background inference probe (1 to 3). Fold the config push into one `vm_sh`
-script that carries both files and the hash as base64 payloads and runs the reload, and skip
-starting the inference probe at all when `RELOAD_ALLOWLIST` is set (it is killed unread at
-`:1104` today). Saves about five handshakes on the path that is advertised as "fast".
+**Fix:** always create `claude-agent-net` and always pass `--network "$AGENT_NET_NAME"` to the
+agent container's `docker run`. The search flag then only controls whether SearXNG runs, whether
+the `8080` RETURN rule is emitted, and whether the MCP block is written. `NETWORK_ARGS` and its
+conditional go away.
 
-### C2. Small warm-path wins
-- Two `colima list --json` calls (`:667`, `:759`) and two `python3` parses of the same JSON.
-  Call once, parse once.
-- The virtiofs mount check (`:752`) is its own SSH call before the batch probe; when the VM is
-  already running, include `mount -t virtiofs` in `vm-probe.sh` and only re-probe after a
-  restart. Saves one handshake on every warm attach.
-- The two host-side `discover_models()` HTTP probes (OpenCode and Pi) plus the in-VM curl probe
-  make three round-trips to the inference server per run. Phase 2 of the simplify plan already
-  targets the first two.
+Migration for existing containers that are not on the network: on reattach, inspect
+`.NetworkSettings.Networks`; if `claude-agent-net` is missing, run
+`docker network connect "$AGENT_NET_NAME" "$CONTAINER_NAME"` before `docker start`. This is
+additive and works on stopped and running containers. Never `docker network disconnect`: it
+would leave a container with no network unless paired with a `connect bridge`, and it cuts live
+shells.
 
-### C3. Orphaned background probe on error exits
-The EXIT trap (`:794`) removes `$TMP_WORK` but does not kill `$PROBE_PID`, so any `set -e`
-failure after `:922` leaves a `colima ssh curl` running detached. Add the kill to the trap.
+### L2. Start failures: report them; self-heal only SearXNG
+`attach_existing` runs `docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true` and then
+`exec docker exec`, so a container that cannot start (the `RWLayer nil` case in ADR-041) dies
+with Docker's bare "container is not running". The SearXNG branch
+(`docker start "$SEARXNG_CONTAINER" >/dev/null || true`) hides the failure entirely.
 
-### C4. `docker run --memory` equals the whole VM
-`:1693` limits the container to exactly the VM's RAM, which is no limit at all while implying
-one. Either drop it or leave headroom (VM size minus 1 GiB) so sshd and tinyproxy survive an
-in-container memory blow-up.
+**Fix, agent container:** capture `docker start`'s stderr; afterwards check `.State.Running`. On
+failure print the captured stderr and exit non-zero with the remedy:
+`start-agent.sh --reset-container`. Do **not** `docker rm -f` automatically. Unlike
+`research.py`'s daemons, this container is a long-lived dev environment whose root filesystem
+may hold tools the user installed, and many start failures (missing network, mount not ready)
+are fixable without destroying it.
+
+**Fix, SearXNG:** it is stateless (settings are bind-mounted), so port the `start_or_recreate`
+semantics from `research.py`: on a failed start or a not-`Running` state, print the stderr,
+`docker rm -f`, and fall through to the existing `docker run`. Keep that `docker run` as one
+backslash-continued command containing `SEARXNG_CONTAINER` so the static tests keep finding it.
+
+**No `--restart unless-stopped` on either container.** It would break the ground rule above:
+dockerd would start the containers at VM boot, before the script has installed any rules. On
+the agent container it would also turn `exit` into a restart, because the main process is an
+interactive `bash`. The script already starts SearXNG on every run, which covers the same need.
+
+### L3. Pin the SearXNG image
+`docker.io/searxng/searxng` is the only unpinned runtime image. Introduce one constant,
+`SEARXNG_IMAGE`, pinned by digest, with a dated comment: bump it when engines stop returning
+results. The value has to come from the Mac, since the implementing session cannot reach the
+registry or the VM's docker. Pin what is already running and known to work:
+```
+DOCKER_CONTEXT=colima-claude-agent docker image inspect docker.io/searxng/searxng \
+  -f '{{index .RepoDigests 0}}'
+```
+If the user has not supplied the digest, leave L3 unchecked rather than guessing a tag.
 
 ---
 
-## D. Readability (beyond the existing simplify plan)
+## Batch 4: allowlist
 
-- Pin `docker.io/searxng/searxng` to a tag or digest (`:1132`, also `research.py:1051`). It is
-  the only unpinned runtime image; ADR-047 already sets the precedent for pinning security-
-  relevant dependencies.
-- `DOCKERFILE_PATH` (`:317`) and `GLOBAL_CLAUDEMD_TEMPLATE` (`:1154`) recompute `SCRIPT_DIR`.
-- ADR-010 and CLAUDE.md line 84 need the atomicity wording corrected once A1 lands.
+### W1. Validate allowlist entries
+`generate_filter_file` regex-escapes whatever is on the line. A pasted `https://foo.com` or
+`foo.com/path` becomes a pattern that can never match a hostname, so the entry silently does
+nothing and the user sees an unexplained 403. `re.escape` also emits `\-` for hyphenated
+domains (`rust-lang.org`), which is undefined in POSIX ERE (glibc tolerates it).
+
+**Fix:** in the Python generator, per non-comment line:
+1. Lowercase; strip a leading `*.` and a trailing `.` (so entries copied from
+   `sandbox.network.allowedDomains` style lists keep working; suffix match already covers
+   subdomains).
+2. Accept only names with at least two non-empty labels:
+   `^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`. This rejects URLs,
+   paths, ports, and single labels such as `com` (which would allow a whole TLD). IPv4
+   literals pass, which is intended.
+3. For anything else print `warning: allowlist.txt:N: '...' is not a bare domain, skipped` to
+   stderr.
+4. Escape only `.` by hand; drop `re.escape`.
+
+Make the `--reload-allowlist` summary count the lines of the generated filter rather than
+`grep`-ing the source file, so it reports live entries.
+
+### W2. One allowlist template for both scripts (moved from the simplify plan's Phase 1)
+The seed heredoc in `start-agent.sh` (`cat > "$ALLOWLIST_FILE" <<'ALLOWLIST'`) and
+`templates/sandbox-allowlist.txt` carry the same 227 entries, maintained by hand. They are not
+byte-identical: the header and three comment lines are worded per script (286 vs 299 lines).
+
+**Fix:** keep the existing filename `templates/sandbox-allowlist.txt` (so `start-claude.sh`,
+`tests/test_sandbox_allowlist.py` and ADR-044 need no rename), rewrite its header and the
+script-specific comment lines to describe both consumers neutrally, and have `start-agent.sh`
+seed from it. Details:
+- Add the template to preflight, next to the Dockerfile check.
+- Seed and reseed by writing **into** the existing file (`cat template > "$ALLOWLIST_FILE"`),
+  never by `mv`: the file is a single-file bind mount in the container and a new inode would
+  leave the container looking at the old one.
+- Keep the `.bak` behaviour from B7.
+- Expect coordinated test updates; any test that counts on the heredoc should move to asserting
+  the template path.
+
+`plans/simplify-start-agent-full-pass.md` Phase 1 is marked as moved here.
 
 ---
 
-## Recommended implementation order
+## Batch 5: perf and cleanup
 
-1. **Batch 1, security and correctness, small diffs:** A1, A3, A4, B1, B4, B6, B7, C3.
-   Each is under 30 lines; none changes user-visible behaviour except to fix it.
-2. **Batch 2, container lifecycle:** B2, B3, SearXNG pin and `--restart`.
-3. **Batch 3, allowlist:** B5 validation, then Phase 1 of the simplify plan with the template
-   shared by both scripts.
-4. **Batch 4, perf:** C1, C2, C4.
-5. **Decisions needed from the user before touching:** A2 (DNS blackhole, after verification),
-   B8 (skills source, amends ADR-005).
+Per ADR-045 a `colima ssh` handshake costs roughly 100 to 300 ms.
+
+### P1. `--reload-allowlist` costs 9 handshakes plus 1 to 3 in the background
+Mount check (1) + batch probe (1) + `vm_put_file` twice at 2 each (4) + hash write (1) +
+tinyproxy reload (1) + firewall apply (1), plus the background inference probe (1 to 3).
+
+**Fix:** replace the push block (the `if $RELOAD_ALLOWLIST || [[ "$NEW_PROXY_HASH" ...` body)
+with one `vm_sh` script that carries both files and the hash as base64 payloads, writes them,
+and runs the reload-or-restart. Skip launching the inference probe when `RELOAD_ALLOWLIST` is
+set; it is killed unread on that path. Saves about five handshakes on the path advertised as
+fast. Keep `test_tinyproxy_push_hash_gated` and
+`test_tinyproxy_reload_not_unconditional_restart` passing.
+
+### P2. One `colima list` call
+`colima_profile_running` and the sizing warning each call `colima list --json`. Call once,
+keep the JSON, parse once.
+
+### P3. Drop the no-op resource limits
+The agent `docker run` passes `--memory "${CLAUDE_AGENT_MEMORY_GB}g"` and
+`--cpus "$CLAUDE_AGENT_CPUS"`. Both equal the whole VM, and they use the *requested* size, which
+B4 showed can differ from the running VM. They limit nothing while implying a limit. Remove
+both. (A computed cap with headroom was considered and rejected: on a small VM a fixed reserve
+is a large fraction of the total, and the gain is marginal.)
+
+### P4. `SCRIPT_DIR` recomputed
+`DOCKERFILE_PATH` and `GLOBAL_CLAUDEMD_TEMPLATE` each re-derive the script directory. Use
+`$SCRIPT_DIR`.
+
+---
+
+## Dropped
+
+- **Skills source (old B8).** `sync_skills` fetches the upstream tarball while
+  `seed_agent_skills` copies from the checkout. ADR-005 chose upstream on purpose, the fetch
+  runs on the Mac and already degrades to a warning, and there is no bug behind the proposal.
+- **Folding the virtiofs mount check into the batch probe (part of old C2).** One handshake
+  saved for a reordering of the VM bring-up path, which also has to re-probe after a restart.
+- **Container memory headroom (old C4 alternative).** See P3.
+- **Restart policies and auto-recreate for the agent container (part of old B3).** See L2.
+
+## research.py follow-ups (separate plan or commits, not part of these batches)
+
+- `docker context use` is still called there; switch to `DOCKER_CONTEXT` as in A3.
+- The VM memory warning still does a substring match on a byte count, as B4 fixed here.
+- Pin its SearXNG image to the same digest as L3.
+- Its containers do use `--restart unless-stopped`. That is acceptable under a default-allow
+  denylist, but worth a note in ADR-041 that they start before the `RESEARCH` chain exists
+  after a VM boot.
 
 ## Verification
 
 - `python3 -m pytest tests/test_agent_sh.py tests/test_dockerfile.py tests/test_sandbox_allowlist.py`
-  after every batch. The static tests anchor on exact strings (`# Fresh container:`,
-  `exec docker run`, the single-command `docker run` blocks, the `-*)` unknown-option arm);
-  keep those shapes.
-- `bash -n start-agent.sh` and `shellcheck start-agent.sh` (shellcheck is not in the repo's
-  tooling today; adding it to the pytest run is cheap and would have caught B6).
-- Live smoke, on the Mac host: cold sandbox run, warm reattach, `--reload-allowlist`,
-  `--rebuild`, `--disable-search` toggle on an existing container (B2), then
-  `tests/test-agent-firewall.sh` inside the container and `tests/test-cross-vm-isolation.sh`
-  from the host.
-- A1 specifically: `colima ssh -p claude-agent -- sudo iptables -S CLAUDE_AGENT` before and
-  after must be byte-identical.
-- A2 specifically: `docker exec claude-agent getent hosts example.com` must fail after the
-  change, while `getent hosts searxng` and a Claude Code login still succeed.
-- B4: run with `--memory` different from the running VM and confirm the warning fires.
+  after every commit. The static tests anchor on exact strings (`# Fresh container:`,
+  `exec docker run`, the single-command `docker run` blocks found by `IMAGE_TAG` and
+  `SEARXNG_CONTAINER`, the `-*)` unknown-option arm, the `CLAUDE_AGENT` restore stanza); keep
+  those shapes. Add a static test alongside each behavioural change, as Batch 1 did.
+- `bash -n start-agent.sh`.
+- Live smoke on the Mac host, which the user runs (the implementing session has no VM): cold
+  sandbox run, warm reattach, `--reload-allowlist`, `--reset-container`, a `--disable-search`
+  toggle against an existing container, then `tests/test-agent-firewall.sh` inside the
+  container and `tests/test-cross-vm-isolation.sh` from the host.
+- F1: with a search-enabled container, `colima stop -p claude-agent`, start with
+  `--disable-search`, and confirm test 1 (`test_default_deny`) still passes.
+- F2: `colima ssh -p claude-agent -- sudo iptables -S CLAUDE_AGENT_IN` shows the three rules;
+  gateway port 22 refuses from the container; `colima ssh` from the Mac still works.
+- F3: the three checks listed under F3.
+- L1: an old bridge-only container gains `claude-agent-net` on the next run and
+  `getent hosts searxng` resolves in it.
+- W1: an allowlist containing `https://foo.com`, `*.bar.com` and `com` yields two warnings and a
+  filter entry for `bar.com`.
+
+## Revision notes (2026-10-05)
+
+- Old A2 (DNS) was "decision pending, verify first". Verified: the channel is real. It is now
+  F3, and it depends on a gap the first pass missed (INPUT is ungoverned, F2).
+- Old B2 (search toggle) was filed as a functionality bug with a `network connect` /
+  `disconnect` fix. It is also a fail-open firewall bug (F1), and the lifecycle fix is now a
+  single topology (L1).
+- Old B3 ported `research.py`'s `--restart unless-stopped` and auto-recreate to both
+  containers. Narrowed to L2 for the reasons given there.
+- Old B5's validation regex accepted single labels and rejected wildcard forms; tightened in
+  W1. The "byte-identical" claim about the two allowlists was wrong in the comments, right in
+  the entries; W2 accounts for that.
+- Line-number references (taken at `1d1da8f`, before Batch 1 moved everything) are replaced by
+  anchors.
