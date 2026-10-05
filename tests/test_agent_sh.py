@@ -1,6 +1,8 @@
 """Static analysis: docker run commands in start-agent.sh must not publish host ports.
 Also verifies --reset-container and sandbox trust-boundary invariants."""
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 SCRIPT = Path(__file__).parent.parent / "start-agent.sh"
@@ -806,3 +808,74 @@ def test_searxng_image_pinned_by_digest():
     refs = [l for l in _SCRIPT_TEXT.splitlines()
             if "searxng/searxng" in l and not l.lstrip().startswith("#")]
     assert len(refs) == 1, f"unpinned SearXNG image reference remains: {refs}"
+
+
+# ── allowlist filter generator (W1) ──────────────────────────────────────────
+# The generator is a python3 heredoc inside generate_filter_file(); run it for
+# real on a sample allowlist rather than grepping its source.
+
+def _filter_generator_source() -> str:
+    start = _SCRIPT_TEXT.find("generate_filter_file() {")
+    assert start != -1, "generate_filter_file() not found"
+    open_tag = _SCRIPT_TEXT.find("<<'PYEOF'\n", start)
+    assert open_tag != -1, "generate_filter_file python heredoc not found"
+    body_start = open_tag + len("<<'PYEOF'\n")
+    end = _SCRIPT_TEXT.find("\nPYEOF", body_start)
+    assert end != -1, "generate_filter_file python heredoc not terminated"
+    return _SCRIPT_TEXT[body_start:end]
+
+
+def _run_filter_generator(tmp_path, allowlist: str):
+    src = tmp_path / "allowlist.txt"
+    src.write_text(allowlist)
+    proc = subprocess.run(
+        [sys.executable, "-", str(src)],
+        input=_filter_generator_source(), capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.splitlines(), proc.stderr
+
+
+def test_filter_generator_skips_non_domains_with_warning(tmp_path):
+    lines, err = _run_filter_generator(
+        tmp_path,
+        "# header\n"
+        "https://foo.com\n"
+        "*.bar.com\n"
+        "com\n"
+        "example.org/path\n"
+        "example.net:443\n",
+    )
+    assert lines == [r"(^|\.)bar\.com$"]
+    warnings = err.strip().splitlines()
+    assert len(warnings) == 4, err
+    assert "warning: allowlist.txt:2: 'https://foo.com' is not a bare domain, skipped" in warnings
+    assert any("allowlist.txt:4: 'com'" in w for w in warnings)
+
+
+def test_filter_generator_normalises_entries(tmp_path):
+    lines, err = _run_filter_generator(
+        tmp_path,
+        "Rust-Lang.org.\n"
+        "  docs.python.org   # inline comment\n"
+        "\n"
+        "10.0.0.1\n",
+    )
+    assert err == ""
+    assert lines == [
+        r"(^|\.)rust-lang\.org$",
+        r"(^|\.)docs\.python\.org$",
+        r"(^|\.)10\.0\.0\.1$",
+    ]
+    # Only '.' is escaped: '\-' is undefined in POSIX ERE.
+    assert "re.escape(" not in _filter_generator_source()
+
+
+def test_reload_summary_counts_generated_filter():
+    block = re.search(
+        r"if \$RELOAD_ALLOWLIST; then\n(.*?)\nfi", _SCRIPT_TEXT, re.DOTALL,
+    )
+    assert block, "--reload-allowlist fast-path block not found"
+    body = block.group(1)
+    assert '"$TMP_WORK/filter"' in body, "reload summary must count the generated filter"
+    assert '"$ALLOWLIST_FILE"' not in body, "reload summary must not grep the source allowlist"

@@ -3130,3 +3130,43 @@ results. `research.py` still runs its SearXNG unpinned (a follow-up).
 - A broken SearXNG container is replaced on the next run without user action.
 - SearXNG upgrades are explicit. An existing SearXNG container keeps the image
   it was created from until it is recreated (`--reset-container`).
+
+---
+
+## ADR-049: `start-agent.sh` allowlist: validated entries
+
+**Date:** 2026-10-05
+**Status:** Accepted
+
+### Context
+
+`generate_filter_file` turned every non-comment line of `allowlist.txt` into
+`(^|\.)<re.escape(line)>$`. A pasted `https://foo.com` or `foo.com/path`
+became a pattern that can never match a hostname, so the entry silently did
+nothing and the user saw an unexplained 403. A single label such as `com`
+would have allowed a whole TLD. `re.escape` also emitted `\-` for hyphenated
+domains (`rust-lang.org`), which POSIX ERE leaves undefined (glibc tolerates
+it; tinyproxy's regex library is not guaranteed to).
+
+### Decision
+
+Per non-comment line, the generator:
+
+1. Lowercases, and drops a leading `*.` and a trailing `.`, so entries copied
+   from `sandbox.network.allowedDomains`-style lists keep working. Suffix
+   matching already covers subdomains.
+2. Accepts only names with at least two non-empty labels
+   (`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`). This
+   rejects URLs, paths, ports and single labels. IPv4 literals pass, on purpose.
+3. Prints `warning: allowlist.txt:N: '...' is not a bare domain, skipped` to
+   stderr for anything else.
+4. Escapes only `.`, by hand.
+
+The `--reload-allowlist` summary counts the lines of the generated filter
+rather than the non-comment lines of the source, so it reports live entries.
+
+### Consequences
+
+- A malformed entry is visible on every run instead of failing silently.
+- A rejected line is dropped, not repaired. Fixing it is the user's call.
+

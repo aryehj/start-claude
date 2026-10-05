@@ -432,7 +432,11 @@ The allowlist is mounted **read-only** at `/etc/claude-agent/allowlist.txt`
 inside the container; the agent can read it but cannot modify the source file.
 
 Suffix matching applies — `github.com` covers `api.github.com`,
-`codeload.github.com`, etc. The file is seeded on first run with a permissive
+`codeload.github.com`, etc. Each line must be a bare domain: a leading `*.`
+and a trailing `.` are dropped, and anything else (a URL such as
+`https://foo.com`, a path, a port, a single label such as `com`) is skipped
+with a `warning: allowlist.txt:N: ...` line on stderr. The
+`--reload-allowlist` summary counts the entries actually loaded. The file is seeded on first run with a permissive
 dev/research list (Anthropic, package registries, major scholarly publishers,
 etc.). Prune it to match your actual usage.
 

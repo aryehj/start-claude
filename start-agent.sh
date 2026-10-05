@@ -675,17 +675,32 @@ fi
 
 # Generate a tinyproxy filter file on the host from the allowlist.
 # Each non-comment domain becomes an anchored regex: (^|\.)domain\.tld$
-# which matches the domain itself and any subdomain.
+# which matches the domain itself and any subdomain. A leading '*.' and a
+# trailing '.' are dropped; anything that is still not a bare domain (a URL, a
+# path, a port, a single label like 'com') is skipped with a warning, since it
+# could never match a hostname or would allow a whole TLD.
 generate_filter_file() {
   local out="$1"
   python3 - "$ALLOWLIST_FILE" > "$out" <<'PYEOF'
 import re, sys
+label = r"[a-z0-9]([a-z0-9-]*[a-z0-9])?"
+bare_domain = re.compile(rf"^{label}(\.{label})+$")
 with open(sys.argv[1]) as f:
-    for raw in f:
+    for n, raw in enumerate(f, 1):
         line = raw.split('#', 1)[0].strip()
         if not line:
             continue
-        escaped = re.escape(line)
+        host = line.lower()
+        if host.startswith('*.'):
+            host = host[2:]
+        if host.endswith('.'):
+            host = host[:-1]
+        if not bare_domain.match(host):
+            print(f"warning: allowlist.txt:{n}: '{line}' is not a bare domain, skipped",
+                  file=sys.stderr)
+            continue
+        # Escape only '.': re.escape emits '\-', which POSIX ERE leaves undefined.
+        escaped = host.replace('.', '\\.')
         print(f"(^|\\.){escaped}$")
 PYEOF
 }
@@ -1172,7 +1187,7 @@ colima ssh -p "$COLIMA_PROFILE" -- sudo sh < "$TMP_WORK/firewall-apply.sh"
 
 # ── --reload-allowlist: fast-path exit ───────────────────────────────────────
 if $RELOAD_ALLOWLIST; then
-  entry_count=$(grep -cv -E '^\s*(#|$)' "$ALLOWLIST_FILE" || echo 0)
+  entry_count=$(wc -l < "$TMP_WORK/filter" | tr -d ' ')
   echo "==> Allowlist reloaded ($entry_count entries, sandbox: $SANDBOX_NAME)"
   exit 0  # on_exit kills the unread inference probe and removes TMP_WORK
 fi
