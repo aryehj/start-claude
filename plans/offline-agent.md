@@ -4,7 +4,7 @@
 
 - [x] Phase 1: Go/no-go on overlayfs-over-virtiofs and offline harness startup (human gate: run on the Mac)
 - [x] Phase 2: Core script usable end to end on a real project (human gate: drive a task with a local model)
-- [ ] Phase 3: Bound agent storage; no agent write path to the Mac (human gate: fill each sink on the Mac and confirm only that session breaks)
+- [x] Phase 3: Bound agent storage; no agent write path to the Mac (human gate: fill each sink on the Mac and confirm only that session breaks)
 - [ ] Phase 4: Export/apply surface, docs, ADR (human gate: does `--apply` feel safe enough to use)
 
 ## Context
@@ -538,3 +538,61 @@ checks below are the first real run.
 - Unknown #4 (`--mount "$HOME:r"`) is unchecked. If it is adopted, the
   harness state bind mounts under `~/.offline-agent/` need a writable mount.
 
+### Phase 3 implementation notes (2026-10-19)
+
+Built in the dev container; nothing ran against Colima yet, so the gate
+checks are the first real run.
+
+- **Correction to step 1: Colima 0.10.3 has two VM disks.** `--disk`
+  (default 100 GiB) is a separate data disk bind-mounted at `/var/lib/docker`,
+  `/var/lib/containerd` and friends; `--root-disk` (default 20 GiB) holds the
+  OS and `/var/lib/offline-agent`, so the session images
+  (`cmd/start.go`, `environment/vm/lima/disk.go`, `environment/container/docker/docker.go`).
+  Session images therefore compete with the VM OS, not with the image or
+  the build cache. Decision with the user: cap both, `--disk` /
+  `OFFLINE_AGENT_DISK` and `--root-disk` / `OFFLINE_AGENT_ROOT_DISK`,
+  10 GiB each. The free-space probe is `df -Pk /var/lib` (root disk), and the
+  low-space warning names old sessions and a larger `--root-disk` as remedies.
+  `docker builder prune` frees the data disk, not the root disk, so it is not
+  named. At the gate, measure `df /` (root) and `docker system df` (data) on
+  a fresh VM.
+- Disk flags go to `colima start` only when the VM is created, never on a
+  restart. Colima ignores a smaller `--disk` with a warning
+  (`syncDiskSize`); a smaller `--root-disk` against an existing VM is
+  unverified, so it is not attempted. `colima list --json` reports only the
+  data disk, so the running-VM mismatch warning covers that disk alone.
+- Unknown #4, measured by running each harness as `nobody` against
+  root-owned dirs: opencode 1.19.3 needs `~/.local/share/opencode`,
+  `~/.local/state` (lock files; startup fails without it), `~/.cache` and
+  `$TMPDIR`. With its config dir unwritable it skips the
+  `@opencode-ai/plugin` npm install it otherwise puts there, and both
+  `opencode models` and `opencode run` work. pi 1.3.0 writes `auth.json`,
+  `models-store.json` and `sessions/` in its agent dir.
+- Unknown #5: opencode gets its config dir `:ro`; `OPENCODE_CONFIG` was not
+  needed. pi has one agent dir for config and state (`PI_CODING_AGENT_DIR`
+  moves both), so `/root/.pi` comes from the session image with
+  `models.json`/`settings.json` bind-mounted `:ro` over it. pi writes settings
+  in place with `writeFileSync`, and a failed save goes to `recordError`, so
+  `/model` in the TUI does not crash; the choice just isn't persisted. Use
+  `OFFLINE_AGENT_DEFAULT_MODEL` instead. Check that at the gate.
+- Session image layout: `mnt/{upper,work}` plus `mnt/harness/{opencode,state,pi}`
+  mounted at `~/.local/share/opencode`, `~/.local/state` and `~/.pi`.
+  `HISTFILE` points at `~/.local/state/bash_history`, because the read-only
+  root would otherwise refuse bash's history write. The image is formatted
+  as `disk.img.new` and renamed, so a failed mkfs is retried, not mounted.
+- tmpfs mounts are explicitly `exec` (Docker's default is `noexec`), because
+  uv venvs under `$TMPDIR` run binaries from `/tmp`.
+- `~/.npm` is not writable. npm commands warn that they cannot write their
+  log but still run. Add a tmpfs at the gate if that turns out to be noisy.
+- `list_sessions`, which drives the `--rebuild` VM-delete warning, counts an
+  unmounted session image as holding work. After a VM boot no image is
+  mounted until its session starts, and checking `upper/` would miss them.
+- pi settings.json is now always written (as `{}` if empty). Docker would
+  create a directory, on the Mac, for a missing bind-mount source.
+- Old harness state (`~/.offline-agent/opencode/data`, and everything in
+  `pi/agent/` except the two config files) is left in place. A one-time
+  notice lists it and writes `~/.offline-agent/README-state-moved.txt`.
+- `tests/test-offline-agent-limits.sh` was run (non-fill checks only) inside
+  this repo's `claude-agent` container as a negative control. All five checks
+  failed there for the right reason (writable root, writable virtiofs mounts,
+  no cgroup caps).
