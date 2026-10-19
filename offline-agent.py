@@ -59,8 +59,8 @@ DNS_BLACKHOLE = "192.0.2.1"
 SESSIONS_ROOT = "/var/lib/offline-agent/sessions"
 OVERLAY_UNSAFE_CHARS = ",:\\\n"
 
-DEFAULT_MEMORY_GIB = 4
-DEFAULT_CPUS = 4
+DEFAULT_MEMORY_GIB = 2
+DEFAULT_CPUS = 2
 
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
@@ -178,13 +178,13 @@ ENVIRONMENT:
 
 
 def _parse_gib(raw: str) -> int:
-    """Accept '4', '4G', '4GB', '4GiB' and return integer GiB."""
+    """Accept '2', '2G', '2GB', '2GiB' and return integer GiB."""
     cleaned = raw.strip().lower().rstrip("b").rstrip("i").rstrip("g")
     try:
         return int(cleaned)
     except ValueError:
         raise argparse.ArgumentTypeError(
-            f"invalid memory value {raw!r} — use integer GiB (e.g. 4, 4G, 4GB)"
+            f"invalid memory value {raw!r} — use integer GiB (e.g. 2, 2G, 2GB)"
         )
 
 

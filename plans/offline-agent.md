@@ -365,9 +365,10 @@ checks below are the first real run.
   locally: with it `opencode models` lists only the local model; without it
   the bundled `opencode/*` Zen models appear. The upstream schema now marks
   the key deprecated, so re-check it after an opencode bump.
-- Defaults chosen at build time: VM 4 GiB / 4 CPUs. The docker context is set
-  per process via `DOCKER_CONTEXT`, never persisted, so the sibling VMs' CLI
-  context is left alone.
+- Defaults chosen at build time: VM 2 GiB / 2 CPUs. Inference runs on the
+  host and shares unified memory with the model, so the VM stays lean. The
+  docker context is set per process via `DOCKER_CONTEXT`, never persisted, so
+  the sibling VMs' CLI context is left alone.
 - The container is named `offline-agent-<session id>`. Re-running the script
   in the same directory while a session is open attaches a second shell with
   `docker exec` instead of starting a second container.
