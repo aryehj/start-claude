@@ -2,7 +2,9 @@
 # Phase 1 go/no-go probe for plans/offline-agent.md. Throwaway spike, not for
 # commit. Run ON THE MAC HOST (needs colima + docker):
 #
-#   bash plans/offline-agent-phase1-probe.sh
+#   bash plans/offline-agent-phase1-probe.sh           # everything
+#   bash plans/offline-agent-phase1-probe.sh harness   # step 3 only, reusing
+#                                                      # the VM, image and volume
 #
 # Prereq for step 3: the claude-agent Colima VM must be running with
 # claude-agent:latest built (start-agent.sh has been run at least once). The
@@ -21,7 +23,12 @@ PROBE="$WORK/probe"
 SESSION_DIR=/var/lib/offline-agent/sessions/phase1
 VOL=offline-agent-phase1
 HERE="$(cd "$(dirname "$0")" && pwd)"
-LOG="$HERE/offline-agent-phase1-results.txt"
+MODE="${1:-all}"
+if [ "$MODE" = harness ]; then
+  LOG="$HERE/offline-agent-phase1-results-harness.txt"
+else
+  LOG="$HERE/offline-agent-phase1-results.txt"
+fi
 D="docker --context colima-$PROFILE"
 
 exec > >(tee "$LOG") 2>&1
@@ -39,6 +46,7 @@ section "0. preflight"
 date; sw_vers 2>/dev/null; colima version; docker version --format 'docker client {{.Client.Version}}'
 command -v colima >/dev/null && command -v docker >/dev/null || { echo "need colima + docker"; exit 1; }
 
+if [ "$MODE" != harness ]; then
 # ── 1. VM ─────────────────────────────────────────────────────────────────────
 section "1. colima profile $PROFILE"
 if colima status -p "$PROFILE" >/dev/null 2>&1; then
@@ -165,6 +173,14 @@ echo host-edit > "$REPO/host-only.txt"
 $D run --rm -v "$VOL:$REPO" "$IMAGE" sh -c "cat '$REPO/host-only.txt' 2>&1; ls '$REPO'"
 rm -f "$REPO/host-only.txt"
 
+else
+  section "harness-only mode: checking prior state"
+  colima status -p "$PROFILE" >/dev/null 2>&1 || { echo "VM $PROFILE not running: colima start -p $PROFILE"; exit 1; }
+  $D image inspect "$IMAGE" >/dev/null 2>&1 || { echo "$IMAGE missing in $PROFILE: run without args"; exit 1; }
+  $D volume inspect "$VOL" >/dev/null 2>&1 && [ -d "$REPO" ] || { echo "volume/repo from a full run missing: run without args"; exit 1; }
+  echo ok
+fi
+
 # ── 3. offline harness startup ───────────────────────────────────────────────
 section "3. opencode + pi with --network none"
 mkdir -p "$PROBE/oc-config" "$PROBE/oc-data" "$PROBE/pi/agent"
@@ -210,17 +226,27 @@ label=$1
 now() { date +%s.%N; }
 run() {
   name=$1; shift
-  s=$(now); out=$(timeout 60 "$@" 2>&1 </dev/null); rc=$?
+  s=$(now); out=$(timeout -k 5 60 "$@" 2>&1 </dev/null); rc=$?
   el=$(awk "BEGIN{printf \"%.1f\", $(now)-$s}")
   printf -- '--- [%s] %s  rc=%s  %ss\n' "$label" "$name" "$rc" "$el"
   printf '%s\n' "$out" | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' | tail -15
 }
 tui() {
-  # TUI under a pty for 20s: rc=124 means it was still running (did not crash).
+  # TUI under a pty for 20s: rc=137 (or 124) means it was still running (did not crash).
+  # The inner timeout SIGKILLs the harness (a TERM'd opencode TUI hung the first
+  # run); the outer one bounds script(1) itself in case a grandchild keeps the
+  # pty open. Elapsed > 25s means the outer one fired.
   name=$1; shift
-  s=$(now); script -qec "timeout 20 $*" /probe/tui-$label-$name.raw >/dev/null 2>&1 </dev/null; rc=$?
+  s=$(now); timeout -k 5 30 script -qec "timeout -s KILL 20 $*" /probe/tui-$label-$name.raw >/dev/null 2>&1 </dev/null; rc=$?
   el=$(awk "BEGIN{printf \"%.1f\", $(now)-$s}")
-  printf -- '--- [%s] %s TUI  rc=%s (124 = alive after 20s)  %ss\n' "$label" "$name" "$rc" "$el"
+  printf -- '--- [%s] %s TUI  rc=%s (137 or 124 = alive after 20s)  %ss\n' "$label" "$name" "$rc" "$el"
+  echo "    leftover processes:"
+  for d in /proc/[0-9]*; do
+    pid=${d#/proc/}; [ "$pid" = $$ ] || [ "$pid" = 1 ] && continue
+    cmd=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)
+    case "$cmd" in ""|*harness.sh*|*logproxy.js*) continue ;; esac
+    echo "      $pid $cmd"; kill -KILL "$pid" 2>/dev/null
+  done
   sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b[]P][^\x07]*\x07//g' /probe/tui-$label-$name.raw | tr -s ' \r' | grep -v '^\s*$' | tail -8
 }
 export TERM=xterm-256color
