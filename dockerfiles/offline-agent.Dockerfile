@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.6
 #
 # offline-agent base image — Debian bookworm with OpenCode + Pi CLIs, Node LTS,
-# uv, git, ripgrep, fd, jq, unzip/zip.
+# uv, git, ripgrep, fd, jq, unzip/zip, rsync (offline-agent.py's export helpers).
 # Built by offline-agent.py into the offline-agent Colima VM as
 # offline-agent:latest.
 #
@@ -23,6 +23,7 @@ RUN apt-get update -qq \
       python3 \
       jq ripgrep fd-find \
       unzip zip \
+      rsync \
  && apt-get upgrade -y \
  && rm -rf /var/lib/apt/lists/*
 

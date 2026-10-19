@@ -1,4 +1,5 @@
 """Static analysis: claude-agent.Dockerfile must install required CLIs correctly."""
+import re
 from pathlib import Path
 
 DOCKERFILE = Path(__file__).parent.parent / "dockerfiles" / "claude-agent.Dockerfile"
@@ -158,3 +159,10 @@ def test_offline_user_packages_block_is_last_run():
     instructions = _offline_instructions()
     last_run = len(instructions) - 1 - instructions[::-1].index("RUN")
     assert set(instructions[last_run + 1:]) <= {"WORKDIR", "CMD"}
+
+
+def test_offline_rsync_installed():
+    # offline-agent.py's non-git --diff/--export/--apply run rsync in a helper
+    # container built from this image.
+    apt = next(l for l in _offline_text().split("RUN ") if "apt-get install" in l)
+    assert re.search(r"\brsync\b", apt)

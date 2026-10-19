@@ -29,6 +29,11 @@ Usage:
   cd ~/some/project && offline-agent.py     start (or attach to) this directory's session
   offline-agent.py --rebuild                rebuild the image (optionally the VM too)
   offline-agent.py --backend=ollama         use Ollama instead of omlx
+  offline-agent.py --diff                   show what the agent changed
+  offline-agent.py --export PATH            save the changes (patch for git repos, tarball otherwise)
+  offline-agent.py --apply [--dry-run]      copy the changes onto the host directory
+  offline-agent.py --discard [--force]      delete this directory's session
+  offline-agent.py --list-sessions          list every session in the VM
 
 Adding tools: edit the user-packages block at the end of
 dockerfiles/offline-agent.Dockerfile, then run --rebuild.
@@ -36,19 +41,22 @@ dockerfiles/offline-agent.Dockerfile, then run --rebuild.
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import hashlib
 import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Set, Tuple
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -69,6 +77,26 @@ OVERLAY_UNSAFE_CHARS = ",:\\\n"
 # A stdout marker, not an exit code: `colima ssh` exits 1 for any remote
 # failure and only logs the real status ("exit status 42") on stderr.
 LEGACY_SESSION_MARKER = "OFFLINE_AGENT_LEGACY_SESSION"
+DISCARDED_MARKER = "OFFLINE_AGENT_SESSION_DISCARDED"
+SESSION_ID_RE = re.compile(r"[0-9a-f]{12}")
+COMMIT_ID_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+# Export/apply helper containers see the merged view here, and (for non-git
+# diffs and --apply) the host directory at HOST_MOUNT.
+MERGED_MOUNT = "/merged"
+HOST_MOUNT = "/host"
+# Printed on stderr by helper scripts run on an image built before rsync was added.
+NO_RSYNC_MARKER = "OFFLINE_AGENT_NO_RSYNC"
+# Repo config inside the overlay is agent-written. These overrides stop git in
+# a helper from running anything it names (fsmonitor, hooks, pager), and
+# GIT_PLAIN_DIFF stops external diff drivers and textconv from rewriting what
+# --diff shows. The helper has no network and no host mount either way.
+GIT_SAFE_CONFIG = (
+    "-c safe.directory='*' -c core.fsmonitor=false -c core.hooksPath=/dev/null "
+    "-c core.pager=cat -c core.untrackedCache=false -c status.showUntrackedFiles=all"
+)
+GIT_PLAIN_DIFF = "--no-ext-diff --no-textconv --no-color"
+GIT_ACTIONS = ("inspect", "log", "diff", "wip", "patch", "bundle")
 
 DEFAULT_MEMORY_GIB = 2
 DEFAULT_CPUS = 2
@@ -178,6 +206,19 @@ STORAGE:
   `truncate -s <new> disk.img && resize2fs <loop device>` on the mounted image.
   VM disk sizes apply only when the VM is created (--rebuild + delete to change).
 
+REVIEWING AND KEEPING CHANGES:
+  --diff, --export, --apply and --discard act on the current directory's
+  session. They read the overlay in a throwaway helper container with no
+  network and no host mount, so nothing the agent planted (git hooks,
+  fsmonitor, diff drivers) runs where it could reach the Mac.
+  Git repo (a .git dir at the project root): --apply fast-forwards the host
+  branch to the session's HEAD with your own git on the Mac. It refuses if
+  the host HEAD moved since the session started or the session has
+  uncommitted changes (commit them in the session, or --export).
+  Other directories: --apply rsyncs the merged view onto the host directory.
+  It refuses if any file it would touch changed on the host since the
+  session started.
+
 ADDING PACKAGES:
   Edit the user-packages block at the end of
   dockerfiles/offline-agent.Dockerfile, then run with --rebuild.
@@ -194,11 +235,33 @@ ENVIRONMENT:
   GIT_USER_NAME, GIT_USER_EMAIL  Commit identity inside the container
 """,
     )
-    p.add_argument(
+    ops = p.add_mutually_exclusive_group()
+    ops.add_argument(
         "--rebuild",
         action="store_true",
         help="Remove the image (and any running session containers) and rebuild. "
              "With confirmation, also delete the Colima VM.",
+    )
+    ops.add_argument("--diff", action="store_true", help="Show what the agent changed in this directory's session.")
+    ops.add_argument(
+        "--export",
+        metavar="PATH",
+        help="Write the session's changes to PATH: a git format-patch mbox (plus PATH.wip.diff for "
+             "uncommitted work) for git repos, a tarball of changed files (plus PATH.deleted) otherwise.",
+    )
+    ops.add_argument("--apply", action="store_true", help="Copy the session's changes onto the host directory.")
+    ops.add_argument(
+        "--discard",
+        action="store_true",
+        help="Delete this directory's session. Refuses if it holds changes not on the host, unless --force.",
+    )
+    ops.add_argument("--list-sessions", action="store_true", help="List every session in the VM.")
+    p.add_argument("--dry-run", action="store_true", help="With --apply: show what would change, write nothing.")
+    p.add_argument("--force", action="store_true", help="With --discard: discard even unexported changes.")
+    p.add_argument(
+        "--session",
+        metavar="ID",
+        help="With --export or --discard: act on this session id (see --list-sessions), not the cwd's.",
     )
     p.add_argument(
         "--backend",
@@ -241,7 +304,17 @@ ENVIRONMENT:
         metavar="SIZE",
         help=f"Per-session storage cap, e.g. 5G or 256M, at session creation (default: {DEFAULT_SESSION_DISK}).",
     )
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.dry_run and not args.apply:
+        p.error("--dry-run only applies to --apply")
+    if args.force and not args.discard:
+        p.error("--force only applies to --discard")
+    if args.session is not None:
+        if not (args.export or args.discard):
+            p.error("--session only applies to --export and --discard")
+        if not SESSION_ID_RE.fullmatch(args.session):
+            p.error(f"invalid session id {args.session!r}; see --list-sessions")
+    return args
 
 
 def _parse_gib(raw: str) -> int:
@@ -316,7 +389,51 @@ def container_name(sid: str) -> str:
     return f"offline-agent-{sid}"
 
 
-def render_session_setup_script(sid: str, project: Path, cap_mib: int) -> str:
+def project_baseline(project: Path) -> Tuple[str, str]:
+    """("git", host HEAD or "" if unborn) for a repo rooted at project, else ("dir", "").
+
+    Only a .git *directory* counts: a linked worktree's .git file points at a
+    gitdir outside the overlay, so the agent could not commit there anyway.
+    The HEAD comes from the user's own git on the Mac, which --apply also uses.
+    """
+    if not (project / ".git").is_dir():
+        return "dir", ""
+    if shutil.which("git") is None:
+        raise SystemExit(
+            f"error: {project} is a git repo but git is not on PATH; offline-agent needs it "
+            "to record the session's base commit (xcode-select --install)."
+        )
+    head = subprocess.run(
+        ["git", "-C", str(project), "rev-parse", "--verify", "-q", "HEAD"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    return "git", head
+
+
+def _check_commit_id(base: str) -> None:
+    if base and not COMMIT_ID_RE.fullmatch(base):
+        raise ValueError(f"not a commit id: {base!r}")
+
+
+def _check_session_id(sid: str) -> None:
+    if not SESSION_ID_RE.fullmatch(sid):
+        raise ValueError(f"not a session id: {sid!r}")
+
+
+def manifest_find_command(project: Path) -> str:
+    """`find` printing `<type> <size> <mtime> <relpath>\\0` for every non-directory.
+
+    The baseline for non-git --apply: recorded when the session is created,
+    re-run at apply time, and compared for every path the apply would touch.
+    Both runs use the VM's find over the same virtiofs mount, so the mtime
+    formatting matches.
+    """
+    return f"find {shlex.quote(str(project))} -mindepth 1 ! -type d -printf '%y %s %T@ %P\\0'"
+
+
+def render_session_setup_script(
+    sid: str, project: Path, cap_mib: int, *, mode: str = "dir", base: str = ""
+) -> str:
     """Shell script that creates and mounts the session image (idempotent).
 
     Every agent-writable byte of the session lives in `disk.img`, a sparse
@@ -328,11 +445,23 @@ def render_session_setup_script(sid: str, project: Path, cap_mib: int) -> str:
     `discard` punches holes in the image file when the agent deletes files.
     The `path` marker maps the opaque id back to the project for listings.
 
+    The --apply baseline is recorded once, when the image is created: `mode`
+    (git or dir), and either `base` (the host HEAD, empty if unborn) or
+    `manifest` (see manifest_find_command). These sit beside the image, not in
+    it, so the agent cannot rewrite them.
+
     A session dir with `upper/` at its top level predates the image and is
     refused with LEGACY_SESSION_MARKER: its volume's mount options are fixed.
     """
+    _check_commit_id(base)
+    if mode not in ("git", "dir"):
+        raise ValueError(f"unknown session mode {mode!r}")
     d = session_dir(sid)
     m = f"{d}/mnt"
+    if mode == "git":
+        record = f"  printf '%s\\n' '{base}' | sudo tee {d}/base >/dev/null\n"
+    else:
+        record = f"  {manifest_find_command(project)} | sudo tee {d}/manifest >/dev/null\n"
     return f"""\
 set -e
 if [ -d {d}/upper ] && [ ! -e {d}/disk.img ]; then
@@ -341,7 +470,8 @@ if [ -d {d}/upper ] && [ ! -e {d}/disk.img ]; then
 fi
 sudo mkdir -p {m}
 if [ ! -e {d}/disk.img ]; then
-  sudo truncate -s {cap_mib}M {d}/disk.img.new
+  printf '%s\\n' {shlex.quote(mode)} | sudo tee {d}/mode >/dev/null
+{record}  sudo truncate -s {cap_mib}M {d}/disk.img.new
   sudo mkfs.ext4 -q -F {d}/disk.img.new
   sudo mv {d}/disk.img.new {d}/disk.img
 fi
@@ -449,6 +579,389 @@ def colima_start_argv(config: VmConfig, *, create: bool) -> List[str]:
     if create:
         argv += ["--disk", str(config.disk_gib), "--root-disk", str(config.root_disk_gib)]
     return argv
+
+
+# ── Export / apply helpers ─────────────────────────────────────────────────────
+#
+# Every read of the agent's work runs against the *merged* overlay view, never
+# the upper dir (whiteouts and copy-ups make the upper dir a poor diff; see
+# plans/offline-agent.md, Phase 1 results).
+
+def parse_kv(text: str) -> Dict[str, str]:
+    """`KEY=value` lines into a dict (later keys win; other lines ignored)."""
+    out: Dict[str, str] = {}
+    for line in text.replace("\r", "").splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            out[key.strip()] = value.strip()
+    return out
+
+
+@dataclass
+class SessionInfo:
+    sid: str
+    project: Optional[Path]
+    exists: bool
+    legacy: bool = False
+    mode: str = "dir"
+    base: str = ""
+    baseline: bool = False   # mode/base markers were recorded at creation
+    manifest: bool = False   # non-git baseline manifest present
+
+
+def render_session_info_script(sid: str) -> str:
+    """Print the session's markers as KEY=value lines (read-only)."""
+    _check_session_id(sid)
+    d = session_dir(sid)
+    return f"""\
+if [ ! -d {d} ]; then echo EXISTS=no; exit 0; fi
+echo EXISTS=yes
+if [ -d {d}/upper ] && [ ! -e {d}/disk.img ]; then echo LEGACY=yes; else echo LEGACY=no; fi
+if sudo test -e {d}/mode; then echo HAS_MODE=yes; else echo HAS_MODE=no; fi
+echo "MODE=$(sudo cat {d}/mode 2>/dev/null)"
+echo "BASE=$(sudo cat {d}/base 2>/dev/null)"
+echo "PROJECT=$(sudo cat {d}/path 2>/dev/null)"
+if sudo test -e {d}/manifest; then echo MANIFEST=yes; else echo MANIFEST=no; fi
+"""
+
+
+def parse_session_info(text: str, sid: str, project: Optional[Path]) -> SessionInfo:
+    """SessionInfo from render_session_info_script output.
+
+    `project` (from the cwd) wins over the path marker. A session with no mode
+    marker predates Phase 4: its mode is inferred from the host and it has no
+    baseline, so --apply refuses it.
+    """
+    kv = parse_kv(text)
+    if kv.get("EXISTS") != "yes":
+        return SessionInfo(sid=sid, project=project, exists=False)
+    if project is None and kv.get("PROJECT"):
+        project = Path(kv["PROJECT"])
+    baseline = kv.get("HAS_MODE") == "yes" and kv.get("MODE") in ("git", "dir")
+    if baseline:
+        mode = kv["MODE"]
+    else:
+        mode = "git" if project is not None and (project / ".git").is_dir() else "dir"
+    base = kv.get("BASE", "") if baseline and mode == "git" else ""
+    _check_commit_id(base)
+    return SessionInfo(
+        sid=sid,
+        project=project,
+        exists=True,
+        legacy=kv.get("LEGACY") == "yes",
+        mode=mode,
+        base=base,
+        baseline=baseline,
+        manifest=kv.get("MANIFEST") == "yes",
+    )
+
+
+def parse_manifest(data: bytes) -> Dict[str, str]:
+    """`<type> <size> <mtime> <path>\\0` records (manifest_find_command) into {path: "type size mtime"}."""
+    out: Dict[str, str] = {}
+    for rec in data.split(b"\0"):
+        if not rec:
+            continue
+        parts = rec.decode("utf-8", "surrogateescape").split(" ", 3)
+        if len(parts) == 4:
+            out[parts[3]] = " ".join(parts[:3])
+    return out
+
+
+class Change(NamedTuple):
+    kind: str    # create | modify | delete
+    path: str    # relative, no trailing slash
+    ftype: str   # f (file), d (directory), L (symlink)
+
+
+def parse_itemize(text: str) -> List[Change]:
+    """Parse `rsync --out-format='%i %n'` lines into changes, merged view → host.
+
+    Skipped as noise: directories whose only difference is their mtime (any
+    directory the agent created a file in), and file lines with nothing but
+    an mtime change (no data transferred). Device/special lines cannot occur:
+    render_rsync_script does not copy them.
+    """
+    changes: List[Change] = []
+    for line in text.splitlines():
+        if len(line) < 13 or line[11] != " ":
+            continue
+        code, name = line[:11], line[12:]
+        is_dir = name.endswith("/")
+        path = name.rstrip("/")
+        if code.startswith("*deleting"):
+            changes.append(Change("delete", path, "d" if is_dir else "f"))
+            continue
+        update, ftype, flags = code[0], code[1], code[2:]
+        if ftype not in "fdL" or path in ("", "."):
+            continue
+        if flags.startswith("+"):
+            changes.append(Change("create", path, ftype))
+        elif update == "." and set(flags) <= set(".tT"):
+            continue
+        else:
+            changes.append(Change("modify", path, ftype))
+    return changes
+
+
+def unsupported_names(changes: Iterable[Change]) -> List[str]:
+    """Paths rsync printed escaped (`\\#ooo`): they would not match the manifest or the filesystem."""
+    return [c.path for c in changes if "\\#" in c.path]
+
+
+def find_conflicts(
+    changes: Iterable[Change], baseline: Mapping[str, str], current: Mapping[str, str]
+) -> List[str]:
+    """Paths --apply would write or delete that changed on the host since the session began.
+
+    The lower layer is live, so a host edit to a file the agent never touched
+    shows through and produces no change at all. A host edit to a file the
+    agent *also* changed is hidden by the upper copy, and rsync would silently
+    overwrite it; comparing the host against the creation-time manifest is the
+    only way to see it. Directories are judged by their contents.
+    """
+    return [
+        c.path for c in changes
+        if c.ftype != "d" and baseline.get(c.path) != current.get(c.path)
+    ]
+
+
+def export_members(changes: Iterable[Change]) -> Tuple[List[str], List[str]]:
+    """(tarball members, deleted paths) for a non-git --export.
+
+    The tarball holds created and modified files and symlinks, plus created
+    directories (so empty ones survive). Deleted directories keep a trailing
+    slash in the list.
+    """
+    tar: List[str] = []
+    deleted: List[str] = []
+    for c in changes:
+        if c.kind == "delete":
+            deleted.append(c.path + ("/" if c.ftype == "d" else ""))
+        elif c.ftype != "d" or c.kind == "create":
+            tar.append(c.path)
+    return tar, deleted
+
+
+def render_rsync_script(dry_run: bool, src: str = MERGED_MOUNT, dst: str = HOST_MOUNT) -> str:
+    """rsync merged view → host directory, itemizing every change.
+
+    -rlpt, not -a: owners, groups, devices and specials are not copied
+    (virtiofs shows everything as 0:0 anyway). -8 prints UTF-8 names as-is;
+    anything rsync still escapes is caught by unsupported_names.
+    """
+    n = " -n" if dry_run else ""
+    return (
+        f"command -v rsync >/dev/null || {{ echo {NO_RSYNC_MARKER} >&2; exit 3; }}\n"
+        f"rsync -rlpt -8 --delete{n} --out-format='%i %n' "
+        f"{shlex.quote(src)}/ {shlex.quote(dst)}/\n"
+    )
+
+
+def render_dir_diff_script(src: str = MERGED_MOUNT, dst: str = HOST_MOUNT) -> str:
+    """Unified diff host → merged for each NUL-separated relative path on stdin."""
+    return f"""\
+while IFS= read -r -d '' p; do
+  diff -uN --no-dereference --label "a/$p" --label "b/$p" {shlex.quote(dst)}/"$p" {shlex.quote(src)}/"$p" || true
+done
+"""
+
+
+def render_tar_script(src: str = MERGED_MOUNT) -> str:
+    """tar to stdout of the NUL-separated relative paths on stdin."""
+    return f"tar -C {shlex.quote(src)} --null --no-recursion -cf - -T -\n"
+
+
+def render_git_script(action: str, base: str, root: str = MERGED_MOUNT) -> str:
+    """Shell script for one read-only git action on the merged repo.
+
+    inspect  HEAD=, DIRTY= (porcelain lines incl. untracked), ANCESTOR= (base set only)
+    log      commits since base, with --stat
+    wip      binary diff of HEAD → working tree, untracked files included
+    diff     log + wip, with headers (for --diff)
+    patch    format-patch mbox of the commits since base
+    bundle   git bundle of the commits since base, to stdout
+
+    `base` empty means the host repo was unborn: everything reachable from
+    HEAD counts. wip stages into a throwaway index and object dir under
+    $TMPDIR, so the repo itself is only read (the helper mounts it read-only).
+    """
+    if action not in GIT_ACTIONS:
+        raise ValueError(f"unknown git action {action!r}")
+    _check_commit_id(base)
+    rng = f"{base}..HEAD" if base else "HEAD"
+    patch_rng = rng if base else "--root HEAD"
+    script = f"""\
+set -e
+export GIT_OPTIONAL_LOCKS=0
+cd {shlex.quote(root)}
+g() {{ git {GIT_SAFE_CONFIG} "$@"; }}
+has_head() {{ g rev-parse -q --verify HEAD >/dev/null; }}
+log() {{
+  if has_head; then g log --stat {GIT_PLAIN_DIFF} {rng}; fi
+}}
+wip() {{
+  w=$(mktemp -d)
+  mkdir -p "$w/objects"
+  if [ -f .git/index ]; then cp .git/index "$w/index"; fi
+  tree=$(g rev-parse -q --verify 'HEAD^{{tree}}' || g hash-object -t tree /dev/null)
+  export GIT_INDEX_FILE="$w/index" GIT_OBJECT_DIRECTORY="$w/objects" GIT_ALTERNATE_OBJECT_DIRECTORIES="$PWD/.git/objects"
+  g add -A
+  g diff --cached --binary {GIT_PLAIN_DIFF} "$tree"
+  unset GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+  rm -rf "$w"
+}}
+"""
+    if action == "inspect":
+        script += 'echo "HEAD=$(g rev-parse -q --verify HEAD || true)"\n'
+        script += 'echo "DIRTY=$(g status --porcelain -uall | wc -l | tr -d \' \')"\n'
+        if base:
+            script += (
+                f"if g merge-base --is-ancestor {base} HEAD 2>/dev/null; "
+                "then echo ANCESTOR=yes; else echo ANCESTOR=no; fi\n"
+            )
+    elif action == "log":
+        script += "log\n"
+    elif action == "wip":
+        script += "wip\n"
+    elif action == "diff":
+        since = f"session start ({base[:12]})" if base else "session start (repo was empty)"
+        script += f"echo '### Commits since {since}'\nlog\necho\n"
+        script += "echo '### Uncommitted changes (untracked files included)'\nwip\n"
+    elif action == "patch":
+        script += f"if has_head; then g format-patch --stdout --binary {GIT_PLAIN_DIFF} {patch_rng}; fi\n"
+    elif action == "bundle":
+        script += f"g bundle create -q - {rng}\n"
+    return script
+
+
+def git_apply_decision(
+    *, base: str, host_head: str, merged_head: str, ancestor: Optional[bool], dirty: int
+) -> Tuple[str, str]:
+    """("apply" | "noop" | "refuse", message) for a git --apply."""
+    if host_head != base:
+        return "refuse", (
+            f"the host repo's HEAD moved since the session started "
+            f"({base[:12] or 'empty repo'} → {host_head[:12] or 'none'}). "
+            "Use --export and apply the patch by hand."
+        )
+    if dirty:
+        return "refuse", (
+            f"the session has {dirty} uncommitted change(s). Commit them inside the session "
+            "(or save them with --export), then retry."
+        )
+    if merged_head == base:
+        return "noop", "the session has no new commits; nothing to apply."
+    if base and not ancestor:
+        return "refuse", (
+            f"the session's HEAD does not descend from the base commit {base[:12]} "
+            "(history was rewritten in the session). Use --export instead."
+        )
+    return "apply", f"fast-forward {base[:12] or 'empty repo'} → {merged_head[:12]}"
+
+
+def git_session_unexported(*, base: str, merged_head: str, dirty: int, host_contains: bool) -> bool:
+    """True if a git session holds work that is not on the host (blocks --discard)."""
+    if dirty:
+        return True
+    if merged_head in ("", base):
+        return False
+    return not host_contains
+
+
+def helper_argv(
+    sid: str, script: str, *, host: Optional[Path] = None, host_rw: bool = False, stdin: bool = False
+) -> List[str]:
+    """argv for a short-lived helper over the session's merged view.
+
+    No network, read-only root and overlay, no logs. The host directory is
+    mounted only for non-git diffs (read-only) and the non-git --apply
+    (read-write); git work never shares a container with a host mount.
+    """
+    argv = ["docker", "run", "--rm"]
+    if stdin:
+        argv.append("-i")
+    argv += [
+        "--network", "none",
+        "--read-only",
+        "--tmpfs", f"/tmp:{TMPFS_MOUNTS[0][1]}",
+        "--memory", CONTAINER_MEMORY,
+        "--pids-limit", str(CONTAINER_PIDS_LIMIT),
+        "--log-driver", "none",
+        "-v", f"{volume_name(sid)}:{MERGED_MOUNT}:ro,nocopy",
+    ]
+    if host is not None:
+        argv += ["-v", f"{host}:{HOST_MOUNT}" + ("" if host_rw else ":ro")]
+    argv += ["-e", "TMPDIR=/tmp", IMAGE_TAG, "bash", "-c", script]
+    return argv
+
+
+def render_session_table_script() -> str:
+    """One `id\\tmode\\tstate\\tused_kib\\tcap_bytes\\tpath` line per session dir."""
+    return f"""\
+for d in {SESSIONS_ROOT}/*/; do
+  [ -d "$d" ] || continue
+  d=${{d%/}}
+  mode=$(sudo cat "$d/mode" 2>/dev/null || true)
+  if [ -e "$d/disk.img" ]; then
+    cap=$(sudo stat -c %s "$d/disk.img")
+    if sudo mountpoint -q "$d/mnt"; then
+      state=mounted; used=$(sudo df -Pk "$d/mnt" | awk 'NR==2 {{print $3}}')
+    else
+      state=unmounted; used=$(sudo du -k "$d/disk.img" | awk '{{print $1}}')
+    fi
+  else
+    state=legacy; cap=; used=$(sudo du -sk "$d/upper" 2>/dev/null | awk '{{print $1}}')
+  fi
+  printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$(basename "$d")" "$mode" "$state" "$used" "$cap" "$(sudo cat "$d/path" 2>/dev/null)"
+done
+"""
+
+
+def parse_session_table(text: str) -> List[Dict[str, str]]:
+    rows = []
+    for line in text.replace("\r", "").splitlines():
+        parts = line.split("\t", 5)
+        if len(parts) == 6:
+            rows.append(dict(zip(("sid", "mode", "state", "used_kib", "cap_bytes", "path"), parts)))
+    return rows
+
+
+def _human(n_bytes: Optional[int]) -> str:
+    if n_bytes is None:
+        return "?"
+    for unit, size in (("G", 1024 ** 3), ("M", 1024 ** 2), ("K", 1024)):
+        if n_bytes >= size:
+            return f"{n_bytes / size:.1f}{unit}"
+    return f"{n_bytes}B"
+
+
+def format_session_table(rows: List[Dict[str, str]], running: Set[str]) -> str:
+    """Render --list-sessions. Used is the image's df (mounted) or allocated blocks (unmounted)."""
+    def num(s: str) -> Optional[int]:
+        return int(s) if s.isdigit() else None
+
+    lines = [f"{'ID':<12}  {'MODE':<4}  {'STATE':<9}  {'USED / CAP':<15}  {'':<7}  PATH"]
+    for r in rows:
+        used = num(r["used_kib"])
+        size = f"{_human(used * 1024 if used is not None else None)} / {_human(num(r['cap_bytes']))}"
+        run = "running" if container_name(r["sid"]) in running else ""
+        lines.append(
+            f"{r['sid']:<12}  {r['mode'] or '?':<4}  {r['state']:<9}  {size:<15}  {run:<7}  {r['path'] or '(unknown)'}"
+        )
+    return "\n".join(lines)
+
+
+def render_discard_script(sid: str) -> str:
+    """Unmount the session image and remove the session dir (image and markers included)."""
+    _check_session_id(sid)
+    d = session_dir(sid)
+    return f"""\
+set -e
+if sudo mountpoint -q {d}/mnt; then sudo umount {d}/mnt; fi
+sudo rm -rf {d}
+echo {DISCARDED_MARKER}
+"""
 
 
 def render_iptables_apply_script(
@@ -981,13 +1494,20 @@ def rebuild_teardown(config: VmConfig) -> None:
         print("==> Keeping Colima VM; only the image will be rebuilt.")
 
 
-def ensure_session(config: VmConfig, project: Path, sid: str, cap_mib: int, facts: dict) -> None:
-    """Create and mount the session image, then its overlay volume (idempotent)."""
+def ensure_session(
+    config: VmConfig, project: Path, sid: str, cap_mib: int, facts: dict,
+    *, mode: str = "dir", base: str = "",
+) -> None:
+    """Create and mount the session image, then its overlay volume (idempotent).
+
+    mode/base are the --apply baseline, recorded only if the image is created now.
+    """
     avail = facts.get("ROOT_AVAIL_KIB", "")
     warning = low_space_warning(int(avail) if avail.isdigit() else None, cap_mib)
     if warning:
         print(warning, file=sys.stderr)
-    result = vm_sh(render_session_setup_script(sid, project, cap_mib), profile=config.profile_name, check=False)
+    script = render_session_setup_script(sid, project, cap_mib, mode=mode, base=base)
+    result = vm_sh(script, profile=config.profile_name, check=False)
     if LEGACY_SESSION_MARKER in result.stdout.splitlines():
         raise SystemExit(legacy_session_message(sid, project))
     if result.returncode != 0:
@@ -1126,16 +1646,338 @@ def notice_moved_harness_state(paths: Paths) -> None:
     print(f"==> Note: {text.rstrip()}\n    (shown once; see {paths.moved_state_notice})")
 
 
+# ── Session commands: --diff / --export / --apply / --discard / --list-sessions ─
+
+def run_helper(
+    sid: str, script: str, *, host: Optional[Path] = None, host_rw: bool = False,
+    stdin: Optional[bytes] = None,
+) -> bytes:
+    """Run a helper container (helper_argv) and return its stdout; any failure is fatal."""
+    argv = helper_argv(sid, script, host=host, host_rw=host_rw, stdin=stdin is not None)
+    result = subprocess.run(argv, input=stdin, capture_output=True)
+    if result.returncode != 0:
+        err = result.stderr.decode("utf-8", "replace").strip()
+        if NO_RSYNC_MARKER in err:
+            raise SystemExit(f"error: {IMAGE_TAG} predates rsync support; run offline-agent.py --rebuild.")
+        raise SystemExit(f"error: helper container failed (exit {result.returncode}).\n{err}")
+    return result.stdout
+
+
+def _text(data: bytes) -> str:
+    return data.decode("utf-8", "replace")
+
+
+def _nul_list(paths: Iterable[str]) -> bytes:
+    return b"".join(p.encode("utf-8", "surrogateescape") + b"\0" for p in paths)
+
+
+def _confirm(prompt: str) -> bool:
+    try:
+        return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+def _write_new(path: Path, data: bytes) -> None:
+    # "xb": never overwrite. Every output path is checked up front, so a clash
+    # here means something raced us.
+    with open(path, "xb") as fh:
+        fh.write(data)
+
+
+def _host_git(project: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(project), *args], capture_output=True, text=True, check=check)
+
+
+def require_session_stopped(info: SessionInfo, verb: str) -> None:
+    """--apply and --discard must not race an agent still writing to the overlay."""
+    name = container_name(info.sid)
+    if docker_container_running(name):
+        raise SystemExit(f"error: {name} is running; exit every shell in the session before you {verb}.")
+
+
+def load_session(args: argparse.Namespace, config: VmConfig) -> SessionInfo:
+    """Find the target session (cwd's, or --session) and read its markers."""
+    project: Optional[Path] = None
+    if args.session:
+        sid = args.session
+    else:
+        try:
+            project = resolve_project(Path.cwd(), Path.home())
+        except ProjectError as exc:
+            raise SystemExit(f"error: {exc}")
+        sid = session_id(project)
+    out = vm_sh(render_session_info_script(sid), profile=config.profile_name, check=False).stdout
+    info = parse_session_info(out, sid, project)
+    if not info.exists:
+        raise SystemExit(f"error: no session for {project or sid}; see --list-sessions.")
+    return info
+
+
+def mount_session(info: SessionInfo, config: VmConfig, args: argparse.Namespace) -> None:
+    """Make the merged view usable after a VM restart (the loop mount is gone then)."""
+    if info.legacy:
+        raise SystemExit(legacy_session_message(info.sid, info.project or Path("?")))
+    if info.project is None:
+        raise SystemExit(f"error: session {info.sid} has no path marker; only --discard --force can act on it.")
+    ensure_session(config, info.project, info.sid, args.session_disk, {}, mode=info.mode, base=info.base)
+
+
+def require_git_baseline(info: SessionInfo) -> None:
+    if not info.baseline:
+        raise SystemExit(
+            f"error: session {info.sid} predates base-commit recording, so its changes cannot be "
+            "computed. Save them by hand with the bundle recipe below, then --discard --force.\n\n"
+            + legacy_session_message(info.sid, info.project or Path("?")).split("\n", 2)[2]
+        )
+
+
+def git_inspect(info: SessionInfo) -> Dict[str, str]:
+    return parse_kv(_text(run_helper(info.sid, render_git_script("inspect", info.base))))
+
+
+def dir_changes(info: SessionInfo) -> List[Change]:
+    assert info.project is not None
+    out = run_helper(info.sid, render_rsync_script(dry_run=True), host=info.project)
+    return parse_itemize(_text(out))
+
+
+def print_dir_changes(changes: List[Change]) -> None:
+    labels = {"create": "A", "modify": "M", "delete": "D"}
+    for c in changes:
+        print(f"  {labels[c.kind]}  {c.path}{'/' if c.ftype == 'd' else ''}")
+
+
+def cmd_diff(info: SessionInfo) -> None:
+    if info.mode == "git":
+        require_git_baseline(info)
+        sys.stdout.write(_text(run_helper(info.sid, render_git_script("diff", info.base))))
+        return
+    changes = dir_changes(info)
+    if not changes:
+        print("No changes.")
+        return
+    print(f"### {len(changes)} change(s) (A added, M modified, D deleted)")
+    print_dir_changes(changes)
+    content = [c.path for c in changes if c.kind != "delete" and c.ftype != "d"]
+    if content:
+        print()
+        out = run_helper(info.sid, render_dir_diff_script(), host=info.project, stdin=_nul_list(content))
+        sys.stdout.write(_text(out))
+
+
+def cmd_export(info: SessionInfo, dest: Path) -> None:
+    sidecar = dest.with_name(dest.name + (".wip.diff" if info.mode == "git" else ".deleted"))
+    clash = [p for p in (dest, sidecar) if p.exists() or p.is_symlink()]
+    if clash:
+        raise SystemExit(f"error: {', '.join(map(str, clash))} already exists; not overwriting.")
+    if info.mode == "git":
+        require_git_baseline(info)
+        patch = run_helper(info.sid, render_git_script("patch", info.base))
+        wip = run_helper(info.sid, render_git_script("wip", info.base))
+        if not patch and not wip:
+            print("No changes to export.")
+            return
+        if patch:
+            _write_new(dest, patch)
+            print(f"==> Wrote {dest} (commits since the session started; apply with `git am`)")
+        if wip:
+            _write_new(sidecar, wip)
+            print(f"==> Wrote {sidecar} (uncommitted changes; apply with `git apply`)")
+        return
+    changes = dir_changes(info)
+    bad = unsupported_names(changes)
+    if bad:
+        raise SystemExit("error: cannot export paths rsync had to escape:\n" + "".join(f"  {p}\n" for p in bad))
+    members, deleted = export_members(changes)
+    if not members and not deleted:
+        print("No changes to export.")
+        return
+    if members:
+        _write_new(dest, run_helper(info.sid, render_tar_script(), stdin=_nul_list(members)))
+        print(f"==> Wrote {dest} ({len(members)} added or changed path(s))")
+    if deleted:
+        _write_new(sidecar, "".join(f"{p}\n" for p in deleted).encode("utf-8", "surrogateescape"))
+        print(f"==> Wrote {sidecar} ({len(deleted)} deleted path(s))")
+
+
+def apply_git(info: SessionInfo, dry_run: bool) -> None:
+    """Fast-forward the host branch to the session's HEAD, with the user's own git.
+
+    The helper only reads the overlay and emits a bundle; git on the Mac
+    fetches it (fsck'ing every object) and fast-forwards. No agent-written
+    repo config is ever read by the host's git.
+    """
+    require_git_baseline(info)
+    assert info.project is not None
+    if shutil.which("git") is None:
+        raise SystemExit("error: git is not on PATH on the Mac; --apply needs it. Use --export instead.")
+    host_head = _host_git(info.project, "rev-parse", "--verify", "-q", "HEAD", check=False).stdout.strip()
+    facts = git_inspect(info)
+    merged_head = facts.get("HEAD", "")
+    ancestor = {"yes": True, "no": False}.get(facts.get("ANCESTOR", ""))
+    dirty = int(facts.get("DIRTY") or 0)
+    decision, message = git_apply_decision(
+        base=info.base, host_head=host_head, merged_head=merged_head, ancestor=ancestor, dirty=dirty,
+    )
+    if decision == "refuse":
+        raise SystemExit(f"error: not applying: {message}")
+    if decision == "noop":
+        print(message)
+        return
+    sys.stdout.write(_text(run_helper(info.sid, render_git_script("log", info.base))))
+    print(f"\n==> Would {message} in {info.project}")
+    if dry_run or not _confirm("Apply these commits to the host repo?"):
+        print("==> Nothing written.")
+        return
+    tmp = Path(tempfile.mkdtemp(prefix="offline-agent-"))
+    try:
+        bundle = tmp / "session.bundle"
+        bundle.write_bytes(run_helper(info.sid, render_git_script("bundle", info.base)))
+        _host_git(info.project, "-c", "transfer.fsckObjects=true", "fetch", "-q", "--no-tags", str(bundle), "HEAD")
+        fetched = _host_git(info.project, "rev-parse", "FETCH_HEAD").stdout.strip()
+        if fetched != merged_head:
+            raise SystemExit(f"error: bundle HEAD {fetched[:12]} is not the inspected {merged_head[:12]}; not merging.")
+        merged = _host_git(info.project, "merge", "--ff-only", "FETCH_HEAD", check=False)
+        sys.stdout.write(merged.stdout)
+        if merged.returncode != 0:
+            raise SystemExit(f"error: git merge --ff-only failed:\n{merged.stderr.strip()}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("==> Applied. The session still exists; run --discard when you are done with it.")
+
+
+def apply_dir(info: SessionInfo, config: VmConfig, dry_run: bool) -> None:
+    """rsync the merged view onto the host, after checking the host for conflicting edits."""
+    assert info.project is not None
+    if not info.manifest:
+        raise SystemExit(
+            f"error: session {info.sid} has no baseline manifest (it predates --apply), so host-side "
+            "edits cannot be detected. Use --export, then --discard --force."
+        )
+    changes = dir_changes(info)
+    if not changes:
+        print("No changes; nothing to apply.")
+        return
+    bad = unsupported_names(changes)
+    if bad:
+        raise SystemExit("error: not applying; rsync had to escape these paths:\n" + "".join(f"  {p}\n" for p in bad))
+    d = session_dir(info.sid)
+    read = lambda cmd: base64.b64decode(vm_sh(cmd, profile=config.profile_name, check=False).stdout.strip() or b"")
+    baseline = parse_manifest(read(f"sudo base64 -w0 {d}/manifest"))
+    current = parse_manifest(read(f"{manifest_find_command(info.project)} | base64 -w0"))
+    conflicts = find_conflicts(changes, baseline, current)
+    if conflicts:
+        raise SystemExit(
+            "error: not applying; these paths changed on the host since the session started, and the "
+            "session changed them too:\n" + "".join(f"  {p}\n" for p in conflicts)
+            + "Use --export and merge by hand."
+        )
+    print(f"### {len(changes)} change(s) to {info.project} (A added, M modified, D deleted)")
+    print_dir_changes(changes)
+    if dry_run or not _confirm(f"\nApply these changes to {info.project}?"):
+        print("==> Nothing written.")
+        return
+    run_helper(info.sid, render_rsync_script(dry_run=False), host=info.project, host_rw=True)
+    print("==> Applied. The session still exists; run --discard when you are done with it.")
+
+
+def cmd_apply(info: SessionInfo, config: VmConfig, dry_run: bool) -> None:
+    require_session_stopped(info, "apply")
+    if info.mode == "git":
+        apply_git(info, dry_run)
+    else:
+        apply_dir(info, config, dry_run)
+
+
+def session_unexported(info: SessionInfo) -> Optional[str]:
+    """Why discarding would lose work, or None if everything is on the host."""
+    if info.mode == "git":
+        require_git_baseline(info)
+        assert info.project is not None
+        facts = git_inspect(info)
+        head, dirty = facts.get("HEAD", ""), int(facts.get("DIRTY") or 0)
+        contains = bool(head) and shutil.which("git") is not None and _host_git(
+            info.project, "merge-base", "--is-ancestor", head, "HEAD", check=False,
+        ).returncode == 0
+        if git_session_unexported(base=info.base, merged_head=head, dirty=dirty, host_contains=contains):
+            return f"its HEAD {head[:12]} is not in the host repo, or it has {dirty} uncommitted change(s)"
+        return None
+    changes = dir_changes(info)
+    return f"{len(changes)} change(s) differ from the host" if changes else None
+
+
+def cmd_discard(info: SessionInfo, config: VmConfig, args: argparse.Namespace) -> None:
+    require_session_stopped(info, "discard")
+    if not args.force:
+        if info.legacy or not info.baseline or info.project is None:
+            raise SystemExit(
+                f"error: session {info.sid} predates baselines, so whether it holds unexported work "
+                "cannot be checked. Export it by hand if needed, then --discard --force."
+            )
+        mount_session(info, config, args)
+        reason = session_unexported(info)
+        if reason:
+            raise SystemExit(f"error: not discarding: {reason}. Use --apply or --export first, or --force.")
+    subprocess.run(["docker", "volume", "rm", "-f", volume_name(info.sid)], capture_output=True)
+    out = vm_sh(render_discard_script(info.sid), profile=config.profile_name, check=False)
+    if DISCARDED_MARKER not in out.stdout.splitlines():
+        raise SystemExit(f"error: could not remove {session_dir(info.sid)}:\n{out.stderr.strip()}")
+    print(f"==> Discarded session {info.sid} ({info.project or 'unknown path'})")
+
+
+def cmd_list_sessions(config: VmConfig) -> None:
+    rows = parse_session_table(vm_sh(render_session_table_script(), profile=config.profile_name, check=False).stdout)
+    if not rows:
+        print("No sessions.")
+        return
+    names = subprocess.run(
+        ["docker", "ps", "--filter", "name=^offline-agent-", "--format", "{{.Names}}"],
+        capture_output=True, text=True,
+    ).stdout.split()
+    print(format_session_table(rows, set(names)))
+
+
+def run_session_command(args: argparse.Namespace, config: VmConfig) -> None:
+    if colima_info(config.profile_name) is None:
+        raise SystemExit(f"error: the '{config.profile_name}' VM does not exist yet, so there are no sessions.")
+    ensure_colima_vm(config)
+    if args.list_sessions:
+        cmd_list_sessions(config)
+        return
+    info = load_session(args, config)
+    if args.discard:
+        if not args.force:
+            ensure_image(probe_vm(config))  # the unexported-work check runs helpers
+        cmd_discard(info, config, args)
+        return
+    mount_session(info, config, args)
+    ensure_image(probe_vm(config))
+    if args.diff:
+        cmd_diff(info)
+    elif args.export:
+        cmd_export(info, Path(args.export).expanduser())
+    elif args.apply:
+        cmd_apply(info, config, args.dry_run)
+
+
 # ── main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     args = parse_args()
+    if args.diff or args.export or args.apply or args.discard or args.list_sessions:
+        config = VmConfig(backend=args.backend, memory_gib=args.memory, cpus=args.cpus,
+                          disk_gib=args.disk, root_disk_gib=args.root_disk)
+        ensure_docker_context(config.profile_name)
+        run_session_command(args, config)
+        return
     try:
         project = resolve_project(Path.cwd(), Path.home())
     except ProjectError as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
     sid = session_id(project)
+    mode, base = project_baseline(project)
 
     paths = Paths()
     config = VmConfig(
@@ -1165,7 +2007,7 @@ def main() -> None:
 
     apply_firewall(config)
     ensure_image(facts)
-    ensure_session(config, project, sid, args.session_disk, facts)
+    ensure_session(config, project, sid, args.session_disk, facts, mode=mode, base=base)
 
     write_harness_configs(paths, config, join_discovery())
     notice_moved_harness_state(paths)
