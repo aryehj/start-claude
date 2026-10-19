@@ -120,20 +120,30 @@ test_egress_by_name_blocked() {
 }
 
 # ── 4. DNS blackholed, failing fast ──────────────────────────────────────────
+# A name must never resolve, and the failure should come from the REJECT, not
+# a silent drop. The REJECT's ICMP reply is rate-limited by the kernel (~1/s
+# per destination), so right after the egress tests a lookup can still wait
+# out Docker's embedded-DNS 4 s upstream timeout. One fast failure proves the
+# REJECT is in the path (a silent drop is slow every time), so retry after a
+# pause before calling it slow.
 test_external_dns_blackholed() {
-  local start end ms
-  start=$(date +%s%N)
-  if getent hosts example.com >/dev/null 2>&1; then
-    fail "external-dns-blackholed" "example.com resolved — DNS is an exfil channel"
-    return
-  fi
-  end=$(date +%s%N)
-  ms=$(( (end - start) / 1000000 ))
-  if (( ms < 2000 )); then
-    pass "external-dns-blackholed: example.com did not resolve (${ms} ms)"
-  else
-    fail "external-dns-blackholed" "blocked, but took ${ms} ms (resolver timeout, not a REJECT)"
-  fi
+  local attempt start end ms slowest=0
+  for attempt in 1 2 3; do
+    sleep 3
+    start=$(date +%s%N)
+    if getent hosts example.com >/dev/null 2>&1; then
+      fail "external-dns-blackholed" "example.com resolved — DNS is an exfil channel"
+      return
+    fi
+    end=$(date +%s%N)
+    ms=$(( (end - start) / 1000000 ))
+    if (( ms < 2000 )); then
+      pass "external-dns-blackholed: example.com did not resolve (${ms} ms, attempt $attempt)"
+      return
+    fi
+    (( ms > slowest )) && slowest=$ms
+  done
+  fail "external-dns-blackholed" "never resolved, but every attempt took ≥2 s (slowest ${slowest} ms): queries look silently dropped, not REJECTed"
 }
 
 # ── 5. VM-local services closed ──────────────────────────────────────────────
