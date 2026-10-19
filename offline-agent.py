@@ -65,8 +65,10 @@ DNS_BLACKHOLE = "192.0.2.1"
 # forbids a network filesystem as the upper layer).
 SESSIONS_ROOT = "/var/lib/offline-agent/sessions"
 OVERLAY_UNSAFE_CHARS = ",:\\\n"
-# render_session_setup_script exits with this when it finds a pre-image session.
-LEGACY_SESSION_EXIT = 42
+# render_session_setup_script prints this when it finds a pre-image session.
+# A stdout marker, not an exit code: `colima ssh` exits 1 for any remote
+# failure and only logs the real status ("exit status 42") on stderr.
+LEGACY_SESSION_MARKER = "OFFLINE_AGENT_LEGACY_SESSION"
 
 DEFAULT_MEMORY_GIB = 2
 DEFAULT_CPUS = 2
@@ -327,14 +329,15 @@ def render_session_setup_script(sid: str, project: Path, cap_mib: int) -> str:
     The `path` marker maps the opaque id back to the project for listings.
 
     A session dir with `upper/` at its top level predates the image and is
-    refused with LEGACY_SESSION_EXIT: its volume's mount options are fixed.
+    refused with LEGACY_SESSION_MARKER: its volume's mount options are fixed.
     """
     d = session_dir(sid)
     m = f"{d}/mnt"
     return f"""\
 set -e
 if [ -d {d}/upper ] && [ ! -e {d}/disk.img ]; then
-  exit {LEGACY_SESSION_EXIT}
+  echo {LEGACY_SESSION_MARKER}
+  exit 1
 fi
 sudo mkdir -p {m}
 if [ ! -e {d}/disk.img ]; then
@@ -985,7 +988,7 @@ def ensure_session(config: VmConfig, project: Path, sid: str, cap_mib: int, fact
     if warning:
         print(warning, file=sys.stderr)
     result = vm_sh(render_session_setup_script(sid, project, cap_mib), profile=config.profile_name, check=False)
-    if result.returncode == LEGACY_SESSION_EXIT:
+    if LEGACY_SESSION_MARKER in result.stdout.splitlines():
         raise SystemExit(legacy_session_message(sid, project))
     if result.returncode != 0:
         raise SystemExit(

@@ -227,7 +227,8 @@ def test_session_setup_script_detects_legacy_session_first():
     script = _setup()
     legacy = script.index(f'[ -d {D}/upper ]')
     assert legacy < script.index("mkdir")
-    assert f"exit {oa.LEGACY_SESSION_EXIT}" in script[legacy:script.index("mkdir")]
+    guard = script[legacy:script.index("mkdir")]
+    assert f"echo {oa.LEGACY_SESSION_MARKER}" in guard and "exit 1" in guard
 
 
 def test_legacy_session_message_has_export_and_cleanup_recipe():
@@ -242,7 +243,10 @@ def test_legacy_session_message_has_export_and_cleanup_recipe():
 def test_ensure_session_handles_legacy_exit():
     body = _SOURCE[_SOURCE.index("def ensure_session"):]
     body = body[:body.index("\ndef ")]
-    assert "LEGACY_SESSION_EXIT" in body and "legacy_session_message" in body
+    # colima ssh does not propagate the remote exit code, so the marker is
+    # matched on stdout rather than compared against returncode.
+    assert "LEGACY_SESSION_MARKER in result.stdout" in body and "legacy_session_message" in body
+    assert "result.returncode == " not in body
 
 
 @pytest.mark.parametrize("avail_kib,warns", [
