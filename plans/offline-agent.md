@@ -4,7 +4,8 @@
 
 - [x] Phase 1: Go/no-go on overlayfs-over-virtiofs and offline harness startup (human gate: run on the Mac)
 - [x] Phase 2: Core script usable end to end on a real project (human gate: drive a task with a local model)
-- [ ] Phase 3: Export/apply surface, docs, ADR (human gate: does `--apply` feel safe enough to use)
+- [ ] Phase 3: Bound agent storage; no agent write path to the Mac (human gate: fill each sink on the Mac and confirm only that session breaks)
+- [ ] Phase 4: Export/apply surface, docs, ADR (human gate: does `--apply` feel safe enough to use)
 
 ## Context
 
@@ -120,7 +121,7 @@ VM-level `:r` mount. See Unknowns for an optional hardening check.
    startup time and any hard failures.
 3. **Whiteout and rename handling on export.** Overlay upper dirs encode
    deletions as char devices and renames as redirect xattrs, so copying the
-   upper dir is not a diff. Decision for Phase 3: compute changes from the
+   upper dir is not a diff. Decision for Phase 4: compute changes from the
    *merged* view, never from the upper dir: `git status`/`git diff`/`git
    format-patch` for repos, `rsync -n --delete --itemize-changes` from merged
    to host for non-repos. Confirm `.git` inside the merged view behaves (object
@@ -178,7 +179,7 @@ wiring all behave.
    `ensure_colima_vm` (no `--mount`), `ensure_docker_context`, `probe_vm`
    (bridge IP/CIDR, host IP, image presence, chain presence, session dir
    listing), background inference probe. argparse flags: `--rebuild`,
-   `--backend`, `--memory`, `--cpus`; the overlay flags arrive in Phase 3.
+   `--backend`, `--memory`, `--cpus`; the overlay flags arrive in Phase 4.
 3. Resolve the project: `realpath(os.getcwd())`; hard-error with remediation
    if it is not under `$HOME` (Colima does not mount it) or if it is `$HOME`
    itself. Derive a session id (short hash of the path) and VM-side dirs
@@ -231,13 +232,161 @@ wiring all behave.
 
 - After a session that creates, edits, and deletes files and commits in the
   overlay, `git status` on the host is clean and `ls -la` shows no new
-  entries. Checked by hand at the gate; automated coverage waits for Phase 3's
+  entries. Checked by hand at the gate; automated coverage waits for Phase 4's
   `--diff`.
 - `offline-agent.py` and `start-agent.sh` run concurrently without either
   firewall affecting the other (`tests/test-cross-vm-isolation.sh` pattern,
   extended or copied).
 
-## Phase 3: Export/apply surface, docs, ADR
+## Phase 3: Bound agent storage; no agent write path to the Mac
+
+Human gate: on the Mac, the user fills each write sink from inside a session
+and confirms the agent gets `ENOSPC`/OOM in that session only, the VM and
+other sessions keep working, and the Mac's free space does not move beyond the
+session's cap.
+
+### Context
+
+Phase 2 leaves four places the agent can write, none with a cap smaller than
+"the disk":
+
+| Sink | Lands on | Bound today |
+|---|---|---|
+| Overlay upper dir (`sessions/<sid>/upper`) | VM root disk | Colima's default VM disk (100 GiB sparse file on the Mac; `ensure_colima_vm` passes no `--disk`) |
+| Container writable layer (`/tmp`, `/root/.cache`, …) | VM `/var/lib/docker` | same |
+| `json-file` log of the `-it` TTY stream | VM `/var/lib/docker/containers` | same |
+| Harness bind mounts (`~/.offline-agent/{opencode,pi}`) | **Mac APFS via virtiofs** | Mac free space |
+
+Disk exhaustion is a denial-of-service, not an exfil channel: nothing outside
+the VM observes it. The harms are the Mac's disk filling and the shared VM
+breaking (dockerd fails on a full root disk, taking every session down). The
+fourth row is also the one place agent writes reach the Mac without going
+through the overlay, which the Phase 4 ADR's trust statement should not have
+to caveat.
+
+Design: each session gets its own fixed-size filesystem (a sparse ext4 image,
+loop-mounted in the VM) holding the overlay upper/work dirs *and* the
+harnesses' writable state; the container root is read-only with sized tmpfs
+for scratch; the VM disk gets an explicit cap as a backstop. Default session
+cap **5 GiB**.
+
+Rejected: `docker run --storage-opt size=` (overlay2 supports it only on XFS
+with `pquota`; Colima's VM root is ext4); ext4 project quotas on the VM root
+(needs re-mounting `/` with `prjquota` and tuning the VM's filesystem);
+tmpfs for the overlay upper (loses persistence across `colima stop`, and
+charges agent output to RAM).
+
+### Unknowns / To Verify
+
+1. `mkfs.ext4` and loop devices are available in the Colima VM image
+   (expected: Ubuntu with e2fsprogs; `losetup -f` works as root).
+2. A loop-mounted ext4 image is accepted as overlayfs upper/work (expected:
+   yes, it is a local filesystem; Phase 1 only ruled out network upper dirs).
+3. Whether freed blocks return to the Mac. `mount -o loop,discard` punches
+   holes in the image file on delete; whether the VM disk image on the Mac then
+   shrinks depends on vz's virtio-blk discard support. Measure with `du` on the
+   Colima disk image before/after a fill-and-delete. If it does not shrink,
+   document it: the cap still holds, space is just not reclaimed until
+   `--discard`.
+4. Exactly which paths opencode and pi write outside their state dirs
+   (`~/.local/state`, `~/.npm`, `~/.cache/opencode`, …). Found by trial under
+   `--read-only` (step 4).
+5. How to point each harness at a read-only config plus a writable state dir.
+   Candidates: opencode `OPENCODE_CONFIG` (config file path) with
+   `~/.local/share/opencode` writable; pi per-file `:ro` bind mounts of
+   `agent/models.json` and `agent/settings.json` over a writable `agent/`, or
+   an agent-dir env override if pi has one. Per-file mounts are safe with the
+   current `_write_json`, which truncates in place and keeps the inode; an
+   atomic-rename writer would break them, so note that next to `_write_json`.
+
+### Steps
+
+1. **VM disk cap.** Add `--disk` to `colima start` in `ensure_colima_vm`, from
+   `OFFLINE_AGENT_DISK` / `--disk` (default 10 GiB: roughly 2–3 GiB VM OS,
+   ~1 GiB image, 1–2 GiB of superseded build layers, leaving ~4–5 GiB for
+   sessions). Session images are sparse, so typical sessions cost megabytes
+   and overcommitting the 5 GiB caps is fine, but a single session that fills
+   its whole cap can exhaust the VM. So `ensure_session` reads the VM root's
+   free space (one `df` in `probe_vm`) and warns when it is below the session
+   cap, naming `docker builder prune` and old sessions as the remedies.
+   Measure the real OS + image footprint at the gate (`df /` and
+   `docker system df` in a fresh VM) and raise the default if it leaves less
+   than one session cap free. Extend
+   the running-VM mismatch warning to disk (`colima list --json` reports it).
+   Colima can grow but not shrink a disk, so an existing VM only picks up a
+   smaller cap via `--rebuild` + VM delete; the rebuild prompt's
+   unexported-sessions warning already covers the data-loss side.
+2. **Per-session filesystem.** Rework `render_session_setup_script`: create
+   `sessions/<sid>/disk.img` with `truncate -s <cap>` and `mkfs.ext4 -q -F`
+   only if absent; `mount -o loop,discard` it at `sessions/<sid>/mnt` only if
+   not already mounted (`mountpoint -q`), since loop mounts do not survive a
+   VM restart and `ensure_session` already runs on every start; create
+   `mnt/{upper,work,harness}` inside it. `volume_create_argv` points
+   `upperdir`/`workdir` at `mnt/upper`/`mnt/work`. Cap from
+   `OFFLINE_AGENT_SESSION_DISK` / `--session-disk` (default 5 GiB), applied
+   at session creation only; growing an existing session is `truncate -s` +
+   `resize2fs` on the mounted image, documented but not automated. The image
+   also caps inodes (ext4 default ≈ one per 16 KiB, ~320k at 5 GiB; only
+   new or copied-up files count, not the lower layer).
+3. **Legacy sessions.** A session dir with `upper/` but no `disk.img` predates
+   this phase, and its volume's mount options are fixed at create time.
+   `ensure_session` hard-errors with remediation (export with the manual
+   bundle recipe, then remove the volume and session dir) rather than
+   migrating; there is one such session today and Phase 4's `--discard` does
+   not exist yet.
+4. **Read-only container root.** `docker run` gains `--read-only`, sized
+   `--tmpfs` mounts for the paths found under Unknown #4 (start with
+   `/tmp:size=512m`, `/root/.cache:size=256m`), `--memory 1536m` (tmpfs is
+   charged to the container's memory cgroup; the VM has 2 GiB) and
+   `--pids-limit 512`. With no egress nothing can `apt`/`pip`/`npm install`
+   at runtime, so a writable root buys nothing but a disk bomb. Note that a
+   uv venv under `$TMPDIR` lands in the `/tmp` tmpfs; packages must come from
+   the image anyway. Sizes are constants, tuned at the gate.
+5. **No TTY log.** `--log-driver none` on `docker run`: an interactive shell
+   has no use for `docker logs`, and without it a runaway `cat` is persisted
+   to the VM disk. (`docker exec` output is not logged.)
+6. **Harness state off the Mac.** Config the script writes every run stays on
+   the host under `~/.offline-agent/` and is mounted `:ro`; everything the
+   harnesses write (opencode's data dir, pi's sessions/auth) moves into
+   `mnt/harness/` in the session image, mounted read-write. Mechanism per
+   Unknown #5. History becomes per-session and is lost with the session, the
+   same as overlay work, which is the right trade for a quarantine. Leave the
+   existing `~/.offline-agent/opencode/data` in place, unmounted; say so once.
+   Side effect: with no writable `$HOME` mount left in the container, Unknown
+   #4 of the main plan (`colima start --mount "$HOME:r"`) no longer needs a
+   writable carve-out for harness state.
+7. **Tests.** Update `test_session_setup_script_creates_upper_work_and_marker`,
+   `test_volume_create_argv_is_overlay_over_project`, and
+   `test_run_mounts_harness_state_only` for the new layout. Add static checks:
+   setup script is idempotent (mkfs guarded by existence, mount guarded by
+   `mountpoint -q`), upper/work/harness under `mnt/`; `docker run` argv has
+   `--read-only`, sized `--tmpfs`, `--memory`, `--pids-limit`,
+   `--log-driver none`, and every host-path `-v` is `:ro`; `colima start`
+   has `--disk`; legacy-session detection; sizing env/flag parsing; the
+   low-free-space warning fires below one session cap and not above it.
+8. **Smoke test.** `tests/test-offline-agent-limits.sh`, in-container like the
+   firewall test, meant for a scratch project started with
+   `OFFLINE_AGENT_SESSION_DISK=256M` so a fill is quick: `/` is read-only;
+   `dd` into the project dir hits `ENOSPC` near the cap; `/tmp` fill hits its
+   tmpfs size; the harness state dir is writable and on the session image;
+   no mount in `findmnt` is a writable virtiofs path; the cgroup's
+   `pids.max` and `memory.max` match the configured caps (read, not
+   fork-bombed). It deletes its fill files on exit.
+
+### Acceptance criteria
+
+- Filling the project dir, `/tmp`, and the harness state dir each fails
+  inside the session with `ENOSPC` (or OOM for tmpfs past the memory cap);
+  a second session and a fresh `offline-agent.py` start in another directory
+  still work; `docker info` in the VM still works.
+- On a fresh 10 GiB VM with the image built, VM free space is at least one
+  session cap, and the low-free-space warning fires when it is not.
+- The Mac's free space drops by at most the session cap during the fill
+  (and by the Unknown #3 answer after delete).
+- `findmnt` in the container shows no read-write mount backed by the Mac.
+- Phase 2's firewall and cross-VM smoke tests still pass.
+
+## Phase 4: Export/apply surface, docs, ADR
 
 Human gate: the user exercises `--diff`, `--export`, `--apply --dry-run`,
 `--apply`, and `--discard` on a real session and judges whether `--apply` is
@@ -257,22 +406,27 @@ conservative enough to trust.
 2. `--apply` refuses to run if the host path's git HEAD moved since the
    session started, or (non-repo) if `rsync -n` shows the host has changes the
    overlay did not make; print the conflict and point at `--export`.
-3. `--discard` removes the volume and the session dir; require the session's
-   `--diff` to be empty or `--force`.
+3. `--discard` removes the volume, unmounts the session image, and removes
+   the session dir (image included); require the session's `--diff` to be
+   empty or `--force`. Every helper-container command calls `ensure_session`
+   first, so the loop mount exists after a VM restart (Phase 3).
+   `--list-sessions` shows each session's used/cap from `df` on its mount.
 4. Tests: pure functions for the export plan (git vs non-git selection, base
    HEAD comparison, itemize-changes parsing) in `tests/test_offline_agent.py`.
 5. Docs: README section after `research.py` (usage, threat model incl. the
    note that cwd secrets such as `.env` are readable by the agent and can be
    sent to the inference endpoint; adding packages via the user-packages block
-   and `--rebuild`; concurrent-VM note), `CLAUDE.md` Layout and a new
-   "offline-agent.py key decisions" block, `templates/global-claude.md`
+   and `--rebuild`; concurrent-VM note; storage caps and their env vars),
+   `CLAUDE.md` Layout and a new "offline-agent.py key decisions" block, `templates/global-claude.md`
    environment note if the harness AGENTS.md is seeded (mirror
    `seed_agentsmd`, `start-agent.sh:1017`, or decide it is not needed and say
    so), and the tests table in README.
 6. ADR-050 in `ADR.md` (next after ADR-049): no-egress model, overlay write
    quarantine and its trust statement (VM trusted, lower layer enforces
    read-only), rebuild-only package path with the layer-cache argument,
-   ephemeral containers, cwd-under-`$HOME` restriction, and the rejected
+   ephemeral containers, cwd-under-`$HOME` restriction, the Phase 3 storage
+   bounds (per-session image, read-only root, no writable Mac mount) with
+   their own rejected alternatives, and the rejected
    alternatives (installer container, pause window, `--offline` flag on
    `start-agent.sh`).
 
@@ -315,14 +469,14 @@ VM and overlay (Unknowns #1, #3):
 - The upper dir holds deletions as `c 0,0` whiteouts (files and the removed
   directory). A file rename shows up as a full copy under the new name plus a
   whiteout of the old one: no redirect xattrs. The new `.git` objects, the
-  refs and the index landed in upper. This confirms Phase 3 must diff the
+  refs and the index landed in upper. This confirms Phase 4 must diff the
   merged view, never the upper dir.
 - The upper layer persists across container restarts and across
   `colima stop`/`start`. `/var/lib` on the VM disk survives restarts.
 - Inside the container the virtiofs files show as owned by `0:0`. git needs
   `safe.directory '*'`; set it in the image's system gitconfig in Phase 2.
 - A file added on the host *between* sessions shows up in the merged view,
-  because the lower layer is live. Phase 3 implication for non-repo `--apply`:
+  because the lower layer is live. Phase 4 implication for non-repo `--apply`:
   a host-side edit to a file the agent also changed is masked by the upper
   copy, so rsync merged→host would silently overwrite it. The conflict check
   needs a baseline manifest recorded at session start, not just `rsync -n`.
@@ -377,8 +531,8 @@ checks below are the first real run.
 - The firewall jumps cover both the default bridge and `offline-agent-net`.
   A failed firewall apply, or a missing host IP or network CIDR, aborts
   before any container starts. research.py falls back to guessed values here.
-- Not done in Phase 2, for Phase 3: the session marker records only `path`.
-  Phase 3's `--apply` needs the base HEAD (git) or a baseline manifest
+- Not done in Phase 2, for Phase 4: the session marker records only `path`.
+  Phase 4's `--apply` needs the base HEAD (git) or a baseline manifest
   (non-git) written at session *creation*. Sessions created before that lands
   will have no baseline, so `--discard` them before testing `--apply`.
 - Unknown #4 (`--mount "$HOME:r"`) is unchecked. If it is adopted, the
