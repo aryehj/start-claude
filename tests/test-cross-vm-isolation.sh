@@ -33,7 +33,12 @@ echo "==> cross-VM isolation tests (claude-agent ↔ research)"
 echo
 
 # ── VM availability ───────────────────────────────────────────────────────────
-vm_running() { colima status -p "$1" 2>/dev/null | grep -q "Running"; }
+# Not `colima status`: it reports through its logger, not as parseable stdout,
+# so grepping it for "Running" never matched and every run skipped.
+vm_running() {
+  [[ "$(colima list -p "$1" --json 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.loads(sys.stdin.readline()).get("status",""))' 2>/dev/null)" == "Running" ]]
+}
 
 AGENT_UP=false; RESEARCH_UP=false
 vm_running claude-agent && AGENT_UP=true
