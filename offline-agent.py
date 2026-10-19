@@ -14,10 +14,16 @@ write the agent makes (including git commits) lands in an upper layer on the
 VM's disk, keyed by the directory's path. The host directory is untouched.
 Overlay state survives container exits, script re-runs, and colima stop/start.
 
-Host-side state lives in ~/.offline-agent/:
+Storage is bounded. Each session gets its own sparse ext4 image in the VM
+(default 5 GiB) holding the overlay upper layer and the harnesses' writable
+state; the container root is read-only with small tmpfs mounts for scratch;
+both VM disks are capped. Nothing in the container can write to the Mac.
+
+Host-side state lives in ~/.offline-agent/, mounted read-only:
   opencode/config/    opencode.json (provider injected on every run)
-  opencode/data/      opencode sessions and auth
-  pi/                 pi models.json + settings.json (provider injected on every run)
+  pi/agent/           pi models.json + settings.json (provider injected on every run)
+opencode and pi history, sessions and auth live in the session image instead,
+and go away with the session.
 
 Usage:
   cd ~/some/project && offline-agent.py     start (or attach to) this directory's session
@@ -34,6 +40,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -58,9 +65,26 @@ DNS_BLACKHOLE = "192.0.2.1"
 # forbids a network filesystem as the upper layer).
 SESSIONS_ROOT = "/var/lib/offline-agent/sessions"
 OVERLAY_UNSAFE_CHARS = ",:\\\n"
+# render_session_setup_script exits with this when it finds a pre-image session.
+LEGACY_SESSION_EXIT = 42
 
 DEFAULT_MEMORY_GIB = 2
 DEFAULT_CPUS = 2
+# Colima has two disks: the data disk (--disk) holds /var/lib/docker (image,
+# build cache), the root disk (--root-disk) holds the OS and SESSIONS_ROOT.
+DEFAULT_DISK_GIB = 10
+DEFAULT_ROOT_DISK_GIB = 10
+DEFAULT_SESSION_DISK = "5G"
+
+# Container limits. tmpfs pages are charged to the memory cgroup, so the two
+# tmpfs sizes must fit inside CONTAINER_MEMORY with room for the harness.
+CONTAINER_MEMORY = "1536m"
+CONTAINER_PIDS_LIMIT = 512
+TMPFS_MOUNTS = (
+    # exec: uv venvs ($TMPDIR/.venv) and tool caches run binaries from here.
+    ("/tmp", "rw,exec,nosuid,nodev,mode=1777,size=512m"),
+    ("/root/.cache", "rw,exec,nosuid,nodev,mode=0755,size=256m"),
+)
 
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
@@ -82,16 +106,24 @@ class Paths:
         return self.base / "pi"
 
     @property
+    def pi_agent_dir(self) -> Path:
+        return self.pi_dir / "agent"
+
+    @property
     def opencode_config_file(self) -> Path:
         return self.opencode_config_dir / "opencode.json"
 
     @property
     def pi_models_file(self) -> Path:
-        return self.pi_dir / "agent" / "models.json"
+        return self.pi_agent_dir / "models.json"
 
     @property
     def pi_settings_file(self) -> Path:
-        return self.pi_dir / "agent" / "settings.json"
+        return self.pi_agent_dir / "settings.json"
+
+    @property
+    def moved_state_notice(self) -> Path:
+        return self.base / "README-state-moved.txt"
 
 
 # ── VmConfig ───────────────────────────────────────────────────────────────────
@@ -101,6 +133,8 @@ class VmConfig:
     profile_name: str = COLIMA_PROFILE
     memory_gib: int = DEFAULT_MEMORY_GIB
     cpus: int = DEFAULT_CPUS
+    disk_gib: int = DEFAULT_DISK_GIB
+    root_disk_gib: int = DEFAULT_ROOT_DISK_GIB
     backend: str = "omlx"
     # Populated by discover_network() / ensure_docker_network():
     bridge_ip: Optional[str] = None
@@ -135,6 +169,13 @@ ISOLATION:
   directory. The current directory must be under $HOME (Colima mounts only
   $HOME into the VM) and must not be $HOME itself.
 
+STORAGE:
+  Each session's writes (project overlay + opencode/pi state) live in a sparse
+  ext4 image capped by --session-disk; past it the agent gets ENOSPC. Images
+  are sized when the session is created; to grow one, in the VM run
+  `truncate -s <new> disk.img && resize2fs <loop device>` on the mounted image.
+  VM disk sizes apply only when the VM is created (--rebuild + delete to change).
+
 ADDING PACKAGES:
   Edit the user-packages block at the end of
   dockerfiles/offline-agent.Dockerfile, then run with --rebuild.
@@ -142,6 +183,9 @@ ADDING PACKAGES:
 ENVIRONMENT:
   OFFLINE_AGENT_MEMORY         Default VM memory GiB (overridden by --memory)
   OFFLINE_AGENT_CPUS           Default VM CPU count (overridden by --cpus)
+  OFFLINE_AGENT_DISK           VM data disk GiB: image + build cache (overridden by --disk)
+  OFFLINE_AGENT_ROOT_DISK      VM root disk GiB: OS + session images (overridden by --root-disk)
+  OFFLINE_AGENT_SESSION_DISK   Per-session cap, e.g. 5G or 256M (overridden by --session-disk)
   OFFLINE_AGENT_BACKEND        Default backend: omlx (default) or ollama
   OFFLINE_AGENT_DEFAULT_MODEL  Default model for opencode and pi
   OMLX_API_KEY                 API key for the omlx backend
@@ -174,6 +218,27 @@ ENVIRONMENT:
         metavar="N",
         help=f"VM CPU count (default: {DEFAULT_CPUS}).",
     )
+    p.add_argument(
+        "--disk",
+        type=_parse_gib,
+        default=_parse_gib(os.environ.get("OFFLINE_AGENT_DISK", str(DEFAULT_DISK_GIB))),
+        metavar="GIB",
+        help=f"VM data disk (docker image, build cache) in GiB, at VM creation (default: {DEFAULT_DISK_GIB}).",
+    )
+    p.add_argument(
+        "--root-disk",
+        type=_parse_gib,
+        default=_parse_gib(os.environ.get("OFFLINE_AGENT_ROOT_DISK", str(DEFAULT_ROOT_DISK_GIB))),
+        metavar="GIB",
+        help=f"VM root disk (OS, session images) in GiB, at VM creation (default: {DEFAULT_ROOT_DISK_GIB}).",
+    )
+    p.add_argument(
+        "--session-disk",
+        type=_parse_size_mib,
+        default=_parse_size_mib(os.environ.get("OFFLINE_AGENT_SESSION_DISK", DEFAULT_SESSION_DISK)),
+        metavar="SIZE",
+        help=f"Per-session storage cap, e.g. 5G or 256M, at session creation (default: {DEFAULT_SESSION_DISK}).",
+    )
     return p.parse_args(argv)
 
 
@@ -186,6 +251,17 @@ def _parse_gib(raw: str) -> int:
         raise argparse.ArgumentTypeError(
             f"invalid memory value {raw!r} — use integer GiB (e.g. 2, 2G, 2GB)"
         )
+
+
+def _parse_size_mib(raw: str) -> int:
+    """Accept '5', '5G', '5GiB', '256M', '256MB' and return MiB (bare numbers are GiB)."""
+    m = re.fullmatch(r"\s*(\d+)\s*(?:([gm])(?:i?b)?)?\s*", raw.lower())
+    if not m or int(m.group(1)) == 0:
+        raise argparse.ArgumentTypeError(
+            f"invalid size {raw!r} — use a positive integer with G or M (e.g. 5G, 256M)"
+        )
+    n = int(m.group(1))
+    return n if m.group(2) == "m" else n * 1024
 
 
 # ── Pure helpers ───────────────────────────────────────────────────────────────
@@ -238,17 +314,72 @@ def container_name(sid: str) -> str:
     return f"offline-agent-{sid}"
 
 
-def render_session_setup_script(sid: str, project: Path) -> str:
-    """Shell script that creates the session's upper/work dirs and path marker.
+def render_session_setup_script(sid: str, project: Path, cap_mib: int) -> str:
+    """Shell script that creates and mounts the session image (idempotent).
 
-    The overlay mount fails unless upper and work already exist (Phase 1).
+    Every agent-writable byte of the session lives in `disk.img`, a sparse
+    ext4 image of `cap_mib`, loop-mounted at `mnt/`: the overlay upper/work
+    dirs (which must exist before the overlay mounts) and the harness state.
+    The image is formatted under a temporary name so a failed mkfs is retried
+    rather than mounted. Loop mounts do not survive a VM restart, so the mount
+    is re-done whenever it is absent; this runs before every container start.
+    `discard` punches holes in the image file when the agent deletes files.
     The `path` marker maps the opaque id back to the project for listings.
+
+    A session dir with `upper/` at its top level predates the image and is
+    refused with LEGACY_SESSION_EXIT: its volume's mount options are fixed.
     """
     d = session_dir(sid)
+    m = f"{d}/mnt"
+    return f"""\
+set -e
+if [ -d {d}/upper ] && [ ! -e {d}/disk.img ]; then
+  exit {LEGACY_SESSION_EXIT}
+fi
+sudo mkdir -p {m}
+if [ ! -e {d}/disk.img ]; then
+  sudo truncate -s {cap_mib}M {d}/disk.img.new
+  sudo mkfs.ext4 -q -F {d}/disk.img.new
+  sudo mv {d}/disk.img.new {d}/disk.img
+fi
+sudo mountpoint -q {m} || sudo mount -o loop,discard {d}/disk.img {m}
+sudo mkdir -p {m}/upper {m}/work {m}/harness/opencode {m}/harness/state {m}/harness/pi
+printf '%s\\n' {shlex.quote(str(project))} | sudo tee {d}/path >/dev/null
+"""
+
+
+def legacy_session_message(sid: str, project: Path) -> str:
+    """Remediation for a session created before per-session images."""
+    ctx = f"docker --context colima-{COLIMA_PROFILE}"
+    vol = volume_name(sid)
+    out = f"~/offline-agent-{sid}"
+    return f"""\
+error: the session for {project} ({sid}) predates per-session disk images
+and cannot be migrated in place. Its changes exist only inside the VM.
+
+To keep them, export first. A git repo (all refs, including new commits):
+  {ctx} run --rm -v {vol}:/w -w /w {IMAGE_TAG} git bundle create - --all > {out}.bundle
+Any directory (the full merged view, host files included):
+  {ctx} run --rm -v {vol}:/w {IMAGE_TAG} tar -C /w -cf - . > {out}.tar
+
+Then remove the old session and re-run:
+  {ctx} volume rm {vol}
+  colima ssh -p {COLIMA_PROFILE} -- sudo rm -rf {session_dir(sid)}"""
+
+
+def low_space_warning(avail_kib: Optional[int], cap_mib: int) -> Optional[str]:
+    """Warn when the VM root disk cannot hold one full session.
+
+    Session images are sparse, so overcommitting the caps is normal, but one
+    session that fills its cap on a nearly full root disk takes the VM down.
+    """
+    if avail_kib is None or avail_kib >= cap_mib * 1024:
+        return None
     return (
-        "set -e\n"
-        f"sudo mkdir -p {d}/upper {d}/work\n"
-        f"printf '%s\\n' {shlex.quote(str(project))} | sudo tee {d}/path >/dev/null\n"
+        f"warning: the VM root disk has {avail_kib // 1024} MiB free, less than one "
+        f"session cap ({cap_mib} MiB). A session that fills its cap would exhaust it.\n"
+        f"         Free space by removing old sessions under {SESSIONS_ROOT}, or recreate "
+        "the VM with a larger --root-disk (--rebuild, then delete the VM)."
     )
 
 
@@ -257,6 +388,7 @@ def volume_create_argv(sid: str, project: Path) -> List[str]:
 
     The local driver mounts overlayfs when a container first uses the volume;
     lowerdir is the project path, which Colima mounts at the same path in the VM.
+    upper/work are on the session image, so the image caps the overlay.
     """
     d = session_dir(sid)
     return [
@@ -264,7 +396,7 @@ def volume_create_argv(sid: str, project: Path) -> List[str]:
         "--driver", "local",
         "--opt", "type=overlay",
         "--opt", "device=overlay",
-        "--opt", f"o=lowerdir={project},upperdir={d}/upper,workdir={d}/work",
+        "--opt", f"o=lowerdir={project},upperdir={d}/mnt/upper,workdir={d}/mnt/work",
         volume_name(sid),
     ]
 
@@ -281,14 +413,39 @@ def parse_session_listing(text: str) -> List[Tuple[str, str]]:
     return sessions
 
 
-def running_vm_size(info: Mapping[str, Any]) -> Tuple[Optional[int], Optional[int]]:
-    """(cpus, memory GiB) from `colima list --json`; memory is reported in bytes."""
+def running_vm_size(info: Mapping[str, Any]) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+    """(cpus, memory GiB, data disk GiB) from `colima list --json`, which reports bytes.
+
+    The root disk size is not in the listing.
+    """
+    def gib(key: str) -> Optional[int]:
+        value = info.get(key)
+        return int(value) // (1024 ** 3) if value not in (None, "") else None
+
     cpus = info.get("cpus")
-    mem = info.get("memory")
-    return (
-        int(cpus) if cpus not in (None, "") else None,
-        int(mem) // (1024 ** 3) if mem not in (None, "") else None,
-    )
+    return (int(cpus) if cpus not in (None, "") else None, gib("memory"), gib("disk"))
+
+
+def colima_start_argv(config: VmConfig, *, create: bool) -> List[str]:
+    """`colima start` argv. Disk sizes are passed only when creating the VM.
+
+    No --mount: Colima's default mounts $HOME at the same path, which is
+    exactly the overlay lower layer we need, so switching projects never
+    restarts the VM. Disks are never resized on an existing VM: Colima ignores
+    a smaller --disk with a warning, and a smaller --root-disk is unverified.
+    """
+    argv = [
+        "colima", "start", "-p", config.profile_name,
+        "--vm-type", "vz",
+        "--runtime", "docker",
+        "--cpu", str(config.cpus),
+        "--memory", str(config.memory_gib),
+        "--mount-type", "virtiofs",
+        "--network-address",
+    ]
+    if create:
+        argv += ["--disk", str(config.disk_gib), "--root-disk", str(config.root_disk_gib)]
+    return argv
 
 
 def render_iptables_apply_script(
@@ -461,6 +618,8 @@ def container_env_args(config: VmConfig, env: Mapping[str, str]) -> List[str]:
         "-e", f"GIT_COMMITTER_NAME={git_name}",
         "-e", f"GIT_COMMITTER_EMAIL={git_email}",
         "-e", "TMPDIR=/tmp",
+        # The root is read-only; keep shell history with the session's state.
+        "-e", "HISTFILE=/root/.local/state/bash_history",
     ]
     inference_url = f"http://{config.host_ip}:{config.inference_port}"
     if config.backend == "ollama":
@@ -475,11 +634,26 @@ def container_env_args(config: VmConfig, env: Mapping[str, str]) -> List[str]:
 def docker_run_argv(
     project: Path, sid: str, config: VmConfig, paths: Paths, env: Mapping[str, str]
 ) -> List[str]:
-    """argv for the session container: ephemeral, no published ports, no egress."""
+    """argv for the session container: ephemeral, no published ports, no egress.
+
+    Storage is bounded: the root is read-only, scratch is sized tmpfs, and every
+    writable mount is on the session image. Mac paths (~/.offline-agent) are
+    read-only config only. No log driver: a runaway TTY stream would otherwise
+    be persisted to the VM disk.
+    """
+    harness = f"{session_dir(sid)}/mnt/harness"
+    tmpfs: List[str] = []
+    for target, opts in TMPFS_MOUNTS:
+        tmpfs += ["--tmpfs", f"{target}:{opts}"]
     return [
         "docker", "run",
         "--rm", "-it",
         "--name", container_name(sid),
+        "--read-only",
+        *tmpfs,
+        "--memory", CONTAINER_MEMORY,
+        "--pids-limit", str(CONTAINER_PIDS_LIMIT),
+        "--log-driver", "none",
         "--network", NET_NAME,
         "--dns", DNS_BLACKHOLE,
         # The VM's default-route gateway (the macOS host), not Docker's
@@ -488,9 +662,16 @@ def docker_run_argv(
         "--add-host", f"host.docker.internal:{config.host_ip}",
         # nocopy: never copy image content into the overlay on first mount.
         "-v", f"{volume_name(sid)}:{project}:nocopy",
-        "-v", f"{paths.opencode_config_dir}:/root/.config/opencode",
-        "-v", f"{paths.opencode_data_dir}:/root/.local/share/opencode",
-        "-v", f"{paths.pi_dir}:/root/.pi",
+        # opencode runs with its config dir read-only (it then skips the
+        # plugin npm install it would otherwise put there).
+        "-v", f"{paths.opencode_config_dir}:/root/.config/opencode:ro",
+        # pi has one agent dir for config and state: config files are
+        # mounted read-only over a writable dir on the session image.
+        "-v", f"{paths.pi_models_file}:/root/.pi/agent/models.json:ro",
+        "-v", f"{paths.pi_settings_file}:/root/.pi/agent/settings.json:ro",
+        "-v", f"{harness}/opencode:/root/.local/share/opencode",
+        "-v", f"{harness}/state:/root/.local/state",
+        "-v", f"{harness}/pi:/root/.pi",
         "-w", str(project),
         *container_env_args(config, env),
         IMAGE_TAG,
@@ -577,7 +758,7 @@ def in_background(fn: Callable[[], Any]) -> Callable[[], Any]:
 def ensure_colima_vm(config: VmConfig) -> None:
     info = colima_info(config.profile_name)
     if info and info.get("status") == "Running":
-        running_cpus, running_gib = running_vm_size(info)
+        running_cpus, running_gib, running_disk = running_vm_size(info)
         if running_cpus is not None and running_cpus != config.cpus:
             print(
                 f"warning: running VM has {running_cpus} CPUs; requested {config.cpus}. "
@@ -590,27 +771,21 @@ def ensure_colima_vm(config: VmConfig) -> None:
                 "Use --rebuild to resize.",
                 file=sys.stderr,
             )
+        if running_disk is not None and running_disk != config.disk_gib:
+            print(
+                f"warning: running VM has a {running_disk} GiB data disk; requested {config.disk_gib} GiB. "
+                "Disk sizes apply only when the VM is created: --rebuild and delete the VM to change them.",
+                file=sys.stderr,
+            )
         return
 
+    create = info is None
+    disks = f", {config.disk_gib} GiB data + {config.root_disk_gib} GiB root disk" if create else ""
     print(
-        f"==> Starting Colima VM '{config.profile_name}' "
-        f"({config.memory_gib} GiB RAM, {config.cpus} CPUs)"
+        f"==> {'Creating' if create else 'Starting'} Colima VM '{config.profile_name}' "
+        f"({config.memory_gib} GiB RAM, {config.cpus} CPUs{disks})"
     )
-    # No --mount: Colima's default mounts $HOME at the same path, which is
-    # exactly the overlay lower layer we need, so switching projects never
-    # restarts the VM.
-    subprocess.run(
-        [
-            "colima", "start", "-p", config.profile_name,
-            "--vm-type", "vz",
-            "--runtime", "docker",
-            "--cpu", str(config.cpus),
-            "--memory", str(config.memory_gib),
-            "--mount-type", "virtiofs",
-            "--network-address",
-        ],
-        check=True,
-    )
+    subprocess.run(colima_start_argv(config, create=create), check=True)
 
 
 def ensure_docker_context(profile: str = COLIMA_PROFILE) -> None:
@@ -643,6 +818,9 @@ fi
 echo "HOST_IP=$host_ip"
 
 echo "NET_CIDR=$(docker network inspect %NET% -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || true)"
+
+# Free space on the root disk, which holds the session images.
+echo "ROOT_AVAIL_KIB=$(df -Pk /var/lib 2>/dev/null | awk 'NR==2 {print $4}')"
 
 if docker image inspect %IMAGE% >/dev/null 2>&1; then
   echo "IMAGE_PRESENT=true"
@@ -735,16 +913,33 @@ def ensure_image(facts: dict) -> None:
     )
 
 
-def list_sessions(profile: str = COLIMA_PROFILE) -> List[Tuple[str, str]]:
-    """(id, project path) for every session whose overlay upper dir is non-empty."""
-    script = f"""\
+def render_list_sessions_script() -> str:
+    """Shell loop printing `<id>\\t<path>` for every session that may hold agent changes.
+
+    A session image that is not mounted (none are, right after a VM boot)
+    cannot be inspected cheaply, so it is listed: over-warning before a VM
+    delete is cheap, under-warning loses work. Pre-image sessions keep upper/
+    at the top level.
+    """
+    return f"""\
 for d in {SESSIONS_ROOT}/*/; do
   [ -d "$d" ] || continue
-  if [ -n "$(sudo ls -A "$d/upper" 2>/dev/null)" ]; then
-    printf '%s\\t%s\\n' "$(basename "$d")" "$(sudo cat "$d/path" 2>/dev/null)"
+  d=${{d%/}}
+  if [ -e "$d/disk.img" ]; then
+    if sudo mountpoint -q "$d/mnt" && [ -z "$(sudo ls -A "$d/mnt/upper" 2>/dev/null)" ]; then
+      continue
+    fi
+  elif [ -z "$(sudo ls -A "$d/upper" 2>/dev/null)" ]; then
+    continue
   fi
+  printf '%s\\t%s\\n' "$(basename "$d")" "$(sudo cat "$d/path" 2>/dev/null)"
 done
 """
+
+
+def list_sessions(profile: str = COLIMA_PROFILE) -> List[Tuple[str, str]]:
+    """(id, project path) for every session that may hold agent changes."""
+    script = render_list_sessions_script()
     return parse_session_listing(vm_sh(script, profile=profile, check=False).stdout)
 
 
@@ -783,9 +978,20 @@ def rebuild_teardown(config: VmConfig) -> None:
         print("==> Keeping Colima VM; only the image will be rebuilt.")
 
 
-def ensure_session(config: VmConfig, project: Path, sid: str) -> None:
-    """Create the session's VM-side dirs and its overlay volume (idempotent)."""
-    vm_sh(render_session_setup_script(sid, project), profile=config.profile_name)
+def ensure_session(config: VmConfig, project: Path, sid: str, cap_mib: int, facts: dict) -> None:
+    """Create and mount the session image, then its overlay volume (idempotent)."""
+    avail = facts.get("ROOT_AVAIL_KIB", "")
+    warning = low_space_warning(int(avail) if avail.isdigit() else None, cap_mib)
+    if warning:
+        print(warning, file=sys.stderr)
+    result = vm_sh(render_session_setup_script(sid, project, cap_mib), profile=config.profile_name, check=False)
+    if result.returncode == LEGACY_SESSION_EXIT:
+        raise SystemExit(legacy_session_message(sid, project))
+    if result.returncode != 0:
+        raise SystemExit(
+            f"error: session setup failed in the VM (exit {result.returncode}); not starting the container.\n"
+            f"{result.stderr.strip()}"
+        )
     exists = subprocess.run(
         ["docker", "volume", "inspect", volume_name(sid)], capture_output=True,
     ).returncode == 0
@@ -854,12 +1060,15 @@ def _load_json(path: Path) -> Optional[dict]:
 
 
 def _write_json(path: Path, data: dict) -> None:
+    # Truncates in place, keeping the inode: pi's config files are per-file
+    # bind mounts, which pin the inode. An atomic-rename writer would leave an
+    # attached container reading the old file.
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
 def write_harness_configs(paths: Paths, config: VmConfig, discovered: List[str]) -> None:
-    for d in (paths.opencode_config_dir, paths.opencode_data_dir, paths.pi_dir / "agent"):
+    for d in (paths.opencode_config_dir, paths.pi_agent_dir):
         d.mkdir(parents=True, exist_ok=True)
     common = dict(
         backend=config.backend,
@@ -882,8 +1091,36 @@ def write_harness_configs(paths: Paths, config: VmConfig, discovered: List[str])
     if pi_models is not None and pi_settings is not None:
         models, settings = merge_pi_config(pi_models, pi_settings, **common)
         _write_json(paths.pi_models_file, models)
-        if settings:
-            _write_json(paths.pi_settings_file, settings)
+        # Always written, even as {}: both files are bind-mount sources, and
+        # docker creates a directory for a missing source.
+        _write_json(paths.pi_settings_file, settings)
+
+
+def notice_moved_harness_state(paths: Paths) -> None:
+    """Say once that harness state on the Mac is no longer used; never delete it.
+
+    Before per-session images, opencode's data dir and pi's whole dir were
+    mounted read-write from ~/.offline-agent. That state now lives in each
+    session image. The old files are left in place, unmounted.
+    """
+    if paths.moved_state_notice.exists():
+        return
+    pi_config = {paths.pi_models_file.name, paths.pi_settings_file.name}
+    stale = []
+    if paths.opencode_data_dir.is_dir() and any(paths.opencode_data_dir.iterdir()):
+        stale.append(paths.opencode_data_dir)
+    if paths.pi_agent_dir.is_dir():
+        stale += sorted(p for p in paths.pi_agent_dir.iterdir() if p.name not in pi_config)
+    if not stale:
+        return
+    text = (
+        "opencode and pi now keep their history, sessions and auth inside each\n"
+        "offline-agent session image, not on the Mac. These paths are no longer\n"
+        "mounted and are left untouched; delete them when you no longer need them:\n"
+        + "".join(f"  {p}\n" for p in stale)
+    )
+    paths.moved_state_notice.write_text(text)
+    print(f"==> Note: {text.rstrip()}\n    (shown once; see {paths.moved_state_notice})")
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -898,7 +1135,13 @@ def main() -> None:
     sid = session_id(project)
 
     paths = Paths()
-    config = VmConfig(memory_gib=args.memory, cpus=args.cpus, backend=args.backend)
+    config = VmConfig(
+        memory_gib=args.memory,
+        cpus=args.cpus,
+        disk_gib=args.disk,
+        root_disk_gib=args.root_disk,
+        backend=args.backend,
+    )
     ensure_docker_context(config.profile_name)
 
     if args.rebuild:
@@ -919,9 +1162,10 @@ def main() -> None:
 
     apply_firewall(config)
     ensure_image(facts)
-    ensure_session(config, project, sid)
+    ensure_session(config, project, sid, args.session_disk, facts)
 
     write_harness_configs(paths, config, join_discovery())
+    notice_moved_harness_state(paths)
     warning = join_probe()
     if warning:
         print(warning, file=sys.stderr)
@@ -930,7 +1174,7 @@ def main() -> None:
     print()
     print("==> Offline agent session")
     print(f"    project  : {project}  (host copy is read-only; writes stay in the VM)")
-    print(f"    session  : {sid}  (overlay in {session_dir(sid)})")
+    print(f"    session  : {sid}  (writes capped by {session_dir(sid)}/disk.img)")
     print(f"    inference: {config.inference_label} at http://{config.host_ip}:{config.inference_port}")
     print(f"    network  : {NET_NAME}, no egress except inference")
     print("    run `opencode` or `pi` in the shell")

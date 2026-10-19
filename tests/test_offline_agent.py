@@ -1,4 +1,5 @@
 """Unit tests for offline-agent.py pure helpers and docker argv invariants."""
+import argparse
 import importlib.util
 import re
 import sys
@@ -49,10 +50,41 @@ def test_sizing_env_and_flags(monkeypatch):
 
 
 def test_running_vm_size_bytes_to_gib():
-    # colima list --json reports memory in bytes; a substring check never warns.
-    assert oa.running_vm_size({"cpus": 4, "memory": 4294967296}) == (4, 4)
-    assert oa.running_vm_size({"cpus": 6, "memory": 12884901888}) == (6, 12)
-    assert oa.running_vm_size({}) == (None, None)
+    # colima list --json reports memory and disk in bytes; a substring check never warns.
+    assert oa.running_vm_size({"cpus": 4, "memory": 4294967296, "disk": 10737418240}) == (4, 4, 10)
+    assert oa.running_vm_size({"cpus": 6, "memory": 12884901888}) == (6, 12, None)
+    assert oa.running_vm_size({}) == (None, None, None)
+
+
+@pytest.mark.parametrize("raw,mib", [
+    ("5", 5120), ("5G", 5120), ("5GiB", 5120), ("5gb", 5120),
+    ("256M", 256), ("256MiB", 256), ("512mb", 512),
+])
+def test_parse_size_mib(raw, mib):
+    assert oa._parse_size_mib(raw) == mib
+
+
+@pytest.mark.parametrize("raw", ["", "big", "5T", "0", "-1G"])
+def test_parse_size_mib_rejects(raw):
+    with pytest.raises(argparse.ArgumentTypeError):
+        oa._parse_size_mib(raw)
+
+
+def test_storage_defaults(monkeypatch):
+    for var in ("OFFLINE_AGENT_DISK", "OFFLINE_AGENT_ROOT_DISK", "OFFLINE_AGENT_SESSION_DISK"):
+        monkeypatch.delenv(var, raising=False)
+    args = oa.parse_args([])
+    assert (args.disk, args.root_disk, args.session_disk) == (10, 10, 5120)
+
+
+def test_storage_env_and_flags(monkeypatch):
+    monkeypatch.setenv("OFFLINE_AGENT_DISK", "20G")
+    monkeypatch.setenv("OFFLINE_AGENT_ROOT_DISK", "12")
+    monkeypatch.setenv("OFFLINE_AGENT_SESSION_DISK", "256M")
+    args = oa.parse_args([])
+    assert (args.disk, args.root_disk, args.session_disk) == (20, 12, 256)
+    args = oa.parse_args(["--disk", "15", "--root-disk", "8", "--session-disk", "2G"])
+    assert (args.disk, args.root_disk, args.session_disk) == (15, 8, 2048)
 
 
 def test_inference_ports():
@@ -141,14 +173,96 @@ def test_session_names_derive_from_id():
     assert d == "/var/lib/offline-agent/sessions/abcdef012345"
 
 
+D = "/var/lib/offline-agent/sessions/abcdef012345"
+
+
+def _setup(cap_mib=5120):
+    return oa.render_session_setup_script("abcdef012345", Path("/Users/me/My Project"), cap_mib)
+
+
 def test_session_setup_script_creates_upper_work_and_marker():
-    script = oa.render_session_setup_script("abcdef012345", Path("/Users/me/My Project"))
-    d = "/var/lib/offline-agent/sessions/abcdef012345"
-    assert f"{d}/upper" in script and f"{d}/work" in script
+    script = _setup()
+    for sub in ("upper", "work", "harness/opencode", "harness/state", "harness/pi"):
+        assert f"{D}/mnt/{sub}" in script
     assert "mkdir -p" in script and "sudo" in script
-    assert f"{d}/path" in script
+    assert f"{D}/path" in script
     # The path is shell-quoted so spaces survive.
     assert "'/Users/me/My Project'" in script
+
+
+def test_session_setup_script_sizes_sparse_image():
+    script = _setup(cap_mib=256)
+    assert "truncate -s 256M" in script
+    assert "mkfs.ext4 -q -F" in script
+
+
+def test_session_setup_script_is_idempotent():
+    lines = _setup().splitlines()
+    # mkfs runs only inside an existence guard on disk.img...
+    guard = next(i for i, l in enumerate(lines) if l.strip() == f'if [ ! -e {D}/disk.img ]; then')
+    mkfs = next(i for i, l in enumerate(lines) if "mkfs.ext4" in l)
+    end = next(i for i, l in enumerate(lines) if i > guard and l.strip() == "fi")
+    assert guard < mkfs < end
+    # ...and the image only appears under its final name once formatted, so a
+    # failed mkfs is retried instead of mounting a half-made image.
+    assert any(l.strip().startswith("sudo mv") and l.rstrip().endswith(f"{D}/disk.img") for l in lines[mkfs:end])
+    # The loop mount does not survive a VM restart, so it is re-done whenever absent.
+    mount = next(l for l in lines if "mount -o loop,discard" in l)
+    assert mount.startswith(f"mountpoint -q {D}/mnt ||") or mount.startswith(f"sudo mountpoint -q {D}/mnt ||")
+    assert f"{D}/disk.img {D}/mnt" in mount
+
+
+def test_session_setup_script_layout_lives_on_the_image():
+    script = _setup()
+    # Nothing agent-writable is created outside the mounted image (the
+    # legacy-session check only tests for a top-level upper/).
+    body = "\n".join(l for l in script.splitlines() if not l.startswith(f"if [ -d {D}/upper ]"))
+    assert f"{D}/upper" not in body.replace(f"{D}/mnt/upper", "")
+    assert f"{D}/work" not in body.replace(f"{D}/mnt/work", "")
+    mount_at = script.index("mount -o loop,discard")
+    assert script.index(f"{D}/mnt/upper") > mount_at
+
+
+def test_session_setup_script_detects_legacy_session_first():
+    script = _setup()
+    legacy = script.index(f'[ -d {D}/upper ]')
+    assert legacy < script.index("mkdir")
+    assert f"exit {oa.LEGACY_SESSION_EXIT}" in script[legacy:script.index("mkdir")]
+
+
+def test_legacy_session_message_has_export_and_cleanup_recipe():
+    msg = oa.legacy_session_message("abcdef012345", Path("/Users/me/proj"))
+    assert "/Users/me/proj" in msg
+    assert "git bundle create - --all" in msg
+    assert "offline-agent-abcdef012345:" in msg
+    assert "docker --context colima-offline-agent volume rm offline-agent-abcdef012345" in msg
+    assert f"sudo rm -rf {D}" in msg
+
+
+def test_ensure_session_handles_legacy_exit():
+    body = _SOURCE[_SOURCE.index("def ensure_session"):]
+    body = body[:body.index("\ndef ")]
+    assert "LEGACY_SESSION_EXIT" in body and "legacy_session_message" in body
+
+
+@pytest.mark.parametrize("avail_kib,warns", [
+    (None, False),
+    (6 * 1024 * 1024, False),
+    (5 * 1024 * 1024, False),
+    (5 * 1024 * 1024 - 1, True),
+    (100, True),
+])
+def test_low_space_warning_threshold(avail_kib, warns):
+    msg = oa.low_space_warning(avail_kib, cap_mib=5120)
+    assert bool(msg) == warns
+    if warns:
+        assert "--root-disk" in msg
+
+
+def test_probe_reports_root_free_space():
+    body = _SOURCE[_SOURCE.index("def probe_vm"):]
+    body = body[:body.index("\ndef ")]
+    assert "ROOT_AVAIL_KIB=" in body and "df -Pk" in body
 
 
 def test_volume_create_argv_is_overlay_over_project():
@@ -159,7 +273,7 @@ def test_volume_create_argv_is_overlay_over_project():
     joined = " ".join(argv)
     assert "--driver local" in joined
     assert "type=overlay" in joined and "device=overlay" in joined
-    assert f"o=lowerdir=/Users/me/proj,upperdir={d}/upper,workdir={d}/work" in argv
+    assert f"o=lowerdir=/Users/me/proj,upperdir={d}/mnt/upper,workdir={d}/mnt/work" in argv
 
 
 def test_parse_session_listing():
@@ -168,6 +282,17 @@ def test_parse_session_listing():
         ("abc123", "/Users/me/a"),
         ("def456", "/Users/me/My Project"),
     ]
+
+
+def test_list_sessions_script_lists_unmounted_images():
+    # After a VM boot no image is mounted; those must still be listed so the
+    # --rebuild VM-delete prompt warns about them.
+    script = oa.render_list_sessions_script()
+    assert '"$d/disk.img"' in script and 'mountpoint -q "$d/mnt"' in script
+    assert '"$d/mnt/upper"' in script
+    # Pre-image sessions are still detected by their top-level upper/.
+    assert '"$d/upper"' in script
+    assert "{" not in script.replace("${d%/}", "")
 
 
 def test_parse_session_listing_missing_marker():
@@ -416,13 +541,44 @@ def test_run_mounts_overlay_at_project_path():
     assert _flag_values(argv, "-w") == ["/Users/me/My Project"]
 
 
-def test_run_mounts_harness_state_only():
+def test_run_mounts_harness_config_ro_and_state_on_session_image():
     vols = _flag_values(_run(), "-v")
     assert vols[1:] == [
-        "/Users/me/.offline-agent/opencode/config:/root/.config/opencode",
-        "/Users/me/.offline-agent/opencode/data:/root/.local/share/opencode",
-        "/Users/me/.offline-agent/pi:/root/.pi",
+        "/Users/me/.offline-agent/opencode/config:/root/.config/opencode:ro",
+        "/Users/me/.offline-agent/pi/agent/models.json:/root/.pi/agent/models.json:ro",
+        "/Users/me/.offline-agent/pi/agent/settings.json:/root/.pi/agent/settings.json:ro",
+        f"{D}/mnt/harness/opencode:/root/.local/share/opencode",
+        f"{D}/mnt/harness/state:/root/.local/state",
+        f"{D}/mnt/harness/pi:/root/.pi",
     ]
+
+
+def test_run_every_host_mount_is_read_only():
+    # Anything not the overlay volume or the session image is a Mac path via
+    # virtiofs; none of those may be writable.
+    for vol in _flag_values(_run(), "-v"):
+        src = vol.split(":", 1)[0]
+        if src == "offline-agent-abcdef012345" or src.startswith(D + "/mnt/"):
+            continue
+        assert vol.endswith(":ro"), vol
+
+
+def test_run_root_is_read_only_with_sized_tmpfs():
+    argv = _run()
+    assert "--read-only" in argv
+    tmpfs = {t.split(":", 1)[0]: t.split(":", 1)[1] for t in _flag_values(argv, "--tmpfs")}
+    assert set(tmpfs) == {"/tmp", "/root/.cache"}
+    for opts in tmpfs.values():
+        assert re.search(r"(^|,)size=\d+[kmg]\b", opts), opts
+        # uv venvs and node caches run binaries from here.
+        assert "noexec" not in opts
+
+
+def test_run_caps_memory_pids_and_logs():
+    argv = _run()
+    assert _flag_values(argv, "--memory") == [oa.CONTAINER_MEMORY]
+    assert _flag_values(argv, "--pids-limit") == [str(oa.CONTAINER_PIDS_LIMIT)]
+    assert _flag_values(argv, "--log-driver") == ["none"]
 
 
 def test_run_has_no_proxy_env():
@@ -438,6 +594,8 @@ def test_run_forwards_terminal_and_git_identity():
         "GIT_AUTHOR_NAME=Me", "GIT_AUTHOR_EMAIL=me@example.com",
         "GIT_COMMITTER_NAME=Me", "GIT_COMMITTER_EMAIL=me@example.com",
         "TMPDIR=/tmp",
+        # The root is read-only; keep shell history with the session.
+        "HISTFILE=/root/.local/state/bash_history",
     ):
         assert e in envs
 
@@ -484,9 +642,21 @@ def test_docker_context_not_persisted():
 
 
 def test_colima_start_has_no_mount_flag():
-    start = _SOURCE[_SOURCE.index('"colima", "start"'):]
-    start = start[:start.index("]")]
-    assert "--mount\"" not in start and "--mount-type" in start
+    argv = oa.colima_start_argv(_config(), create=True)
+    assert argv[:4] == ["colima", "start", "-p", "offline-agent"]
+    assert "--mount" not in argv and _flag_values(argv, "--mount-type") == ["virtiofs"]
+
+
+def test_colima_start_sizes_both_disks_on_create_only():
+    config = _config()
+    config.disk_gib, config.root_disk_gib = 12, 9
+    argv = oa.colima_start_argv(config, create=True)
+    assert _flag_values(argv, "--disk") == ["12"]
+    assert _flag_values(argv, "--root-disk") == ["9"]
+    # An existing VM is never asked to shrink: Colima only warns on --disk and
+    # the --root-disk behaviour is unverified.
+    argv = oa.colima_start_argv(config, create=False)
+    assert "--disk" not in argv and "--root-disk" not in argv
 
 
 def test_image_build_uses_host_network():
@@ -497,3 +667,52 @@ def test_rebuild_warns_about_unexported_sessions():
     body = _SOURCE[_SOURCE.index("def rebuild_teardown"):]
     body = body[:body.index("\ndef ")]
     assert "list_sessions" in body and "colima\", \"delete" in body
+
+
+# ── harness config files ──────────────────────────────────────────────────────
+
+def _write_configs(tmp_path, monkeypatch):
+    monkeypatch.delenv("OMLX_API_KEY", raising=False)
+    monkeypatch.delenv("OFFLINE_AGENT_DEFAULT_MODEL", raising=False)
+    paths = oa.Paths(base=tmp_path / ".offline-agent")
+    oa.write_harness_configs(paths, _config(), [])
+    return paths
+
+
+def test_harness_configs_exist_before_mount(tmp_path, monkeypatch):
+    # The per-file :ro mounts need real files: docker would create a directory
+    # (on the Mac, through virtiofs) for a missing bind-mount source.
+    paths = _write_configs(tmp_path, monkeypatch)
+    assert paths.opencode_config_file.is_file()
+    assert paths.pi_models_file.is_file()
+    assert paths.pi_settings_file.is_file()
+
+
+def test_harness_state_dir_not_created_on_host(tmp_path, monkeypatch):
+    paths = _write_configs(tmp_path, monkeypatch)
+    assert not paths.opencode_data_dir.exists()
+
+
+def test_write_json_keeps_inode(tmp_path):
+    # A per-file bind mount pins the inode; an atomic-rename writer would leave
+    # a running container reading the old file.
+    f = tmp_path / "x.json"
+    f.write_text("{}")
+    inode = f.stat().st_ino
+    oa._write_json(f, {"a": 1})
+    assert f.stat().st_ino == inode
+
+
+def test_moved_state_notice_once(tmp_path, capsys):
+    paths = oa.Paths(base=tmp_path / ".offline-agent")
+    oa.notice_moved_harness_state(paths)
+    assert capsys.readouterr().out == ""
+    (paths.opencode_data_dir / "log").mkdir(parents=True)
+    (paths.pi_dir / "agent" / "sessions").mkdir(parents=True)
+    oa.notice_moved_harness_state(paths)
+    out = capsys.readouterr().out
+    assert str(paths.opencode_data_dir) in out and "sessions" in out
+    oa.notice_moved_harness_state(paths)
+    assert capsys.readouterr().out == ""
+    # The old state is left in place, never deleted.
+    assert (paths.opencode_data_dir / "log").is_dir()
