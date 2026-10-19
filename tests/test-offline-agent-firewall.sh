@@ -5,9 +5,14 @@
 # Run it from the session's project directory, either in the container shell
 # (when the project is this repo):
 #     bash tests/test-offline-agent-firewall.sh
-# or from the macOS host against any running session:
-#     docker --context colima-offline-agent exec -i offline-agent-<id> \
-#       bash -s < tests/test-offline-agent-firewall.sh
+# or from the macOS host, in the session's project directory, while the
+# session is open in another terminal:
+#     docker --context colima-offline-agent exec -i \
+#       "offline-agent-$(printf %s "$PWD" | shasum -a 256 | cut -c1-12)" \
+#       bash -s < /path/to/start-claude/tests/test-offline-agent-firewall.sh
+# (the container name is offline-agent- plus the first 12 hex chars of the
+# SHA-256 of the project path; list running ones with
+#  docker --context colima-offline-agent ps --filter 'name=^offline-agent-')
 #
 # Exit 0 if every test either passes or is legitimately skipped (inference
 # server not running). Exit 1 on any failure.
