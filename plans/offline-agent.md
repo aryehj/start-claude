@@ -2,7 +2,7 @@
 
 ## Status
 
-- [ ] Phase 1: Go/no-go on overlayfs-over-virtiofs and offline harness startup (human gate: run on the Mac)
+- [x] Phase 1: Go/no-go on overlayfs-over-virtiofs and offline harness startup (human gate: run on the Mac)
 - [ ] Phase 2: Core script usable end to end on a real project (human gate: drive a task with a local model)
 - [ ] Phase 3: Export/apply surface, docs, ADR (human gate: does `--apply` feel safe enough to use)
 
@@ -290,4 +290,68 @@ conservative enough to trust.
   by `--discard`. Image rebuilds reuse cached layers unless a base layer is
   edited; superseded layers linger until `docker builder prune` inside the
   `offline-agent` VM.
-- Phase 1 results go here before Phase 2 starts.
+
+### Phase 1 results (2026-10-18, macOS 27.0.1, colima 0.10.3, docker 29.5.2 in VM)
+
+Probe: `plans/offline-agent-phase1-probe.sh` (raw logs in
+`plans/offline-agent-phase1-results-{overlay,harness}.txt`, not committed).
+
+**Verdict: GO on the overlay design.** The snapshot-copy fallback is not needed.
+
+VM and overlay (Unknowns #1, #3):
+
+- `colima start -p offline-agent` with research.py's flags: 23s cold start,
+  22s `stop`+`start`. Kernel 6.8 has `overlay`. With no `--mount`, Colima
+  mounts `$HOME` as virtiofs `rw` at the same path, so the lower layer is
+  just the host path, as the Approach assumed.
+- The `local`-driver overlay volume with a virtiofs lowerdir works. The
+  upper/work dirs **must exist before mounting**: the mount fails otherwise,
+  so Phase 2 step 3's `sudo mkdir -p` is required.
+- Write, append, delete, `git mv`, `rm -rf` of a directory, a commit, and a
+  planted `.git/hooks/post-checkout` all worked in the merged view. The host
+  repo stayed byte-identical (manifest of names and SHAs, `.git` included),
+  with the same HEAD and a clean `git status`. `git fsck` passes in the
+  merged view.
+- The upper dir holds deletions as `c 0,0` whiteouts (files and the removed
+  directory). A file rename shows up as a full copy under the new name plus a
+  whiteout of the old one: no redirect xattrs. The new `.git` objects, the
+  refs and the index landed in upper. This confirms Phase 3 must diff the
+  merged view, never the upper dir.
+- The upper layer persists across container restarts and across
+  `colima stop`/`start`. `/var/lib` on the VM disk survives restarts.
+- Inside the container the virtiofs files show as owned by `0:0`. git needs
+  `safe.directory '*'`; set it in the image's system gitconfig in Phase 2.
+- A file added on the host *between* sessions shows up in the merged view,
+  because the lower layer is live. Phase 3 implication for non-repo `--apply`:
+  a host-side edit to a file the agent also changed is masked by the upper
+  copy, so rsync merged→host would silently overwrite it. The conflict check
+  needs a baseline manifest recorded at session start, not just `rsync -n`.
+
+Harness startup with `--network none` (Unknown #2), `claude-agent:latest`
+image (opencode 1.19.3, pi 1.3.0):
+
+- Both start offline. Both TUIs were still running after 20s under a pty and
+  did not crash. The rendered screen was not captured, so TUI startup latency
+  is unmeasured; check it at the Phase 2 gate.
+- **opencode phones home despite `autoupdate: false`.** Behind a logging
+  proxy it tried `registry.npmjs.org:443` and `models.opencode.ai:443`.
+  Setting `OPENCODE_DISABLE_AUTOUPDATE=1`, `OPENCODE_DISABLE_MODELS_FETCH=1`,
+  `OPENCODE_DISABLE_LSP_DOWNLOAD=1` and `OPENCODE_DISABLE_DEFAULT_PLUGINS=1`
+  removed both, leaving only the inference endpoint. The run did not show
+  which flag removed which host, so Phase 2 sets all four (Dockerfile `ENV`).
+- The `@ai-sdk/openai-compatible` provider is bundled: the request reached
+  `POST /v1/chat/completions` with no npm fetch. No pre-install needed.
+- `opencode models` lists the bundled `opencode/*` (Zen) cloud models next to
+  `local/test-model`. These are unusable offline. Phase 2 should try
+  restricting providers to `local` (`enabled_providers`; verify the key
+  exists in 1.19).
+- `opencode run` against an endpoint that refuses connections retried until
+  the 60s timeout. Against one that answers with an HTTP error it exited in
+  ~1.6s. So expect a hang, not an error, when the local inference server is
+  down.
+- The opencode TUI ignores SIGTERM: `timeout` hung the first probe run.
+  SIGKILL ends it cleanly with no leftover processes. This doesn't affect
+  interactive use.
+- pi contacted only the inference endpoint in every mode, with no update or
+  telemetry traffic seen. `pi -p` fails with "Connection error." after
+  14.3s of retries. **No Pi offline settings needed.**
