@@ -39,12 +39,15 @@ summary() {
 echo "==> cross-VM tests (offline-agent ↔ claude-agent, research)"
 echo
 
-vm_running() { colima status -p "$1" 2>/dev/null | grep -q "Running"; }
-# The VM's --network-address IP, as reported by colima.
-vm_address() {
+# One field of `colima list --json` for a profile (empty if absent). Not
+# `colima status`: it reports through its logger, not as parseable stdout.
+vm_field() {
   colima list -p "$1" --json 2>/dev/null \
-    | python3 -c 'import json,sys; print(json.loads(sys.stdin.readline()).get("address",""))' 2>/dev/null
+    | python3 -c 'import json,sys; print(json.loads(sys.stdin.readline()).get(sys.argv[1],""))' "$2" 2>/dev/null
 }
+vm_running() { [[ "$(vm_field "$1" status)" == "Running" ]]; }
+# The VM's --network-address IP.
+vm_address() { vm_field "$1" address; }
 
 OA="docker --context colima-offline-agent"
 
