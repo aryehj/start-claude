@@ -80,3 +80,81 @@ def test_searxng_mcp_pinned_below_v2():
         "searxng MCP shim must pin 'mcp[cli]<2'; mcp 2.x renamed FastMCP and "
         "the shim fails on import"
     )
+
+
+# ── offline-agent.Dockerfile ──────────────────────────────────────────────────
+
+OFFLINE_DOCKERFILE = Path(__file__).parent.parent / "dockerfiles" / "offline-agent.Dockerfile"
+USER_PACKAGES_MARKER = "# ── user packages ──"
+
+
+def _offline_text() -> str:
+    return OFFLINE_DOCKERFILE.read_text()
+
+
+def _offline_instructions() -> list:
+    """Top-level Dockerfile instruction keywords, in order (comments skipped)."""
+    out = []
+    continued = False
+    for line in _offline_text().splitlines():
+        stripped = line.strip()
+        if not continued and stripped and not stripped.startswith("#"):
+            out.append(stripped.split()[0].upper())
+        if not stripped.startswith("#"):
+            continued = stripped.endswith("\\")
+    return out
+
+
+def test_offline_opencode_and_pi_installed():
+    text = _offline_text()
+    assert "npm install -g" in text
+    assert "opencode-ai@latest" in text
+    assert "@earendil-works/pi-coding-agent@latest" in text
+
+
+def test_offline_no_claude_code_installer():
+    # Claude Code needs the Anthropic API; the offline image has no egress.
+    assert "claude.ai/install.sh" not in _offline_text()
+
+
+def test_offline_drops_claude_agent_extras():
+    # Comments may name what was dropped; only instructions count.
+    text = "\n".join(
+        l for l in _offline_text().lower().splitlines() if not l.lstrip().startswith("#")
+    )
+    for unwanted in ("libreoffice", "searxng-mcp", "doc-tools", "pandoc"):
+        assert unwanted not in text, f"{unwanted} belongs to claude-agent, not offline-agent"
+
+
+def test_offline_opencode_phone_home_disabled():
+    # Phase 1: autoupdate=false alone still let opencode reach registry.npmjs.org
+    # and models.opencode.ai; these four env vars removed both.
+    text = _offline_text()
+    for var in (
+        "OPENCODE_DISABLE_AUTOUPDATE=1",
+        "OPENCODE_DISABLE_MODELS_FETCH=1",
+        "OPENCODE_DISABLE_LSP_DOWNLOAD=1",
+        "OPENCODE_DISABLE_DEFAULT_PLUGINS=1",
+    ):
+        assert var in text, f"{var} missing from offline-agent.Dockerfile ENV"
+
+
+def test_offline_git_safe_directory():
+    # virtiofs files show as 0:0 inside the container; git refuses them otherwise.
+    assert "safe.directory" in _offline_text() and "--system" in _offline_text()
+
+
+def test_offline_uv_project_environment_redirect():
+    assert 'UV_PROJECT_ENVIRONMENT="${TMPDIR:-/tmp}/.venv"' in _offline_text()
+
+
+def test_offline_user_packages_block_is_last_run():
+    text = _offline_text()
+    assert USER_PACKAGES_MARKER in text, "user-packages block marker missing"
+    tail = text[text.index(USER_PACKAGES_MARKER):]
+    tail_runs = [l for l in tail.splitlines() if l.strip().startswith("RUN")]
+    assert len(tail_runs) == 1, "exactly one RUN must follow the user-packages marker"
+    # Nothing but WORKDIR/CMD may follow the user-packages RUN.
+    instructions = _offline_instructions()
+    last_run = len(instructions) - 1 - instructions[::-1].index("RUN")
+    assert set(instructions[last_run + 1:]) <= {"WORKDIR", "CMD"}
