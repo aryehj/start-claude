@@ -5,7 +5,7 @@
 - [x] Phase 1: Go/no-go on overlayfs-over-virtiofs and offline harness startup (human gate: run on the Mac)
 - [x] Phase 2: Core script usable end to end on a real project (human gate: drive a task with a local model)
 - [x] Phase 3: Bound agent storage; no agent write path to the Mac (human gate: fill each sink on the Mac and confirm only that session breaks)
-- [ ] Phase 4: Export/apply surface, docs, ADR (human gate: does `--apply` feel safe enough to use)
+- [x] Phase 4: Export/apply surface, docs, ADR (human gate: does `--apply` feel safe enough to use)
 
 ## Context
 
@@ -596,3 +596,42 @@ checks are the first real run.
   this repo's `claude-agent` container as a negative control. All five checks
   failed there for the right reason (writable root, writable virtiofs mounts,
   no cgroup caps).
+
+### Phase 4 implementation notes (2026-10-19)
+
+Built in the dev container. The command flows were tested end to end with
+local bash in place of docker and `colima ssh`. Nothing has run against Colima
+yet, so the gate is the first real run.
+
+- Decisions with the user. Git `--apply` runs the user's own git on the Mac
+  (bundle from the helper, `fetch` with `transfer.fsckObjects`, then
+  `merge --ff-only`), so agent-written repo config never shares a container
+  with a writable host mount. `--apply` refuses a session with uncommitted
+  changes. Non-git `--export` is a tarball of changed files plus
+  `PATH.deleted`.
+- Baseline markers (`mode`, `base` or `manifest`) are written beside
+  `disk.img` only when the image is created. The Phase 2/3 sessions on the Mac
+  have none: `--apply` refuses them, and `--discard` needs `--force`. The
+  pre-image (legacy) session still gets the manual recipe.
+- Git helpers override `core.fsmonitor`, `core.hooksPath`, `core.pager` and
+  untracked-file settings, and use `--no-ext-diff --no-textconv`. A test plants
+  each of these in a real repo and checks that nothing ran. Uncommitted work
+  is diffed by staging into a throwaway index and object dir with the repo's
+  objects as alternates, so the read-only overlay is never written.
+- Non-git: the manifest is `find -printf '%y %s %T@ %P\0'` run in the VM, both
+  at creation and at apply time. It is read back through `base64`, because it
+  is NUL-separated and travels over `colima ssh`. rsync runs with
+  `-rlpt -8 --delete`, and any name rsync still escapes (`\#ooo`) makes
+  export/apply refuse.
+- Additions not in the steps: `--apply` asks for confirmation; `--apply` and
+  `--discard` refuse while the session container runs (otherwise the agent
+  could change the work between review and apply); `--export` never
+  overwrites a file. An unborn host repo is supported: an empty base, a
+  whole-history bundle, and a fast-forward of the unborn branch.
+- `rsync` was added to the image's system packages, which invalidates every
+  layer once. **Run `--rebuild` before testing.** Older images fail the
+  non-git commands with a `--rebuild` hint.
+- AGENTS.md: not seeded. `templates/global-claude.md` describes
+  proxy/apt/uv workflows that don't exist in this container. A short offline
+  AGENTS.md for opencode (`~/.config/opencode/`, already mounted read-only) is
+  a possible follow-up.

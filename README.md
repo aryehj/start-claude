@@ -708,6 +708,161 @@ both are unmaintained. Do not extend this harness — start from
 
 ---
 
+# offline-agent.py
+
+Runs opencode and pi against a local model with **no egress at all**, over a
+copy-on-write view of the directory you run it from. It has its own Colima VM
+(`offline-agent` profile). Host-side state lives in `~/.offline-agent/`, and
+the image is built from `dockerfiles/offline-agent.Dockerfile`.
+
+- **Network:** the container can reach only the local inference server on the
+  macOS host (`$HOST_IP:8000` for omlx, the default, or `:11434` for Ollama).
+  There is no proxy, no DNS (external lookups go to a blackhole resolver), no
+  SearXNG and no other VM service. Claude Code is not installed, because it
+  needs the Anthropic API.
+- **Writes:** the project directory is the read-only lower layer of an
+  overlayfs volume, mounted at its real path. Everything the agent writes,
+  `git commit` included, lands in the VM. The host directory is unchanged
+  until you run `--apply`.
+- **Storage:** each session has a sparse ext4 image (default 5 GiB) that holds
+  the overlay's upper layer and the harnesses' history. Past that cap the agent
+  gets `ENOSPC`. The container root is read-only, with small tmpfs mounts for
+  `/tmp` and `~/.cache`. Memory and process count are capped. No container
+  mount can write to the Mac.
+
+It runs alongside the `claude-agent` and `research` VMs. It publishes no host
+ports, and its firewall chains only match its own docker networks.
+
+## Requirements
+
+- macOS with Colima, docker and git
+- A local inference server: omlx (default) or Ollama
+- The project directory must be under `$HOME`, because Colima mounts only
+  `$HOME` into the VM. It must not be `$HOME` itself.
+
+## Usage
+
+```bash
+cd ~/some/project && offline-agent.py   # start (or attach to) this directory's session
+offline-agent.py --backend=ollama       # use Ollama instead of omlx
+
+# Review and keep the agent's work (run from the same directory)
+offline-agent.py --diff                 # what changed
+offline-agent.py --export ~/out.patch   # save it without touching the project
+offline-agent.py --apply --dry-run      # show what --apply would do
+offline-agent.py --apply                # copy it onto the host directory (asks first)
+offline-agent.py --discard              # delete the session (refuses if work is unexported)
+offline-agent.py --list-sessions        # every session in the VM, with used/cap
+
+offline-agent.py --rebuild              # rebuild the image (prompts before deleting the VM)
+```
+
+Each session is keyed by the project's real path. It survives container exits,
+re-runs and `colima stop`. Running the script again in the same directory while
+a session is open attaches a second shell. Inside, run `opencode` or `pi`. Both
+are pre-wired to the local model, with web fetch and web search turned off.
+
+## Getting changes out
+
+`--diff`, `--export`, `--apply` and `--discard` all read the **merged** view
+of the overlay, never its upper layer (whiteouts and copy-ups make the upper
+layer a poor diff). They read it in a throwaway helper container with no
+network and a read-only overlay mount. The baseline (the host's HEAD, or a
+manifest of every file) is recorded when the session is created. It is stored
+beside the session image, where the agent cannot reach it.
+
+**Git repos** (a `.git` directory at the project root):
+
+| Command | Result |
+|---|---|
+| `--diff` | Commits since the session started, then uncommitted changes (untracked files included) |
+| `--export PATH` | `PATH`: a `git format-patch` mbox of the commits (apply with `git am`). `PATH.wip.diff`: uncommitted changes, if any (apply with `git apply`) |
+| `--apply` | Fast-forwards the host's current branch to the session's HEAD, using **your git on the Mac** with a bundle the helper wrote (objects are fsck'd on fetch) |
+
+`--apply` refuses if the host HEAD moved since the session started, if the
+session has uncommitted changes, or if the session rewrote history. Commit
+inside the session, or fall back to `--export`. Only commits are applied;
+ignored files stay behind.
+
+**Other directories:**
+
+| Command | Result |
+|---|---|
+| `--diff` | List of added, modified and deleted paths, then a unified diff of each changed file |
+| `--export PATH` | `PATH`: a tarball of added and changed files. `PATH.deleted`: the paths the agent deleted |
+| `--apply` | `rsync --delete` from the merged view onto the host directory |
+
+`--apply` refuses if any path it would write or delete changed on the host
+since the session started. Without that check, a host edit to a file the
+agent also edited would be overwritten silently. Host edits to files the
+agent never touched are fine, because the lower layer is live.
+
+`--apply` and `--discard` refuse while the session container is running.
+After `--apply`, the session still exists. Once the host has everything,
+`--discard` removes it without `--force`. `--export` and `--discard` take
+`--session ID` (from `--list-sessions`) to act on a session other than the
+current directory's.
+
+Sessions created before this release have no baseline. `--apply` refuses
+them. Export by hand (the script prints a `git bundle` / `tar` recipe), then
+run `--discard --force`.
+
+## Threat model
+
+- The agent can **read everything in the project directory**, including
+  secrets such as `.env`, and can send it to the inference endpoint. That is
+  the one channel left open by design. Don't run it in a directory holding
+  secrets you wouldn't hand to the model server.
+- It cannot reach the network, other VM services, other sessions, or the Mac
+  filesystem outside its overlay. Mac sync clients (iCloud, Dropbox) never see
+  agent output, and planted hooks (`.git/hooks`, `.envrc`,
+  `.vscode/tasks.json`) never run on the Mac unless you apply them.
+- A prompt-injection payload in the project can at most corrupt the overlay.
+  The helpers that read the overlay turn off git's fsmonitor, hooks, pager,
+  external diff drivers and textconv. Agent-written repo config can't run code
+  or change what `--diff` shows. Git work never shares a container with a
+  writable host mount.
+- **Review `--diff` before `--apply`.** An applied commit can still add a git
+  hook path, a CI file or a build script that your tools run later.
+- The Colima VM is trusted, as in the sibling scripts: its docker daemon runs
+  as root and can see `$HOME`.
+
+## Adding packages
+
+The container cannot `apt`, `pip` or `npm install` anything at runtime. Add
+tools in the `# ── user packages ──` block at the end of
+`dockerfiles/offline-agent.Dockerfile`, then run `offline-agent.py --rebuild`.
+Every layer above that block stays cached, so a rebuild costs about as much
+as the new packages. Superseded layers stay on the VM's data disk until you
+run `docker --context colima-offline-agent builder prune`.
+
+## Storage caps
+
+| What | Default | Set with | Applies |
+|---|---|---|---|
+| Per-session image | 5 GiB | `--session-disk` / `OFFLINE_AGENT_SESSION_DISK` | When the session is created |
+| VM root disk (OS + session images) | 10 GiB | `--root-disk` / `OFFLINE_AGENT_ROOT_DISK` | When the VM is created |
+| VM data disk (image, build cache) | 10 GiB | `--disk` / `OFFLINE_AGENT_DISK` | When the VM is created |
+| Container memory / pids / `/tmp` / `~/.cache` | 1536 MiB / 512 / 512 MiB / 256 MiB | constants in `offline-agent.py` | Every start |
+
+Session images are sparse, so most sessions cost megabytes, and the per-session
+caps can add up to more than the root disk. The script warns when the root
+disk has less than one session cap free. To grow an existing session, run
+`truncate -s <new> disk.img` and then `resize2fs` on the loop device inside the
+VM. To change VM disk sizes, run `--rebuild` and delete the VM; the prompt
+lists sessions with unexported work first.
+
+opencode and pi history lives in the session image and goes away with the
+session. Their config (`~/.offline-agent/opencode/config/opencode.json`,
+`~/.offline-agent/pi/agent/{models,settings}.json`) is rewritten on every run
+and mounted read-only. Use `OFFLINE_AGENT_DEFAULT_MODEL` rather than `/model`
+to pick a model that sticks.
+
+No `AGENTS.md` is seeded. `templates/global-claude.md` describes the proxy,
+apt and uv workflows of the sibling environments, none of which work here.
+
+---
+
 # Infrastructure tests
 
 The `tests/` directory holds automated tests for the scripts themselves (separate
@@ -719,17 +874,21 @@ noted.
 | `test-agent-firewall.sh` | Firewall smoke tests from inside `claude-agent` (default-deny, proxy allow/deny, Ollama carve-out, env wiring, inter-container port isolation, DNS blackhole, container-name DNS, VM-local services closed) | Run from inside the container: `bash tests/test-agent-firewall.sh` |
 | `test-cross-vm-isolation.sh` | Cross-VM isolation: `claude-agent` and `research` containers cannot reach each other by name, port, or via `host.docker.internal:3000`. Positive test confirms inference carve-out still works. Skips if either VM is not running. | `./tests/test-cross-vm-isolation.sh` |
 | `test_agent_sh.py` | Static invariants for `start-agent.sh`: no host-port publish, sandbox trust boundary, Pi and skills wiring, warm-reattach batching, atomic firewall apply, secret handling, flag hygiene | `uv run --with pytest pytest tests/test_agent_sh.py` |
-| `test_dockerfile.py` | Static checks: pi and opencode CLI install lines in `claude-agent.Dockerfile` | `uv run --with pytest pytest tests/test_dockerfile.py` |
+| `test_dockerfile.py` | Static checks: pi and opencode CLI install lines in `claude-agent.Dockerfile`; offline-agent image contents | `uv run --with pytest pytest tests/test_dockerfile.py` |
 | `test_research.py` | Unit tests for `research.py` pure helpers (`compose_denylist`, `denylist_to_squid_acl`, `_prune_subdomains`, etc.) | `uv run --with pytest pytest tests/test_research.py` |
 | `test_settings_template.py` | Validates `templates/global-claude-settings.json` is well-formed JSON, has required keys, and `git push` is absent from the allow list | `uv run --with pytest pytest tests/test_settings_template.py` |
 | `test_sandbox_allowlist.py` | Validates `templates/sandbox-allowlist.txt` is well-formed and that `start-claude.sh` injects `sandbox.network.allowedDomains` with correct `*.d` expansion | `uv run --with pytest pytest tests/test_sandbox_allowlist.py` |
+| `test_offline_agent.py` | Unit tests for `offline-agent.py`: iptables render, session layout and baselines, harness config merge, `docker run` invariants, and the export/apply logic (itemize parsing, host-conflict check, git apply decisions). Runs the real git and rsync helper scripts against temp repos, including one with hostile repo config | `uv run --with pytest pytest tests/test_offline_agent.py` |
+| `test-offline-agent-firewall.sh` | No-egress firewall from inside an offline-agent session: inference reachable; external HTTP, VM-local services and DNS all fail fast | Inside the session, or from the host via `docker exec` (see the script header) |
+| `test-offline-agent-cross-vm.sh` | offline-agent runs beside `claude-agent` and `research` without either firewall affecting the other, and cannot reach them | `./tests/test-offline-agent-cross-vm.sh` with a session open |
+| `test-offline-agent-limits.sh` | Storage and resource caps from inside a session: read-only root, `ENOSPC` at the session cap, tmpfs sizes, no writable Mac mount, cgroup pids/memory | In a scratch session created with `OFFLINE_AGENT_SESSION_DISK=256M` (see the script header) |
 | `probe-denylist.sh` | End-to-end Squid denylist probe (allow and deny URLs) from inside `research-searxng` | `bash tests/probe-denylist.sh` |
 | `probe-vane-egress.sh` | Verifies `research-vane` has correct `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars and that a sidecar HTTPS round-trip through Squid succeeds | `bash tests/probe-vane-egress.sh` |
 
 The pytest suites can be run together:
 
 ```bash
-uv run --with pytest pytest tests/test_agent_sh.py tests/test_dockerfile.py tests/test_research.py tests/test_settings_template.py tests/test_sandbox_allowlist.py
+uv run --with pytest pytest tests/
 ```
 
 ## Environment variable reference (research.py)
@@ -740,6 +899,22 @@ uv run --with pytest pytest tests/test_agent_sh.py tests/test_dockerfile.py test
 | `RESEARCH_MEMORY` | `2` | VM memory in GiB (overridden by `--memory`) |
 | `RESEARCH_CPUS` | `2` | VM CPU count (overridden by `--cpus`) |
 | `OMLX_API_KEY` | *(unset)* | API key for omlx |
+
+---
+
+## Environment variable reference (offline-agent.py)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OFFLINE_AGENT_BACKEND` | `omlx` | Inference backend: `omlx` or `ollama` (overridden by `--backend`) |
+| `OFFLINE_AGENT_MEMORY` | `2` | VM memory in GiB (overridden by `--memory`) |
+| `OFFLINE_AGENT_CPUS` | `2` | VM CPU count (overridden by `--cpus`) |
+| `OFFLINE_AGENT_DISK` | `10` | VM data disk GiB, at VM creation (overridden by `--disk`) |
+| `OFFLINE_AGENT_ROOT_DISK` | `10` | VM root disk GiB, at VM creation (overridden by `--root-disk`) |
+| `OFFLINE_AGENT_SESSION_DISK` | `5G` | Per-session cap, e.g. `5G` or `256M`, at session creation (overridden by `--session-disk`) |
+| `OFFLINE_AGENT_DEFAULT_MODEL` | *(unset)* | Default model for opencode and pi |
+| `OMLX_API_KEY` | *(unset)* | API key for omlx; passed into the container value-less |
+| `GIT_USER_NAME` / `GIT_USER_EMAIL` | `Dev` / `dev@localhost` | Commit identity inside the container |
 
 ---
 

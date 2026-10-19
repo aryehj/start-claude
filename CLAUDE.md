@@ -9,7 +9,8 @@ using Apple Containers. One script, one container per project.
 start-claude.sh              — Apple Containers path; per-project microVM with Claude Code
 start-agent.sh               — Colima path; shared VM + container with Claude Code + OpenCode + Pi + VM-level egress allowlist
 research.py                  — Python script; isolated Colima VM + Vane + SearXNG research environment
-dockerfiles/                 — Dockerfiles built by start-agent.sh (claude-agent.Dockerfile)
+offline-agent.py             — Python script; no-egress Colima VM running opencode/pi over a copy-on-write overlay of cwd
+dockerfiles/                 — Dockerfiles: claude-agent.Dockerfile (start-agent.sh), offline-agent.Dockerfile (offline-agent.py)
 templates/                   — seed templates copied to host state dirs on first run
   global-claude.md                    — seeded to ~/.claude-containers/shared/CLAUDE.md
   global-claude-settings.json         — seeded to settings.json (showThinkingSummaries, coauthorTag, theme, permissions)
@@ -23,8 +24,12 @@ tests/                       — unit tests and infra smoke tests
   test-agent-firewall.sh               — in-container firewall smoke tests for start-agent.sh (all README cases but hot-reload: egress, DNS blackhole, VM-local services)
   test-cross-vm-isolation.sh           — host-driven cross-VM isolation test: claude-agent ↔ research cannot reach each other
   test_agent_sh.py                     — static checks: no host-port publish, pi integration invariants, sandbox trust-boundary
-  test_dockerfile.py                   — static checks: pi and opencode CLI install lines in claude-agent.Dockerfile
+  test_dockerfile.py                   — static checks: pi and opencode CLI install lines in claude-agent.Dockerfile; offline-agent.Dockerfile contents
   test_research.py                     — unit tests for research.py pure helpers
+  test_offline_agent.py                — unit tests for offline-agent.py: firewall render, session layout, harness config, docker argv, export/apply logic
+  test-offline-agent-firewall.sh       — in-container no-egress firewall smoke test for offline-agent.py
+  test-offline-agent-cross-vm.sh       — host-driven check that offline-agent runs beside claude-agent/research without interference
+  test-offline-agent-limits.sh         — in-container storage and resource caps smoke test for offline-agent.py
   test_settings_template.py           — validates global-claude-settings.json is well-formed and git push is absent from allow list
   test_sandbox_allowlist.py           — validates sandbox-allowlist.txt is well-formed and that start-claude.sh injects allowedDomains with *.d expansion
   probe-denylist.sh                    — host-driven Squid denylist end-to-end probe (allow + deny URLs)
@@ -123,6 +128,23 @@ If the named container already exists, it just starts and re-attaches it.
 - **Self-healing container start via `start_or_recreate`.** If `docker start` returns non-zero or the container is not `Running` immediately after, the script prints a visible warning (including captured stderr), `docker rm -f`s the broken container, and recreates it. Covers both the `RWLayer nil` dangling-layer case (hard non-zero exit) and crash-on-boot (zero exit but exits immediately). Both containers also get `--restart unless-stopped` so transient crashes self-recover; an explicit `docker stop` still sticks. See ADR-041.
 - **Script-controlled Vane SearXNG URL (config.json authority).** On every bring-up, `ensure_vane_searxng_url` patches `~/.research/vane-data/data/config.json`'s `search.searxngURL` to `http://research-searxng:8080` if it differs. Vane ignores the `SEARXNG_API_URL` env var (which is removed); config.json is the authoritative source. The patch preserves all other fields; parse failures warn rather than clobber. See ADR-041.
 
+## offline-agent.py key decisions
+
+`offline-agent.py` is a stdlib-only Python sibling to `research.py`: a dedicated Colima VM (`offline-agent` profile) running opencode and pi against the local inference server with no other egress, over a copy-on-write view of whatever directory it is run from. See ADR-050.
+
+- **No egress except inference.** `OFFLINE_AGENT` chain (from DOCKER-USER) RETURNs only ESTABLISHED/RELATED and `$HOST_IP:$INFERENCE_PORT`; `OFFLINE_AGENT_IN` (from INPUT) REJECTs every new container→VM connection. No proxy, no DNS (`--dns 192.0.2.1`), no SearXNG, no Claude Code. Both chains in one `iptables-restore --noflush` commit; a failed apply, missing host IP or missing network CIDR aborts before any container starts.
+- **Overlay write quarantine.** cwd (must be under `$HOME`, not `$HOME` itself) is the read-only lower layer of a Docker `local` overlay volume mounted at its real path; Colima's default `$HOME` virtiofs mount is the lower dir, so switching projects never restarts the VM. Session id = first 12 hex of SHA-256 of the real path.
+- **Ephemeral containers.** `docker run --rm`; packages live in the image, work in the overlay, harness history in the session image. Re-running in the same dir while a session is open `docker exec`s a second shell.
+- **Bounded storage, no agent write path to the Mac.** Per-session sparse ext4 image (`--session-disk`, default 5 GiB) loop-mounted in the VM holds the overlay upper/work and harness state; read-only container root with sized `exec` tmpfs; `--memory`, `--pids-limit`, `--log-driver none`; host config mounted `:ro`. Colima has two disks (`--disk` data, `--root-disk` OS + sessions), both capped at VM creation only.
+- **Baseline recorded at session creation, beside the image.** `mode` (git/dir) plus `base` (host HEAD via the Mac's git) or `manifest` (`find -printf '%y %s %T@ %P\0'` in the VM) in `sessions/<id>/`, outside the agent's reach. Sessions without one cannot be `--apply`'d.
+- **Export/apply read the merged view in a helper container.** `--network none`, read-only root, overlay mounted `:ro`. Git helpers neutralise agent-written repo config (`core.fsmonitor`, `core.hooksPath`, pager, `--no-ext-diff --no-textconv`).
+- **Git `--apply` uses the Mac's own git.** The helper emits a bundle; the host fetches it with `transfer.fsckObjects` and `merge --ff-only`. Refuses if host HEAD moved, the session is dirty, or history was rewritten. Agent repo config never meets a writable host mount.
+- **Non-git `--apply` is `rsync -rlpt --delete` merged→host**, refused when any touched path differs from the creation-time manifest (a host edit under an agent edit is otherwise silently overwritten).
+- **`--apply` / `--discard` refuse while the session container runs; `--discard` refuses unexported work unless `--force`.**
+- **`colima ssh` does not propagate remote exit codes** (it exits 1 for any failure). VM-side scripts report results via stdout markers (`LEGACY_SESSION_MARKER`, `DISCARDED_MARKER`); docker run exit codes are reliable.
+- **Rebuild-only package path.** Tools are added in the trailing `# ── user packages ──` block of `dockerfiles/offline-agent.Dockerfile` + `--rebuild`; base layers stay cached. opencode offline env switches (`OPENCODE_DISABLE_*`) are baked in as `ENV`.
+- **No AGENTS.md seeded.** `templates/global-claude.md` describes proxy/apt/uv workflows that don't exist here.
+
 ## Commit style
 
 Do NOT include `Co-Authored-By` lines in commit messages.
@@ -172,6 +194,9 @@ mv ~/Code/my-repo ~/sandboxes/default/projects/my-repo
 # Once verified, remove legacy state:
 # rm -rf ~/.claude-containers ~/.claude-agent
 ```
+
+For `offline-agent.py`, edit the script directly; image changes go in
+`dockerfiles/offline-agent.Dockerfile` and need `offline-agent.py --rebuild`.
 
 For `research.py`, the script is a single Python file at the repo root. Edit it
 directly. After changing it:

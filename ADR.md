@@ -3214,3 +3214,150 @@ same thing to each.
 - A test runs the filter generator over the template, so a template entry that
   `start-agent.sh` would reject fails CI.
 
+
+## ADR-050: `offline-agent.py`: no-egress agent over a copy-on-write view of cwd
+
+**Date:** 2026-10-19
+**Status:** Accepted
+
+### Context
+
+`start-agent.sh` gives a local model a curated egress allowlist (ADR-010), and
+`research.py` gives Vane a denylist (ADR-018). Neither covers a third case: an
+agent with **no egress at all**, pointed at whatever directory the user is
+standing in, whose writes stay quarantined until the user reviews them. With
+`start-agent.sh`, agent writes reach the Mac filesystem directly. Sync clients
+(iCloud, Dropbox) upload them, and hook-like files (`.git/hooks`, `.envrc`,
+`.vscode/tasks.json`) can run on the host before anyone has looked at them.
+
+### Decision
+
+**No egress.** `offline-agent.py` is a stdlib-only Python script modelled on
+`research.py`. It has its own Colima profile (`offline-agent`), its own state
+in `~/.offline-agent/`, and an image from `dockerfiles/offline-agent.Dockerfile`
+with opencode and pi (omlx by default, ADR-012). An `OFFLINE_AGENT` chain
+hooked from `DOCKER-USER` RETURNs only replies and `$HOST_IP:$INFERENCE_PORT`.
+An `OFFLINE_AGENT_IN` chain hooked from `INPUT` REJECTs every new
+container-to-VM connection, because with no proxy there is no VM service the
+container needs. Both chains are replaced in one `iptables-restore --noflush`
+commit. DNS goes to the `192.0.2.1` blackhole. `--network none` would also
+cut the inference endpoint, so the single-RETURN chain is used instead.
+opencode needs four `OPENCODE_DISABLE_*` env switches as well as
+`autoupdate: false` to stop calling `registry.npmjs.org` and
+`models.opencode.ai`. pi needed none.
+
+**Overlay write quarantine.** The working directory, which must be under
+`$HOME` and not `$HOME` itself, is the read-only lower layer of a Docker
+`local` overlay volume, mounted in the container at its real path. Colima
+already mounts `$HOME` into the VM at the same path, so no VM restart is
+needed when switching projects. The upper and work dirs live on VM-local disk,
+because overlayfs forbids a network filesystem as the upper layer. Phase 1 of
+`plans/offline-agent.md` verified a virtiofs lower layer: writes, deletes,
+renames and commits all land in the upper layer, and the host directory stays
+byte-identical.
+
+**Trust statement.** The VM is trusted, as in the sibling scripts: its docker
+daemon runs as VM root and can see `$HOME` read-write. The read-only guarantee
+the agent sees comes from the overlay's lower layer and the container's mount
+set, not from a VM-level read-only mount. The agent can read everything in the
+working directory and send it to the inference server. That is the one channel
+left open by design. Nothing else leaves the VM.
+
+**Ephemeral containers.** Every session container is `docker run --rm`.
+Packages belong in the image, work in the overlay and harness history in the
+session image, so `start-agent.sh`'s reattach and `--reset-container` surface
+is not needed.
+
+**Rebuild-only package path.** The container cannot install anything at
+runtime. Tools go in the trailing `# ── user packages ──` block of the
+Dockerfile, followed by `--rebuild`. Docker layer caching makes that cost about
+as much as the new packages, as long as additions stay in the trailing block.
+
+**Storage bounds.** Disk exhaustion is a denial of service, not an exfil
+channel, but a full VM root disk takes every session down. Writes reaching the
+Mac outside the overlay would also break the trust statement above. So:
+
+- Each session gets a sparse ext4 image (default 5 GiB), loop-mounted in the
+  VM. It holds the overlay's upper and work dirs plus the opencode and pi
+  state. The image is formatted under a temporary name, so a failed mkfs is
+  retried rather than mounted. It is re-mounted on every start, since loop
+  mounts do not survive a VM restart.
+- The container root is read-only, with sized `exec` tmpfs for `/tmp` and
+  `~/.cache`, `--memory`, `--pids-limit` and `--log-driver none`.
+- Harness config on the Mac is mounted read-only. Nothing in the container
+  can write to the Mac.
+- Colima has two disks: `--disk` (data: `/var/lib/docker`) and `--root-disk`
+  (OS and session images). Both are capped at 10 GiB, at VM creation only.
+
+**Export and apply.** Every read of agent work uses the *merged* view, never
+the upper dir: whiteouts and copy-up renames make the upper dir a poor diff.
+Reads run in a helper container with `--network none`, a read-only root and
+the overlay mounted read-only. Git helpers override `core.fsmonitor`,
+`core.hooksPath` and `core.pager`, and pass `--no-ext-diff --no-textconv`.
+Agent-written repo config can then neither run code nor change what `--diff`
+shows. The baseline is recorded when the session image is created, beside the
+image and out of the agent's reach: the mode, plus the host HEAD (git) or a
+`find` manifest of type, size and mtime (otherwise).
+
+- **Git repos** (a `.git` directory at the project root): the helper writes a
+  bundle of `base..HEAD`. The **user's own git on the Mac** fetches it with
+  `transfer.fsckObjects=true` and runs `merge --ff-only`. Agent-written repo
+  config therefore never meets a writable host mount, and the user's LFS
+  filters and hooks behave as they normally do. `--apply` refuses if the host
+  HEAD moved, if the session has uncommitted changes (only commits are
+  applied), or if the session's HEAD does not descend from the base.
+  `--export` writes a `format-patch` mbox, plus `PATH.wip.diff` for
+  uncommitted work (untracked files are staged into a throwaway index and
+  object dir).
+- **Other directories:** `rsync -rlpt --delete` from the merged view onto the
+  host. `--apply` refuses when any path it would write or delete differs from
+  the creation-time manifest. The lower layer is live, so a host edit to a
+  file the agent also changed is hidden under the upper copy, and rsync would
+  overwrite it silently otherwise. `--export` writes a tarball of the changed
+  files plus `PATH.deleted`.
+- `--apply` asks before writing and has `--dry-run`. `--apply` and `--discard`
+  refuse while the session container runs, so the agent cannot change what was
+  reviewed. `--discard` refuses work that is not on the host unless `--force`.
+
+**`colima ssh` exit codes.** `colima ssh` exits 1 for any remote failure. VM
+scripts therefore report results through stdout markers, and docker exit
+codes are used for helpers.
+
+### Rejected alternatives
+
+- **`--offline` flag on `start-agent.sh`.** Its sandbox tree, writable project
+  mount, tinyproxy and SearXNG wiring all assume egress. Bolting on an offline
+  mode would leave agent writes on the Mac, which is the gap this ADR closes.
+- **Installer container, or a pause window that opens egress for installs.**
+  More moving parts and a time-boxed hole in the firewall, for a need the
+  rebuild path already meets cheaply.
+- **Snapshot-copy of cwd into a VM volume** (the Phase 1 fallback). Not
+  needed once the virtiofs lower layer worked. It would also cost a full copy
+  per session.
+- **Storage:** `docker run --storage-opt size=` (overlay2 supports it only on
+  XFS with `pquota`, and Colima's root is ext4); ext4 project quotas on the VM
+  root (would need `/` re-mounted with `prjquota`); tmpfs for the overlay upper
+  (loses persistence across `colima stop` and charges agent output to RAM).
+- **Diffing the upper dir.** It encodes deletions as whiteout devices and
+  renames as copy plus whiteout, so it is not a diff.
+- **Running git `--apply` in a second helper with the host repo mounted
+  read-write.** It needs no git on the Mac, but the user's global git config
+  (LFS filters in particular) is missing there, so an LFS checkout would write
+  pointer files.
+- **`rsync -n` alone as the non-git conflict check.** It cannot see a host
+  edit hidden under an agent edit.
+
+### Consequences
+
+- The host directory is byte-identical until `--apply`. Review happens in the
+  terminal, against output the agent cannot shape.
+- Applied commits can still add things the user's tools run later (CI files,
+  `core.hooksPath` targets, build scripts). `--diff` before `--apply` is the
+  control, and the README says so.
+- Sessions created before baselines existed cannot be applied. They are
+  exported by hand (the script prints the recipe) and removed with
+  `--discard --force`.
+- Images built before this ADR lack rsync. Non-git helpers fail with a
+  `--rebuild` hint.
+- Harness history is per session and is lost with it. That is the right
+  trade-off for a quarantine.
