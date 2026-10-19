@@ -3,7 +3,7 @@
 ## Status
 
 - [x] Phase 1: Go/no-go on overlayfs-over-virtiofs and offline harness startup (human gate: run on the Mac)
-- [ ] Phase 2: Core script usable end to end on a real project (human gate: drive a task with a local model)
+- [x] Phase 2: Core script usable end to end on a real project (human gate: drive a task with a local model)
 - [ ] Phase 3: Export/apply surface, docs, ADR (human gate: does `--apply` feel safe enough to use)
 
 ## Context
@@ -355,3 +355,31 @@ image (opencode 1.19.3, pi 1.3.0):
 - pi contacted only the inference endpoint in every mode, with no update or
   telemetry traffic seen. `pi -p` fails with "Connection error." after
   14.3s of retries. **No Pi offline settings needed.**
+
+### Phase 2 implementation notes (2026-10-19)
+
+Built in the dev container; nothing ran against Colima yet, so the gate
+checks below are the first real run.
+
+- `enabled_providers: ["<backend>"]` exists in opencode 1.19.3 and was checked
+  locally: with it `opencode models` lists only the local model; without it
+  the bundled `opencode/*` Zen models appear. The upstream schema now marks
+  the key deprecated, so re-check it after an opencode bump.
+- Defaults chosen at build time: VM 4 GiB / 4 CPUs. The docker context is set
+  per process via `DOCKER_CONTEXT`, never persisted, so the sibling VMs' CLI
+  context is left alone.
+- The container is named `offline-agent-<session id>`. Re-running the script
+  in the same directory while a session is open attaches a second shell with
+  `docker exec` instead of starting a second container.
+- The overlay volume is mounted with `:nocopy`. Cloud API keys are not
+  forwarded (there is no route to use them).
+- The firewall jumps cover both the default bridge and `offline-agent-net`.
+  A failed firewall apply, or a missing host IP or network CIDR, aborts
+  before any container starts. research.py falls back to guessed values here.
+- Not done in Phase 2, for Phase 3: the session marker records only `path`.
+  Phase 3's `--apply` needs the base HEAD (git) or a baseline manifest
+  (non-git) written at session *creation*. Sessions created before that lands
+  will have no baseline, so `--discard` them before testing `--apply`.
+- Unknown #4 (`--mount "$HOME:r"`) is unchecked. If it is adopted, the
+  harness state bind mounts under `~/.offline-agent/` need a writable mount.
+
