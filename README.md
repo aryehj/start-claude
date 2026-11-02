@@ -65,6 +65,7 @@ re-attaches to the existing one rather than creating a new one.
 | `fd` | `fd-find` |
 | `jq` | JSON CLI |
 | `curl` / `wget` | |
+| `unzip` / `zip` | Archive tools |
 | `python3` | System Python |
 
 ## Mounts
@@ -195,7 +196,8 @@ VM with a single shared docker container that includes both the **Claude Code**
 and **OpenCode** and **Pi** CLIs, and enforces a network egress allowlist at the VM level
 that the in-container LLM cannot modify. Local inference is routed to an
 [Ollama](https://ollama.com) or [omlx](https://github.com/jundot/omlx) instance
-running on the macOS host.
+running on the macOS host, through a default-deny proxy in the VM that exposes
+only the chat and model-listing routes.
 
 State is organized around **sandboxes** — a single directory tree rooted at
 `$SANDBOX_ROOT`, where `.sandbox_config/` holds per-sandbox auth and config and
@@ -272,7 +274,11 @@ auth and memory state.
     export OMLX_API_KEY=your-secret-key
     omlx serve --model-dir ~/models --api-key "$OMLX_API_KEY"
     ```
-    omlx's API-key auth eliminates the need for a host-side pf firewall.
+    omlx's API-key auth keeps LAN peers out, so it eliminates the need for a
+    host-side pf firewall. The key stays on the host and in the in-VM proxy: the
+    container never holds it, and the proxy adds it to every request. Use a key
+    without quotes, `$`, whitespace, backslashes or `;`; the script refuses to
+    start otherwise.
 
 ## Usage
 
@@ -289,7 +295,7 @@ start-agent.sh --memory=12G --cpus=8
 # Custom git identity for commits
 start-agent.sh --git-name "Jane" --git-email jane@example.com
 
-# With omlx instead of Ollama
+# With omlx instead of Ollama (the key stays on the host and in the VM proxy)
 export OMLX_API_KEY=your-secret-key
 start-agent.sh --backend=omlx
 
@@ -341,7 +347,7 @@ to a different sandbox restarts the VM with the new `--mount` (~10s).
 | `pi` | [Pi](https://pi.dev) CLI (installed via `@earendil-works/pi-coding-agent` npm) |
 | `uv` / `uvx` | Python package manager |
 | `node` / `npm` | Node.js LTS |
-| `git`, `ripgrep`, `fd`, `jq` | Dev tooling |
+| `git`, `ripgrep`, `fd`, `jq`, `unzip`, `zip` | Dev tooling |
 
 ## Mounts
 
@@ -366,7 +372,7 @@ keeping the allowlist's `:ro` mount meaningful.
 On first run, `start-agent.sh` copies `templates/global-claude.md` from the
 repo into `$SANDBOX_ROOT/.sandbox_config/claude/CLAUDE.md`. Claude Code
 auto-injects that file into every session, giving the model shared context about
-the environment — path layout, proxy allowlist, local-inference host, `$TMPDIR`
+the environment — path layout, proxy allowlist, local-inference proxy, `$TMPDIR`
 conventions — regardless of the project it's opened in. Your edits are preserved
 across subsequent runs. Pass `--reseed-global-claudemd` to overwrite with the
 current template.
@@ -401,8 +407,12 @@ paths are open:
 
 1. `HTTP(S)_PROXY` → in-VM tinyproxy, which enforces a regex filter generated
    from a human-editable domain allowlist.
-2. Inference server → the macOS host on the backend's port (`11434` for
-   Ollama, `8000` for omlx).
+2. Inference → an in-VM nginx proxy on the Docker bridge address at the
+   backend's port (`11434` for Ollama, `8000` for omlx). It forwards a fixed
+   list of routes to the macOS host and answers 403 to everything else (see
+   [Using the local inference server](#using-the-local-inference-server-from-inside-the-container)).
+   The container has no direct path to the host's inference port, including
+   through tinyproxy.
 
 With search enabled, the agent can also reach `searxng:8080` on
 `claude-agent-net`. External DNS is blackholed: the agent container's
@@ -411,14 +421,26 @@ resolve locally. Tools that honor the proxy hand the hostname to tinyproxy,
 and container names (`searxng`) still resolve through Docker's embedded DNS.
 Services on the VM itself (its sshd, its dnsmasq) are closed to containers.
 
-The enforcement lives in two iptables chains inside the Colima VM:
-`CLAUDE_AGENT` (from `DOCKER-USER`, for traffic leaving the VM) and
-`CLAUDE_AGENT_IN` (from `INPUT`, for traffic to the VM's own addresses). The
-container has no `CAP_NET_ADMIN` and cannot touch the rules even if fully
-compromised. See `ADR.md` §ADR-010 for the threat model.
+The enforcement lives in three iptables chains inside the Colima VM:
+`CLAUDE_AGENT` (from `DOCKER-USER`, for traffic leaving the VM),
+`CLAUDE_AGENT_IN` (from `INPUT`, for traffic to the VM's own addresses; only
+tinyproxy and the inference proxy are open) and `CLAUDE_AGENT_OUT` (from
+`OUTPUT`, rejecting TCP from tinyproxy to the host and to the private ranges
+`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` and
+`100.64.0.0/10`, so an allowlisted name cannot be used to reach the host's
+inference port or the LAN; an allowlisted host on a private address will not
+work through tinyproxy). The rules cover IPv4 only. The container has no
+`CAP_NET_ADMIN` and cannot touch the rules even if fully compromised. See
+`ADR.md` §ADR-010 for the threat model and §ADR-050 for the inference proxy.
 
 A container created before the DNS blackhole existed keeps its old resolver;
 the script warns on reattach. Recreate it with `start-agent.sh --reset-container`.
+
+**Upgrading from before the inference proxy.** A container created earlier keeps
+its create-time environment, including the real `OMLX_API_KEY` (`docker exec -e`
+cannot unset a variable), and the agent can read it. The script warns on
+reattach and never removes the container for you. Run
+`start-agent.sh --reset-container` once to recreate it without the key.
 
 ### Editing the allowlist
 
@@ -456,18 +478,27 @@ dataset upload from inside the container.
 ### Verifying the egress allowlist
 
 Run `tests/test-agent-firewall.sh` from inside the container to verify
-default-deny, allowlisted host, denied host, Ollama carve-out, env wiring,
-inter-container port isolation, the external DNS blackhole, container-name
-DNS, and that VM-local services (sshd) are closed while the proxy port is
-open:
+default-deny, allowlisted host, denied host, the inference proxy (allowed
+routes, refused routes, no direct path to the host, the real key absent from the
+container), env wiring, inter-container port isolation, the external DNS
+blackhole, container-name DNS, and that VM-local services (sshd) are closed
+while the proxy port is open:
 
 ```bash
 bash tests/test-agent-firewall.sh
 ```
 
-Exit 0 means all tests passed (the Ollama carve-out test is skipped, not
-failed, when Ollama isn't running on the host; the search tests are skipped
-under `--disable-search`).
+Exit 0 means all tests passed (the inference tests that need a live backend are
+skipped, not failed, when it isn't running on the host; the search tests are
+skipped under `--disable-search`). Run it in a container created after the
+inference proxy was added. Optional environment variables:
+
+- `INFERENCE_TEST_MODEL`: model for chat requests (default: the first model in
+  `/v1/models`).
+- `INFERENCE_VISION_MODEL`: an omlx vision model. The vision tests are skipped
+  without it, because `/v1/models` does not say which models accept images.
+- `INFERENCE_TEST_TIMEOUT`: seconds per model request (default `180`; a request
+  may have to load the model first).
 
 **Allowlist hot-reload.** The host-side fast path must update the filter
 without restarting the container. From the macOS host:
@@ -483,15 +514,29 @@ the line and reload again to restore the default allowlist.
 
 ## Using the local inference server from inside the container
 
+`$OLLAMA_HOST` / `$OMLX_HOST` points at an in-VM proxy on the Docker bridge
+address, not at the macOS host. No API key is needed from inside the container:
+the proxy adds the credentials. Only these routes work; every other route, and
+any other method on these paths, returns 403:
+
+- **Ollama:** `POST /v1/chat/completions`, `GET /v1/models`, `GET /api/tags`
+- **omlx:** `POST /v1/chat/completions` (image analysis goes through here, with
+  base64 images; remote image URLs are rejected by omlx), `GET /v1/models`,
+  `POST /v1/messages`, `POST /v1/messages/count_tokens`
+
+That excludes model pull/push, load/unload, omlx's web search, fetch and MCP
+routes, and its admin API: do those on the host. The proxy is configured for the
+active `--backend` only. See `ADR.md` §ADR-050.
+
 ### Ollama (default)
 
 ```bash
-echo $OLLAMA_HOST              # http://<host-ip>:11434
+echo $OLLAMA_HOST              # http://<bridge-ip>:11434
 curl -s $OLLAMA_HOST/api/tags  # lists models
 ```
 
 OpenCode is pre-configured with an `ollama` provider entry in
-`~/.config/opencode/opencode.json` pointing at the host Ollama's
+`~/.config/opencode/opencode.json` pointing at the proxy's
 OpenAI-compatible endpoint. Edit the same file to add model entries:
 
 ```json
@@ -517,9 +562,13 @@ reads provider API keys directly from process env.
 ### omlx (`--backend=omlx`)
 
 ```bash
-echo $OMLX_HOST                # http://<host-ip>:8000
-curl -s -H "Authorization: Bearer $OMLX_API_KEY" $OMLX_HOST/v1/models
+echo $OMLX_HOST                # http://<bridge-ip>:8000
+curl -s $OMLX_HOST/v1/models   # no key needed; the proxy adds it
 ```
+
+`OMLX_API_KEY` is not set in the container. The OpenCode and Pi configs carry a
+placeholder `apiKey`, and on each run the script replaces exact copies of the real key in
+them, when `OMLX_API_KEY` is set on the host.
 
 OpenCode is pre-configured with an `omlx` provider entry. Add model
 entries the same way:
@@ -716,8 +765,8 @@ noted.
 
 | Script | What it tests | How to run |
 |--------|--------------|------------|
-| `test-agent-firewall.sh` | Firewall smoke tests from inside `claude-agent` (default-deny, proxy allow/deny, Ollama carve-out, env wiring, inter-container port isolation, DNS blackhole, container-name DNS, VM-local services closed) | Run from inside the container: `bash tests/test-agent-firewall.sh` |
-| `test-cross-vm-isolation.sh` | Cross-VM isolation: `claude-agent` and `research` containers cannot reach each other by name, port, or via `host.docker.internal:3000`. Positive test confirms inference carve-out still works. Skips if either VM is not running. | `./tests/test-cross-vm-isolation.sh` |
+| `test-agent-firewall.sh` | Firewall smoke tests from inside `claude-agent` (default-deny, proxy allow/deny, inference proxy allowed and refused routes, no direct host path, real key absent, env wiring, inter-container port isolation, DNS blackhole, container-name DNS, VM-local services closed) | Run from inside the container: `bash tests/test-agent-firewall.sh` |
+| `test-cross-vm-isolation.sh` | Cross-VM isolation: `claude-agent` and `research` containers cannot reach each other by name, port, or via `host.docker.internal:3000`. Positive tests confirm `claude-agent` reaches the in-VM inference proxy and `research` reaches the host inference port. Skips if either VM is not running. | `./tests/test-cross-vm-isolation.sh` |
 | `test_agent_sh.py` | Static invariants for `start-agent.sh`: no host-port publish, sandbox trust boundary, Pi and skills wiring, warm-reattach batching, atomic firewall apply, secret handling, flag hygiene | `uv run --with pytest pytest tests/test_agent_sh.py` |
 | `test_dockerfile.py` | Static checks: pi and opencode CLI install lines in `claude-agent.Dockerfile` | `uv run --with pytest pytest tests/test_dockerfile.py` |
 | `test_research.py` | Unit tests for `research.py` pure helpers (`compose_denylist`, `denylist_to_squid_acl`, `_prune_subdomains`, etc.) | `uv run --with pytest pytest tests/test_research.py` |
@@ -750,7 +799,7 @@ uv run --with pytest pytest tests/test_agent_sh.py tests/test_dockerfile.py test
 | `CLAUDE_AGENT_BACKEND` | `ollama` | Inference backend: `ollama` or `omlx` (overridden by `--backend`) |
 | `CLAUDE_AGENT_MEMORY` | `8` | VM memory in GiB (overridden by `--memory`) |
 | `CLAUDE_AGENT_CPUS` | `6` | VM CPU count (overridden by `--cpus`) |
-| `OMLX_API_KEY` | *(unset)* | API key for omlx; passed into the container when `--backend=omlx` |
+| `OMLX_API_KEY` | *(unset)* | API key for omlx with `--backend=omlx`. Held by the in-VM inference proxy; not passed into the container |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | *(unset)* | Forwarded into the container when set on the host (Pi cloud providers) |
 | `CLAUDE_AGENT_DISABLE_SEARCH` | *(unset)* | Set to `1` to disable SearXNG (also disables OpenCode websearch; overridden by `--disable-search`) |
 | `CLAUDE_AGENT_DEFAULT_MODEL` | *(unset)* | Default model for both OpenCode and Pi (env var only — no CLI flag). Written to `opencode.json` and `~/.pi/agent/settings.json` on each run |

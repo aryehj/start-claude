@@ -62,7 +62,14 @@ rejecting it. Do not retry blindly — tell the user to add the hostname to
 
 ## Local Inference (claude-agent)
 
-A local model server runs on the macOS host at `$OLLAMA_HOST` (Ollama, port 11434) or `$OMLX_HOST` (omlx, port 8000). OpenCode is pre-wired to it — no configuration needed. Route local-model calls to `$OLLAMA_HOST` / `$OMLX_HOST`, not through the proxy.
+A local model server runs on the macOS host and is reached through a proxy in the VM at `$OLLAMA_HOST` (Ollama, port 11434) or `$OMLX_HOST` (omlx, port 8000). OpenCode is pre-wired to it — no configuration needed. No API key is needed; credentials are added by the proxy. Route local-model calls to `$OLLAMA_HOST` / `$OMLX_HOST`, not through the egress proxy.
+
+Only these endpoints are available; every other route, and any other method, returns 403:
+
+- Ollama: `POST /v1/chat/completions`, `GET /v1/models`, `GET /api/tags`
+- omlx: `POST /v1/chat/completions` (image analysis uses base64 images here), `GET /v1/models`, `POST /v1/messages`, `POST /v1/messages/count_tokens`
+
+Model management (pull, load, unload) is not available from here.
 
 ## Office Document Toolchain (claude-agent)
 

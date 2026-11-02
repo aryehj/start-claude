@@ -3214,3 +3214,197 @@ same thing to each.
 - A test runs the filter generator over the template, so a template entry that
   `start-agent.sh` would reject fails CI.
 
+
+---
+
+## ADR-050: `start-agent.sh` inference access: a default-deny proxy in the VM
+
+**Date:** 2026-11-02
+**Status:** Accepted
+
+### Context
+
+`CLAUDE_AGENT` RETURNed all container traffic to `$HOST_IP:$INFERENCE_PORT`
+(ADR-012), so the agent could reach every route of the inference server. Reading
+the omlx source (v0.7.3) shows that includes routes that reach the Internet or
+change the server:
+
+| Route | Effect |
+|---|---|
+| `POST /v1/web/search`, `POST /v1/web/fetch` | Server-side web access |
+| `POST /v1/mcp/execute` | Runs configured MCP tools |
+| `/admin/api/*` | Hugging Face and ModelScope download and upload, settings changes, sub-key creation, logs |
+
+Ollama (the default backend) has the same gap through `/api/pull` and
+`/api/push`. The container also held the real `OMLX_API_KEY` in its
+environment and in `opencode.json` and Pi's `models.json`, so it could
+authenticate to all of the above.
+
+Two obvious fixes do not work:
+
+- **Sub keys.** omlx sub keys still work on `/v1/web/*` and `/v1/mcp/execute`.
+- **omlx settings.** Turning features off on the host is not enough while the
+  agent holds the main key, because it could turn them back on.
+
+### Decision
+
+**A default-deny nginx reverse proxy in the Colima VM is the only inference
+route.** It listens on `$BRIDGE_IP:$INFERENCE_PORT` (the same port number, so
+`INFERENCE_PORT` keeps its meaning) and forwards to `$HOST_IP:$INFERENCE_PORT`.
+The VM is the boundary the agent cannot modify (ADR-010), so the rule is out of
+reach of the thing it constrains. The allowlist is exact-match per backend:
+
+- omlx: `POST /v1/chat/completions` (also carries image analysis),
+  `GET /v1/models`, `POST /v1/messages`, `POST /v1/messages/count_tokens`
+- Ollama: `POST /v1/chat/completions`, `GET /v1/models`, `GET /api/tags`
+
+Everything else returns 403 from a catch-all `location /`. The config is built
+so that nothing outside the list can match:
+
+- `location =` plus an explicit method check, never a prefix location, so
+  `/v1/models` does not admit `/v1/models/{id}/load`. `limit_except GET` is not
+  used because it would admit `HEAD`.
+- Each location forwards a fixed upstream path, not the client's raw URI. nginx
+  matches on the normalized path but would otherwise forward the raw one, so a
+  traversal or percent-encoded variant could match one route and be forwarded as
+  another. The query string is kept (Anthropic clients send
+  `/v1/messages?beta=true`).
+- `Upgrade` and `Connection` are cleared, so WebSocket routes (`/v1/realtime`)
+  cannot be reached.
+- Streams are unbuffered with a 600s read timeout (matching tinyproxy's), and
+  there is no nginx body-size cap, because base64 images are large and omlx
+  enforces its own limit.
+
+**The proxy holds the omlx key and overwrites client credentials.** For omlx it
+sets `Authorization` to the host's key and clears `x-api-key` on every request;
+if `OMLX_API_KEY` is unset it sends neither. For Ollama it clears both. A key
+the agent finds or guesses is irrelevant, and the agent has nothing worth
+exfiltrating to an allowlisted host. `OMLX_API_KEY` is no longer forwarded into
+the container. The config holding the key is root-only (0600) in the VM, and the
+script refuses to start if the key contains a character nginx would interpret
+(quote, `$`, whitespace, backslash, `;`) rather than trying to escape it.
+
+**Why nginx, not tinyproxy's reverse mode.** `ReversePath` matches prefixes and
+cannot filter by method. Exact path-plus-method matching is the whole point.
+
+**Firewall.** The `CLAUDE_AGENT` RETURN for `$HOST_IP:$INFERENCE_PORT` is
+deleted, so no container traffic reaches the host directly. `CLAUDE_AGENT_IN`
+gains a RETURN for `$BRIDGE_IP:$INFERENCE_PORT` beside the tinyproxy one. A new
+chain, `CLAUDE_AGENT_OUT` (jumped to from `OUTPUT`), rejects TCP from the
+`tinyproxy` user (owner match) to `$HOST_IP` and to `10.0.0.0/8`,
+`172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` and `100.64.0.0/10`.
+tinyproxy runs in the VM, so its traffic crosses neither container chain, and
+its filter is by hostname only: an allowlisted name resolving to the host would
+otherwise be an unfiltered path to the inference port. All three chains and the
+`OUTPUT` jump are replaced in one `iptables-restore --noflush` commit. The proxy
+is pushed before the firewall, including on `--reload-allowlist`, so a healthy
+setup never has neither path. `$HOST_IP` is dropped from the container's
+`NO_PROXY`/`no_proxy`.
+
+**Fail closed.** The VM-side push script refuses a config that lacks the
+catch-all line or fails `nginx -t` (run against the candidate on its own, before
+it is moved into place), leaving the old config and hash. The hash file is
+written only after nginx has loaded the config, so a failed push is retried on
+the next run. A push failure aborts the run. nginx's install status, active
+status and stored hash ride in the existing batch probe (ADR-045), and the push
+is gated on the hash and active status. The hash covers the key, so rotating the
+key triggers a push.
+
+### Open by design
+
+The agents' own Internet paths are unchanged: the tinyproxy allowlist, OpenCode
+`webfetch`, SearXNG websearch and Claude Code's web tools. `research.py` and
+`start-claude.sh` are untouched. Claude Code is not configured to use omlx; this
+only makes `/v1/messages` reachable.
+
+### Limits of the tinyproxy private-range block
+
+The `$HOST_IP` rule is not enough: the Mac has other addresses (its LAN IP, for
+example), and Ollama is documented as bound to `0.0.0.0`, so it listens on them
+too. tinyproxy's `ConnectPort` only limits `CONNECT`, so a plain
+`http://name:11434/` is forwarded. Reaching this needs an allowlisted name that
+resolves to such an address, which is unlikely with the default list but
+possible through a user-added name, a VPN or split-horizon DNS. The same route
+also reaches other devices on the LAN, hence the private ranges. The `$HOST_IP`
+rule stays because `$HOST_IP` falls back to `127.0.0.1`, outside them. Loopback
+is deliberately not blocked: it could break DNS falling back to TCP on
+`127.0.0.53`, and it reaches only services inside the VM.
+
+Known limits:
+
+- An allowlisted host on a private address (an internal mirror, a VPN-only
+  service) stops working through tinyproxy.
+- A Mac with a public address is not covered, though that also needs a matching
+  DNS name.
+- IPv6 is not covered. The script has no `ip6tables` rules, so none of the
+  `CLAUDE_AGENT*` chains apply to IPv6. Whether tinyproxy can reach anything
+  over IPv6 in the VM is unverified.
+
+### As implemented
+
+- **Placeholder key.** Both the OpenCode and Pi injectors write one placeholder
+  `apiKey` (`INFERENCE_PLACEHOLDER_KEY`), because some `@ai-sdk/openai-compatible`
+  versions need a non-empty value. In `opencode.json` it goes into every local
+  provider entry, `ollama` and `omlx` both, including the inactive one, since
+  the two coexist and a real key left in the inactive entry would otherwise
+  survive. The inactive entry's `baseURL` is rewritten to the same proxy address,
+  which uses the active backend's port: there is only one proxy, so the inactive
+  entry does not work until the script is run with its backend.
+- **`scrub_key_copies`.** Both injectors replace values exactly equal to the
+  real key, or to `Bearer <key>`, anywhere in `opencode.json` and `models.json`,
+  so a key left by an earlier run does not survive. This runs only when the key
+  is set on the host in this run. It does not touch a key embedded in a longer
+  string, or stored by hand in files the script does not write: OpenCode's
+  data-dir `auth.json` and Pi's auth state.
+- **Key via the environment.** The injectors read the key from `OMLX_API_KEY` in
+  their environment, not argv, which would show in host `ps`. It is used only
+  for host-side model discovery, which keeps the real key and the host URL.
+- **Known remaining.** The startup probe still puts the key on argv for omlx:
+  `vm_ssh curl -H "Authorization: Bearer ..."` appears in the host's
+  `colima ssh` command line and in the VM's. It is not in the container, so it
+  does not affect the goal, but it falls short of the nginx push's stance that a
+  secret never rides an argv.
+- **Migration.** `docker run -e` values are fixed at create time, and
+  `docker exec -e` can override a variable but not unset it. An existing
+  container therefore keeps its stale `OLLAMA_HOST`/`OMLX_HOST` and, for omlx,
+  `OMLX_API_KEY` in its create-time env. The overrides and the injector reruns
+  mean inference generally still works through the proxy, but the shell inherits
+  the real key. `warn_if_container_predates_proxy` inspects `.Config.Env` on
+  reattach, matching by variable name and never printing a value. If a non-empty
+  `OMLX_API_KEY` is there it warns that the agent can read it; if only a URL
+  pointing at `$HOST_IP` is there it warns that the URL no longer works. Both
+  name `start-agent.sh --reset-container`. It does not abort on an inspect
+  failure and never removes the container (ADR-048).
+
+### Consequences
+
+- From the container, the only inference requests that succeed are the allowlist
+  above, whatever credentials the agent presents.
+- Anything that used `/v1/web/*`, `/v1/mcp/execute`, `/admin/api/*`, model
+  load/unload or Ollama's `/api/pull` from inside the container now gets a 403.
+  Model management happens on the host.
+- The container has no direct path to the host's inference port, including
+  through tinyproxy.
+- The VM gains an nginx dependency. If a VM reboot starts nginx before `docker0`
+  is up, it can fail to bind `$BRIDGE_IP`; the active-status gate re-pushes and
+  restarts on the next run. Package install and reboot behaviour are unverified
+  on a Mac host.
+- Upgraders must run `start-agent.sh --reset-container` to get the key out of an
+  existing container.
+
+### Notes
+
+- The proxy filters by route, so a new omlx release that adds an internal network
+  feature to an allowed route would not be caught. Re-check the callers of
+  `/v1/chat/completions`, `/v1/messages` and the other allowed routes when
+  upgrading omlx. At v0.7.3 the only caller of MCP tool execution is the
+  `/v1/mcp/execute` route, so a model-emitted tool call returns to the client
+  unexecuted. Re-test this if an MCP server is ever added to omlx.
+- Filtering request bodies (for example, rejecting `image_url` values that are
+  not data URIs) was rejected. It would need scripting in the proxy and would
+  break streaming pass-through. Pin a verified omlx version instead. omlx v0.7.3
+  rejects remote image URLs itself, and the smoke test checks for a regression.
+- This supersedes ADR-012's description of the API key reaching the container and
+  of the iptables carve-out to the host, and the host inference-port RETURN rule
+  listed in ADR-010's `CLAUDE_AGENT` chain. `research.py` keeps its own carve-out
+  (ADR-018).
