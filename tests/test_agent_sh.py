@@ -678,11 +678,12 @@ def test_input_chain_applied_atomically():
     )
     assert "-A CLAUDE_AGENT_IN -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN" in stanza
     assert "-A CLAUDE_AGENT_IN -d \\$BRIDGE_IP -p tcp --dport \\$TINYPROXY_PORT -j RETURN" in stanza
+    assert "-A CLAUDE_AGENT_IN -d \\$BRIDGE_IP -p tcp --dport \\$INFERENCE_PORT -j RETURN" in stanza
     reject = stanza.find("-A CLAUDE_AGENT_IN -j REJECT --reject-with icmp-admin-prohibited")
     commit = stanza.find("COMMIT")
     assert reject != -1 and reject < commit, "CLAUDE_AGENT_IN must end in a catch-all REJECT"
     in_rules = re.findall(r"-A CLAUDE_AGENT_IN [^\"]*", stanza)
-    assert len(in_rules) == 3, f"CLAUDE_AGENT_IN should hold exactly 3 rules, got {in_rules}"
+    assert len(in_rules) == 4, f"CLAUDE_AGENT_IN should hold exactly 4 rules, got {in_rules}"
     assert not re.search(r"iptables\s+-A\s+CLAUDE_AGENT_IN", fw), (
         "individual `iptables -A CLAUDE_AGENT_IN` calls still present"
     )
@@ -707,6 +708,110 @@ def test_dead_bridge_rules_removed_from_forward_chain():
     stanza = _restore_stanza(_firewall_script())
     assert not re.search(r"-A CLAUDE_AGENT -d \\\$BRIDGE_IP", stanza), (
         "dead `-A CLAUDE_AGENT -d $BRIDGE_IP` rules still present"
+    )
+
+
+# ── inference firewall: rendered and run against a stubbed sudo ───────────────
+
+_FW_ENV = {
+    "BRIDGE_IP": "172.17.0.1",
+    "BRIDGE_CIDR": "172.17.0.0/16",
+    "AGENT_NET_CIDR": "172.20.0.0/24",
+    "HOST_IP": "192.168.5.2",
+    "TINYPROXY_PORT": "8888",
+    "INFERENCE_PORT": "8000",
+    "LOCAL_SEARCH_ENABLED": "true",
+}
+
+
+def _run_firewall(tmp_path, output_jump_present=False, restore_rc=0):
+    """Run firewall-apply.sh for real, recording what reaches iptables-restore."""
+    body = _firewall_script().split("\n", 1)[1]
+    rendered = subprocess.run(
+        ["bash", "-c", f"cat <<FWEOF\n{body}\nFWEOF"],
+        env={"PATH": os.environ["PATH"], **_FW_ENV},
+        capture_output=True, text=True, check=True,
+    ).stdout
+    script = tmp_path / "firewall-apply.sh"
+    script.write_text(rendered)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    restore_log = tmp_path / "restore.txt"
+    calls_log = tmp_path / "calls.txt"
+    sudo = bin_dir / "sudo"
+    sudo.write_text(f"""#!/bin/sh
+if [ "$1" = iptables-restore ]; then
+  cat > '{restore_log}'
+  exit {restore_rc}
+fi
+echo "$*" >> '{calls_log}'
+case "$*" in
+  *"-C OUTPUT"*) exit {0 if output_jump_present else 1} ;;
+esac
+exit 0
+""")
+    sudo.chmod(0o755)
+    proc = subprocess.run(
+        ["sh", str(script)],
+        env={"PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        capture_output=True, text=True,
+    )
+    restore = restore_log.read_text().splitlines() if restore_log.exists() else []
+    calls = calls_log.read_text().splitlines() if calls_log.exists() else []
+    return proc, restore, calls
+
+
+def test_firewall_opens_no_container_path_to_host(tmp_path):
+    proc, restore, _ = _run_firewall(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    forward = [l for l in restore if l.startswith("-A CLAUDE_AGENT ")]
+    assert forward[-1].startswith("-A CLAUDE_AGENT -j REJECT")
+    assert not [l for l in forward if "192.168.5.2" in l or "--dport 8000" in l], forward
+
+
+def test_firewall_opens_inference_proxy_on_bridge_only(tmp_path):
+    _, restore, _ = _run_firewall(tmp_path)
+    inbound = [l for l in restore if l.startswith("-A CLAUDE_AGENT_IN ")]
+    assert "-A CLAUDE_AGENT_IN -d 172.17.0.1 -p tcp --dport 8000 -j RETURN" in inbound
+    assert inbound[-1].startswith("-A CLAUDE_AGENT_IN -j REJECT")
+
+
+def test_firewall_blocks_tinyproxy_from_host(tmp_path):
+    _, restore, _ = _run_firewall(tmp_path)
+    assert ":CLAUDE_AGENT_OUT - [0:0]" in restore
+    assert [l for l in restore if l.startswith("-A CLAUDE_AGENT_OUT ")] == [
+        "-A CLAUDE_AGENT_OUT -d 192.168.5.2 -p tcp -m owner --uid-owner tinyproxy "
+        "-j REJECT --reject-with icmp-admin-prohibited"
+    ]
+
+
+def test_tinyproxy_block_active_in_the_same_commit(tmp_path):
+    # The jump rides in the restore, so the host carve-out and the tinyproxy
+    # block change together. It must precede COMMIT to be part of that commit.
+    _, restore, calls = _run_firewall(tmp_path)
+    assert restore.count("-I OUTPUT 1 -j CLAUDE_AGENT_OUT") == 1
+    assert restore.index("-I OUTPUT 1 -j CLAUDE_AGENT_OUT") < restore.index("COMMIT")
+    assert not [c for c in calls if "-I OUTPUT" in c], "OUTPUT jump added outside the commit"
+
+
+def test_tinyproxy_jump_not_duplicated_on_reapply(tmp_path):
+    _, restore, _ = _run_firewall(tmp_path, output_jump_present=True)
+    assert ":CLAUDE_AGENT_OUT - [0:0]" in restore
+    assert not [l for l in restore if "-I OUTPUT" in l]
+
+
+def test_output_jump_checked_before_restore_starts():
+    # Inside the pipeline, `iptables -C` would race iptables-restore for the
+    # xtables lock, and the restore fails outright if it loses.
+    fw = _firewall_script()
+    assert -1 < fw.find("iptables -C OUTPUT") < fw.find("echo '*filter'")
+
+
+def test_firewall_apply_failure_is_fatal(tmp_path):
+    proc, _, calls = _run_firewall(tmp_path, restore_rc=1)
+    assert proc.returncode != 0
+    assert not [c for c in calls if "-j CLAUDE_AGENT" in c and "-I" in c], (
+        "jumps installed after a failed restore"
     )
 
 

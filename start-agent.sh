@@ -1021,14 +1021,17 @@ if [[ "$NEW_INFERENCE_PROXY_HASH" != "$NGINX_STORED_HASH" || "$NGINX_ACTIVE" != 
   fi
 fi
 
-# ── iptables rules in the VM (CLAUDE_AGENT and CLAUDE_AGENT_IN chains) ───────
+# ── iptables rules in the VM (CLAUDE_AGENT, _IN and _OUT chains) ─────────────
 # Container traffic leaving the VM traverses FORWARD, where DOCKER-USER jumps
 # to CLAUDE_AGENT. Container traffic to a VM-local address (either bridge
 # gateway, 192.168.5.1, col0) traverses INPUT instead, where CLAUDE_AGENT_IN
-# governs it: only tinyproxy is reachable, not the VM's sshd or dnsmasq.
-# Both chains are replaced in a single `iptables-restore --noflush` commit:
-# declaring a chain flushes and repopulates only that chain, so there is never
-# a window where either is empty (an empty chain falls through and allows all).
+# governs it: only tinyproxy and the inference proxy are reachable, not the VM's
+# sshd or dnsmasq. No container traffic may reach the host directly; inference
+# goes through the proxy. tinyproxy runs in the VM, so its traffic crosses
+# neither chain and CLAUDE_AGENT_OUT (from OUTPUT) keeps it off the host.
+# All are replaced in a single `iptables-restore --noflush` commit: declaring a
+# chain flushes and repopulates only that chain, so there is never a window
+# where one is empty (an empty chain falls through and allows all).
 cat > "$TMP_WORK/firewall-apply.sh" <<FWEOF
 #!/bin/sh
 set -e
@@ -1044,13 +1047,18 @@ LOCAL_SEARCH_ENABLED="$LOCAL_SEARCH_ENABLED"
 sudo iptables -N DOCKER-USER 2>/dev/null || true
 sudo iptables -C FORWARD -j DOCKER-USER 2>/dev/null || sudo iptables -I FORWARD 1 -j DOCKER-USER
 
-# Create-or-replace CLAUDE_AGENT and CLAUDE_AGENT_IN atomically, rules in order.
+# Checked up front: inside the pipeline below, this would race iptables-restore
+# for the xtables lock. The chain may not exist yet, which also means no jump.
+OUTPUT_JUMP_PRESENT=false
+sudo iptables -C OUTPUT -j CLAUDE_AGENT_OUT 2>/dev/null && OUTPUT_JUMP_PRESENT=true
+
+# Create-or-replace all three chains atomically, rules in order.
 {
   echo '*filter'
   echo ':CLAUDE_AGENT - [0:0]'
   echo ':CLAUDE_AGENT_IN - [0:0]'
+  echo ':CLAUDE_AGENT_OUT - [0:0]'
   echo "-A CLAUDE_AGENT -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
-  echo "-A CLAUDE_AGENT -d \$HOST_IP -p tcp --dport \$INFERENCE_PORT -j RETURN"
   # Allow inter-container traffic on port 8080 for claude-agent → searxng MCP.
   # Both containers are on AGENT_NET_CIDR (claude-agent-net user-defined network).
   # SearXNG → tinyproxy at BRIDGE_IP:8888 is INPUT traffic (CLAUDE_AGENT_IN).
@@ -1058,12 +1066,21 @@ sudo iptables -C FORWARD -j DOCKER-USER 2>/dev/null || sudo iptables -I FORWARD 
     echo "-A CLAUDE_AGENT -s \$AGENT_NET_CIDR -d \$AGENT_NET_CIDR -p tcp --dport 8080 -j RETURN"
   fi
   echo "-A CLAUDE_AGENT -j REJECT --reject-with icmp-admin-prohibited"
-  # INPUT side: agent and SearXNG reach tinyproxy on the docker0 gateway; every
-  # other VM-local service (sshd on all addresses, dnsmasq on 192.168.5.1:53)
-  # is refused.
+  # INPUT side: agent and SearXNG reach tinyproxy and the inference proxy on the
+  # docker0 gateway; every other VM-local service (sshd on all addresses, dnsmasq
+  # on 192.168.5.1:53) is refused.
   echo "-A CLAUDE_AGENT_IN -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
   echo "-A CLAUDE_AGENT_IN -d \$BRIDGE_IP -p tcp --dport \$TINYPROXY_PORT -j RETURN"
+  echo "-A CLAUDE_AGENT_IN -d \$BRIDGE_IP -p tcp --dport \$INFERENCE_PORT -j RETURN"
   echo "-A CLAUDE_AGENT_IN -j REJECT --reject-with icmp-admin-prohibited"
+  # OUTPUT side: tinyproxy filters by hostname only (FilterURLs No), so an
+  # allowlisted name resolving to the host would be an unfiltered path to the
+  # inference port. TCP only: it proxies nothing else, and its DNS must keep
+  # working if the VM's resolver lives on the host IP.
+  echo "-A CLAUDE_AGENT_OUT -d \$HOST_IP -p tcp -m owner --uid-owner tinyproxy -j REJECT --reject-with icmp-admin-prohibited"
+  if [ "\$OUTPUT_JUMP_PRESENT" != "true" ]; then
+    echo "-I OUTPUT 1 -j CLAUDE_AGENT_OUT"
+  fi
   echo 'COMMIT'
 } | sudo iptables-restore --noflush
 
