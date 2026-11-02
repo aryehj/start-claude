@@ -4,6 +4,7 @@
 
 - [x] Add the in-VM inference proxy: install, config generation, guarded push, probe and hash integration (Opus recommended)
 - [x] Rewire the firewall: remove the direct host carve-out, open only the proxy, stop tinyproxy reaching the host (Opus recommended)
+- [x] Block tinyproxy from private address ranges, not only `$HOST_IP`
 - [ ] Repoint the container and client configs at the proxy, and remove the real key from them
 - [ ] Warn on reattach when a container predates the proxy
 - [ ] Update static tests and the in-container and cross-VM smoke tests
@@ -67,6 +68,16 @@ The proxy also holds the omlx key. It overwrites client credentials on every req
 - Block tinyproxy from reaching `$HOST_IP`, using an `OUTPUT` chain with an owner match on the `tinyproxy` user, in the same atomic `iptables-restore` commit. tinyproxy runs in the VM, so its traffic never crosses `CLAUDE_AGENT`. Its filter is by hostname only, and `FilterURLs No` means any allowlisted name that resolves to the host would otherwise give an unfiltered path to the inference port. This also covers future user edits to the allowlist.
 - Push the proxy before applying the firewall, so there is no window where a healthy setup has neither path. This must hold on the `--reload-allowlist` path too (line 936 exits right after the firewall).
 
+### Tinyproxy private-range block (`start-agent.sh`, `CLAUDE_AGENT_OUT`)
+
+The firewall phase rejects tinyproxy's TCP traffic to `$HOST_IP` only. The Mac has other addresses (its LAN IP, for example), and Ollama is documented as bound to `0.0.0.0`, so it listens on them too. tinyproxy's `ConnectPort` only limits `CONNECT`, so plain `http://name:11434/` is forwarded. Reaching this needs an allowlisted name that resolves to such an address, which is unlikely with the default list but possible through a user-added name or VPN or split-horizon DNS. The same route also reaches other devices on the LAN.
+
+- Keep the `$HOST_IP` rule, and add one `CLAUDE_AGENT_OUT` rule per range, using the same owner match on the `tinyproxy` user, TCP only, in the same atomic commit: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `100.64.0.0/10`. The `$HOST_IP` rule stays because `$HOST_IP` falls back to `127.0.0.1` and is not guaranteed to be in these ranges.
+- Do not block `127.0.0.0/8`: it could break DNS falling back to TCP on `127.0.0.53`. An allowlisted name resolving to loopback reaches only services inside the VM.
+- Tests in `tests/test_agent_sh.py`, using the rendered firewall script: `CLAUDE_AGENT_OUT` holds exactly the expected rules, every one is limited to the `tinyproxy` user and TCP, and loopback is not blocked. Add a smoke case to `tests/test-agent-firewall.sh` in the smoke test phase if a private-resolving name can be set up without editing the allowlist; otherwise cover it in live verification.
+
+**Known limits, to record in ADR-050:** an allowlisted host on a private address (an internal mirror, a VPN-only service) stops working through tinyproxy. A Mac with a public address is not covered, though that also needs a matching DNS name. IPv6 is not covered, because the script has no `ip6tables` rules (see Unknowns).
+
 ### Container and client config
 
 - Set `OLLAMA_HOST` / `OMLX_HOST` to `http://$BRIDGE_IP:$INFERENCE_PORT` (`start-agent.sh:1411-1423`) and stop forwarding `OMLX_API_KEY` into the container. `$BRIDGE_IP` is already in `NO_PROXY`. Drop `$HOST_IP` from `NO_PROXY`/`no_proxy` since nothing legitimate goes there now.
@@ -94,7 +105,7 @@ The proxy also holds the omlx key. It overwrites client credentials on every req
 
 ### Docs
 
-- ADR-050: the decision, why not sub keys or omlx settings, why nginx, and what remains open by design (Out of scope above).
+- ADR-050: the decision, why not sub keys or omlx settings, why nginx, what remains open by design (Out of scope above), and the limits of the tinyproxy private-range block.
 - README: egress paths at lines 402-406, the omlx auth statement at 275, and the examples at 489 and 520-521 (no key needed now).
 - `CLAUDE.md`: start-agent key decisions.
 - `templates/global-claude.md:65`: state which endpoints are available.
@@ -116,6 +127,7 @@ These can't be checked from inside the container.
 
 - **Server-side tool execution with MCP configured.** This server has no MCP servers (`/v1/mcp/servers` is empty, `/health` reports `mcp: null`), so this could not be tested live. At `HEAD`, the only caller of MCP tool execution is the `/v1/mcp/execute` route, so a model-emitted tool call should return to the client unexecuted. Re-test this if an MCP server is ever added to omlx.
 - **Package and boot behaviour on the Colima VM.** Needs a Mac host: confirm `nginx` installs from the VM's apt sources (the comments suggest Ubuntu 24.04), and that a VM reboot recovers. nginx can fail at boot if `docker0` isn't up yet when it binds `$BRIDGE_IP`; the active-status gate should re-push and restart on the next run, but verify this.
+- **IPv6 in the Colima VM.** Needs a Mac host: run `ip -6 route` in the VM and check whether tinyproxy can reach anything over IPv6. If it can, add matching `ip6tables` rules for tinyproxy (at least `fc00::/7` and `fe80::/10`, plus any global addresses of the host), since the iptables rules do not apply to IPv6.
 - **The implementation itself.** Run `tests/test-agent-firewall.sh` in a container recreated after the change, and check the nginx access log during a real OpenCode and Pi session, including one with tool calls and one with an image.
 
 ## Notes

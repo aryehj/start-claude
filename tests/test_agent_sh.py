@@ -776,13 +776,37 @@ def test_firewall_opens_inference_proxy_on_bridge_only(tmp_path):
     assert inbound[-1].startswith("-A CLAUDE_AGENT_IN -j REJECT")
 
 
-def test_firewall_blocks_tinyproxy_from_host(tmp_path):
+_TINYPROXY_BLOCKED_RANGES = [
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10",
+]
+
+
+def _out_rules(tmp_path):
     _, restore, _ = _run_firewall(tmp_path)
     assert ":CLAUDE_AGENT_OUT - [0:0]" in restore
-    assert [l for l in restore if l.startswith("-A CLAUDE_AGENT_OUT ")] == [
-        "-A CLAUDE_AGENT_OUT -d 192.168.5.2 -p tcp -m owner --uid-owner tinyproxy "
-        "-j REJECT --reject-with icmp-admin-prohibited"
+    return [l for l in restore if l.startswith("-A CLAUDE_AGENT_OUT ")]
+
+
+def test_firewall_blocks_tinyproxy_from_host_and_private_ranges(tmp_path):
+    reject = "-p tcp -m owner --uid-owner tinyproxy -j REJECT --reject-with icmp-admin-prohibited"
+    assert _out_rules(tmp_path) == [
+        f"-A CLAUDE_AGENT_OUT -d 192.168.5.2 {reject}",
+        *[f"-A CLAUDE_AGENT_OUT -d {r} {reject}" for r in _TINYPROXY_BLOCKED_RANGES],
     ]
+
+
+def test_tinyproxy_block_rules_limited_to_tinyproxy_and_tcp(tmp_path):
+    rules = _out_rules(tmp_path)
+    assert len(rules) == 1 + len(_TINYPROXY_BLOCKED_RANGES)
+    for rule in rules:
+        assert "-p tcp" in rule, rule
+        assert "-m owner --uid-owner tinyproxy" in rule, rule
+
+
+def test_tinyproxy_block_does_not_cover_loopback(tmp_path):
+    # DNS may fall back to TCP on 127.0.0.53; loopback reaches only VM services.
+    for rule in _out_rules(tmp_path):
+        assert "127." not in rule and "0.0.0.0/0" not in rule, rule
 
 
 def test_tinyproxy_block_active_in_the_same_commit(tmp_path):

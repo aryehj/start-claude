@@ -1078,6 +1078,13 @@ sudo iptables -C OUTPUT -j CLAUDE_AGENT_OUT 2>/dev/null && OUTPUT_JUMP_PRESENT=t
   # inference port. TCP only: it proxies nothing else, and its DNS must keep
   # working if the VM's resolver lives on the host IP.
   echo "-A CLAUDE_AGENT_OUT -d \$HOST_IP -p tcp -m owner --uid-owner tinyproxy -j REJECT --reject-with icmp-admin-prohibited"
+  # The Mac has other addresses (LAN IP; Ollama binds 0.0.0.0) and the LAN has
+  # other devices, so also refuse the private ranges. HOST_IP stays above because
+  # it can fall back to 127.0.0.1, outside these. Loopback is deliberately not
+  # blocked: DNS may fall back to TCP on 127.0.0.53, and it reaches only VM services.
+  for range in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10; do
+    echo "-A CLAUDE_AGENT_OUT -d \$range -p tcp -m owner --uid-owner tinyproxy -j REJECT --reject-with icmp-admin-prohibited"
+  done
   if [ "\$OUTPUT_JUMP_PRESENT" != "true" ]; then
     echo "-I OUTPUT 1 -j CLAUDE_AGENT_OUT"
   fi
