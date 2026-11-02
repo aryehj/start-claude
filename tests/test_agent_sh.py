@@ -788,16 +788,27 @@ def _out_rules(tmp_path):
     return [l for l in restore if l.startswith("-A CLAUDE_AGENT_OUT ")]
 
 
+_OUT_REPLIES_PASS = "-A CLAUDE_AGENT_OUT -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
+
+
 def test_firewall_blocks_tinyproxy_from_host_and_private_ranges(tmp_path):
     reject = "-p tcp -m owner --uid-owner tinyproxy -j REJECT --reject-with icmp-admin-prohibited"
     assert _out_rules(tmp_path) == [
+        _OUT_REPLIES_PASS,
         f"-A CLAUDE_AGENT_OUT -d 192.168.5.2 {reject}",
         *[f"-A CLAUDE_AGENT_OUT -d {r} {reject}" for r in _TINYPROXY_BLOCKED_RANGES],
     ]
 
 
+def test_tinyproxy_replies_to_containers_pass_before_any_reject(tmp_path):
+    # Container subnets (docker0 172.17/16, claude-agent-net 172.18/16) sit inside
+    # 172.16.0.0/12, and tinyproxy's replies to them leave through OUTPUT as its
+    # user. Rejecting those cut every container off from the Internet.
+    assert _out_rules(tmp_path)[0] == _OUT_REPLIES_PASS
+
+
 def test_tinyproxy_block_rules_limited_to_tinyproxy_and_tcp(tmp_path):
-    rules = _out_rules(tmp_path)
+    rules = [r for r in _out_rules(tmp_path) if r != _OUT_REPLIES_PASS]
     assert len(rules) == 1 + len(_TINYPROXY_BLOCKED_RANGES)
     for rule in rules:
         assert "-p tcp" in rule, rule

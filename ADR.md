@@ -3290,9 +3290,12 @@ cannot filter by method. Exact path-plus-method matching is the whole point.
 **Firewall.** The `CLAUDE_AGENT` RETURN for `$HOST_IP:$INFERENCE_PORT` is
 deleted, so no container traffic reaches the host directly. `CLAUDE_AGENT_IN`
 gains a RETURN for `$BRIDGE_IP:$INFERENCE_PORT` beside the tinyproxy one. A new
-chain, `CLAUDE_AGENT_OUT` (jumped to from `OUTPUT`), rejects TCP from the
-`tinyproxy` user (owner match) to `$HOST_IP` and to `10.0.0.0/8`,
-`172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` and `100.64.0.0/10`.
+chain, `CLAUDE_AGENT_OUT` (jumped to from `OUTPUT`), rejects new TCP connections
+from the `tinyproxy` user (owner match) to `$HOST_IP` and to `10.0.0.0/8`,
+`172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` and `100.64.0.0/10`. Its
+first rule RETURNs `ESTABLISHED,RELATED`: tinyproxy's replies to containers also
+leave through `OUTPUT` as its user, and the container subnets sit inside
+`172.16.0.0/12`, so without that rule no container can use the proxy at all.
 tinyproxy runs in the VM, so its traffic crosses neither container chain, and
 its filter is by hostname only: an allowlisted name resolving to the host would
 otherwise be an unfiltered path to the inference port. All three chains and the

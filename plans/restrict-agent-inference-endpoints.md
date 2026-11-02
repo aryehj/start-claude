@@ -136,3 +136,7 @@ These can't be checked from inside the container.
 
 - Because the proxy filters by route, a new omlx release that adds an internal network feature to an allowed route would not be caught. Re-check the callers listed above when upgrading omlx.
 - Filtering request bodies (for example, rejecting `image_url` values that aren't data URIs) was rejected. It would need scripting in the proxy and would break streaming pass-through. Pin a verified omlx version instead.
+
+## Live finding (2026-11-02): rebuilt containers lost all Internet access
+
+After `--rebuild` on this branch, nothing in the container could reach the Internet. Cause: the `172.16.0.0/12` rule in `CLAUDE_AGENT_OUT`. Container subnets sit in that range (`claude-agent-net` is `172.18.0.0/16`), and tinyproxy's replies to containers leave through `OUTPUT` as the `tinyproxy` user, so they were rejected. The plan treated this chain as covering only tinyproxy's upstream connections. Fix: `CLAUDE_AGENT_OUT` now starts with an `ESTABLISHED,RELATED` RETURN, so only connections tinyproxy opens itself are refused. Static regression test added; the fix still needs the live run listed under Unknowns.

@@ -425,7 +425,7 @@ The enforcement lives in three iptables chains inside the Colima VM:
 `CLAUDE_AGENT` (from `DOCKER-USER`, for traffic leaving the VM),
 `CLAUDE_AGENT_IN` (from `INPUT`, for traffic to the VM's own addresses; only
 tinyproxy and the inference proxy are open) and `CLAUDE_AGENT_OUT` (from
-`OUTPUT`, rejecting TCP from tinyproxy to the host and to the private ranges
+`OUTPUT`, rejecting new TCP connections from tinyproxy to the host and to the private ranges
 `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` and
 `100.64.0.0/10`, so an allowlisted name cannot be used to reach the host's
 inference port or the LAN; an allowlisted host on a private address will not
