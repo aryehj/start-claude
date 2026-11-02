@@ -875,6 +875,25 @@ def test_firewall_smoke_covers_dns_and_input():
         assert re.search(rf"^{fn}$", smoke, re.MULTILINE), f"{fn} defined but never called"
 
 
+def test_firewall_smoke_covers_inference_proxy():
+    smoke = (SCRIPT.parent / "tests" / "test-agent-firewall.sh").read_text()
+    for fn in ("test_inference_allowed_routes", "test_inference_streaming", "test_proxy_refusals",
+               "test_no_direct_host_path", "test_tinyproxy_refuses_host", "test_real_key_absent",
+               "test_omlx_vision"):
+        assert f"{fn}() {{" in smoke, f"{fn} not defined in test-agent-firewall.sh"
+        assert re.search(rf"^{fn}$", smoke, re.MULTILINE), f"{fn} defined but never called"
+    # Without it curl resolves ../ client-side and the traversal cases prove nothing.
+    assert "--path-as-is" in smoke
+
+
+def test_firewall_smoke_placeholder_matches_script():
+    # The container cannot read start-agent.sh, so the smoke test has its own copy.
+    smoke = (SCRIPT.parent / "tests" / "test-agent-firewall.sh").read_text()
+    theirs = re.search(r'^INFERENCE_PLACEHOLDER_KEY="([^"]+)"$', smoke, re.MULTILINE)
+    ours = re.search(r'^INFERENCE_PLACEHOLDER_KEY="([^"]+)"$', _SCRIPT_TEXT, re.MULTILINE)
+    assert theirs and ours and theirs.group(1) == ours.group(1)
+
+
 # ── batch 3: container lifecycle ──────────────────────────────────────────────
 
 def _reattach_block() -> str:

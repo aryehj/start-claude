@@ -7,7 +7,7 @@
 - [x] Block tinyproxy from private address ranges, not only `$HOST_IP`
 - [x] Repoint the container and client configs at the proxy, and remove the real key from them
 - [x] Warn on reattach when a container predates the proxy
-- [ ] Update static tests and the in-container and cross-VM smoke tests
+- [x] Update static tests and the in-container and cross-VM smoke tests
 - [ ] Docs: ADR-050, README, CLAUDE.md, `templates/global-claude.md` (Haiku ok)
 - [ ] Live verification on a Mac host (see Unknowns)
 

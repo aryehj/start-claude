@@ -10,8 +10,10 @@
 #   - From claude-agent: research-searxng and research-vane unreachable by
 #     container name and via host.docker.internal:3000 (Vane's host bind).
 #   - From research-searxng: claude-agent and searxng (agent's) unreachable.
-#   - Positive: both VMs can reach the macOS host inference endpoint,
-#     confirming the negative tests aren't over-blocking.
+#   - Positive: claude-agent reaches the in-VM inference proxy, and the research
+#     VM reaches the macOS host inference port directly, confirming the negative
+#     tests aren't over-blocking. claude-agent has no direct path to the host;
+#     test-agent-firewall.sh asserts that from inside the container.
 #
 # Run from the macOS host. Requires colima and docker on PATH.
 
@@ -74,8 +76,8 @@ if $AGENT_UP && $RESEARCH_UP; then
   agent_cannot_reach "agent→research-vane:3000" \
     "http://research-vane:3000/" "Vane internal port"
   # Vane publishes port 3000 to the macOS host (-p 3000:3000). From inside
-  # claude-agent, host.docker.internal resolves to the macOS host. Port 3000
-  # is not in the CLAUDE_AGENT iptables carve-out, so the REJECT rule fires.
+  # claude-agent, host.docker.internal resolves to the macOS host. CLAUDE_AGENT
+  # has no rule opening any port there, so the REJECT rule fires.
   agent_cannot_reach "agent→vane-host-bind:3000" \
     "http://host.docker.internal:3000/" "research-vane host port bind"
 elif $AGENT_UP && ! $RESEARCH_UP; then
@@ -131,38 +133,64 @@ elif ! $RESEARCH_UP; then
   skip "research→agent-containers" "research VM not running"
 fi
 
-# ── Positive: inference endpoint carve-out still works ───────────────────────
-# Verify the iptables carve-out for the macOS host inference port (Ollama 11434
-# or omlx 8000) is not broken by the isolation rules. A TCP refusal (exit 7 /
-# ECONNREFUSED) means the packet reached the macOS host OS but no service was
-# listening — proof the carve-out works even if Ollama isn't running.
-test_agent_inference_carveout() {
-  local ollama_host out rc
-  # Read OLLAMA_HOST from inside the container; strip the http:// scheme if any.
-  ollama_host=$(colima ssh -p claude-agent -- \
-    docker exec claude-agent bash -c 'echo "${OLLAMA_HOST:-}"' 2>/dev/null)
-  ollama_host="${ollama_host#http://}"
+# ── Positive: inference endpoints still work ─────────────────────────────────
+# claude-agent reaches inference only through the nginx proxy in its VM. A
+# refused connection is no longer evidence of anything here: nginx answers 502
+# when the backend is down, and the container has no direct path to probe. So the
+# proxy is proved by a route it refuses itself, with nginx's own error page, which
+# needs no backend. An allowed route then shows the proxy reaches the host.
+agent_inference_get() {  # URL; prints the body then the 3-digit status
+  colima ssh -p claude-agent -- docker exec claude-agent \
+    curl --noproxy '*' -sS --max-time 10 -w '%{http_code}' "$1" 2>&1
+}
 
-  if [[ -z "$ollama_host" ]]; then
-    skip "agent-inference-carveout" "OLLAMA_HOST not set in claude-agent container"
+test_agent_inference_proxy() {
+  local url proxy out rc status
+  # Container env, as a fresh one sets exactly one of these.
+  url=$(colima ssh -p claude-agent -- \
+    docker exec claude-agent bash -c 'echo "${OMLX_HOST:-${OLLAMA_HOST:-}}"' 2>/dev/null)
+  proxy=$(colima ssh -p claude-agent -- \
+    docker exec claude-agent bash -c 'echo "${HTTPS_PROXY:-}"' 2>/dev/null)
+  url="${url%/}"
+  proxy="${proxy#http://}"
+  proxy="${proxy%:*}"
+
+  if [[ -z "$url" ]]; then
+    skip "agent-inference-proxy" "neither OMLX_HOST nor OLLAMA_HOST set in claude-agent container"
+    return
+  fi
+  local addr="${url#http://}"
+  if [[ -z "$proxy" || "${addr%:*}" != "$proxy" ]]; then
+    fail "agent-inference-proxy" \
+      "$url is not on the proxy's address (${proxy:-unknown}); container predates it? start-agent.sh --reset-container"
     return
   fi
 
-  out=$(colima ssh -p claude-agent -- docker exec claude-agent \
-    curl --noproxy '*' -sS --connect-timeout 5 "http://${ollama_host}/api/tags" 2>&1)
+  out=$(agent_inference_get "$url/admin/api/global-settings")
   rc=$?
-
-  if (( rc == 0 )); then
-    pass "agent-inference-carveout: $ollama_host reachable (Ollama running)"
-  elif (( rc == 7 )); then
-    # ECONNREFUSED from the macOS host → carve-out works, Ollama just not running
-    skip "agent-inference-carveout: Ollama not running (iptables carve-out works: ECONNREFUSED from host)"
+  status="${out: -3}"
+  if (( rc == 0 )) && [[ "$status" == 403 && "$out" == *"<center>nginx"* ]]; then
+    pass "agent-inference-proxy: $addr answered by nginx (denied route → 403)"
   else
-    fail "agent-inference-carveout" \
-      "unexpected curl exit $rc for $ollama_host — carve-out may be broken; out=${out:0:120}"
+    fail "agent-inference-proxy" \
+      "expected 403 from nginx at $addr, got curl exit $rc; out=${out:0:120}"
+    return
+  fi
+
+  out=$(agent_inference_get "$url/v1/models")
+  rc=$?
+  status="${out: -3}"
+  if (( rc == 0 )) && [[ "$status" == 200 ]]; then
+    pass "agent-inference-proxy: $addr reaches the host backend (/v1/models → 200)"
+  elif (( rc == 0 )) && [[ "$status" == 502 || "$status" == 504 ]]; then
+    skip "agent-inference-proxy: backend" "inference backend not running (proxy answered $status)"
+  else
+    fail "agent-inference-proxy" \
+      "unexpected result for $addr/v1/models: curl exit $rc; out=${out:0:120}"
   fi
 }
 
+# research.py still has a direct iptables carve-out, so ECONNREFUSED proves it.
 test_research_inference_carveout() {
   # research-searxng is Alpine+Python, no curl. Use Python socket.
   # Discover the macOS host IP from the research VM's default route.
@@ -204,7 +232,7 @@ PYEOF
   fi
 }
 
-if $AGENT_UP;   then test_agent_inference_carveout;    fi
+if $AGENT_UP;   then test_agent_inference_proxy;       fi
 if $RESEARCH_UP; then test_research_inference_carveout; fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
