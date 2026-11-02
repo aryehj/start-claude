@@ -1091,3 +1091,510 @@ def test_script_dir_computed_once():
     assert _SCRIPT_TEXT.count('dirname "${BASH_SOURCE[0]}"') == 1
     assert 'DOCKERFILE_PATH="$SCRIPT_DIR/dockerfiles/claude-agent.Dockerfile"' in _SCRIPT_TEXT
     assert 'GLOBAL_CLAUDEMD_TEMPLATE="$SCRIPT_DIR/templates/global-claude.md"' in _SCRIPT_TEXT
+
+
+# ── inference proxy (nginx in the VM) ────────────────────────────────────────
+# Generated config and VM push script are run for real. The traffic tests need
+# an nginx binary (NGINX_BIN or PATH) and skip without one.
+
+import http.server
+import os
+import shutil
+import socket
+import threading
+import time
+
+import pytest
+
+_FAKE_KEY = "sk-test-KEY.123"
+_OMLX_ROUTES = {
+    ("POST", "/v1/chat/completions"), ("GET", "/v1/models"),
+    ("POST", "/v1/messages"), ("POST", "/v1/messages/count_tokens"),
+}
+_OLLAMA_ROUTES = {
+    ("POST", "/v1/chat/completions"), ("GET", "/v1/models"), ("GET", "/api/tags"),
+}
+_CATCH_ALL = "  location / { return 403; }"
+_NGINX = os.environ.get("NGINX_BIN") or shutil.which("nginx")
+needs_nginx = pytest.mark.skipif(not _NGINX, reason="no nginx binary (set NGINX_BIN)")
+# `nginx -t` with the script's minimal wrapper uses the compiled-in paths,
+# which only an installed package creates.
+needs_installed_nginx = pytest.mark.skipif(
+    not _NGINX or not (os.path.isdir("/var/lib/nginx") and os.path.isdir("/var/log/nginx")),
+    reason="needs an installed nginx (/var/lib/nginx, /var/log/nginx)")
+
+
+def _generate_conf(tmp_path, backend="omlx", key=_FAKE_KEY, bridge="172.17.0.1",
+                   host="192.168.5.2", port="8000") -> str:
+    fn = "generate_inference_proxy_conf() " + _function_body("generate_inference_proxy_conf")
+    out = tmp_path / "inference.conf"
+    env = {"PATH": "/usr/bin:/bin", "BACKEND": backend, "BRIDGE_IP": bridge,
+           "HOST_IP": host, "INFERENCE_PORT": port}
+    if key is not None:
+        env["OMLX_API_KEY"] = key
+    r = subprocess.run(
+        ["bash", "-c", f'set -euo pipefail\n{fn}\ngenerate_inference_proxy_conf "$1"', "_", str(out)],
+        env=env, capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    return out.read_text()
+
+
+def _conf_routes(conf: str) -> set:
+    return {(m, p) for p, m in re.findall(
+        r"location = (\S+) \{\s*if \(\$request_method != (\w+)\)", conf)}
+
+
+@pytest.mark.parametrize("backend,routes", [("omlx", _OMLX_ROUTES), ("ollama", _OLLAMA_ROUTES)])
+def test_proxy_allowlist_is_exact(tmp_path, backend, routes):
+    conf = _generate_conf(tmp_path, backend=backend)
+    assert _conf_routes(conf) == routes
+    # Every location is an exact match, apart from the catch-all.
+    locations = re.findall(r"location\s+(.*?)\s*\{", conf)
+    assert len(locations) == len(routes) + 1
+    assert sorted(l for l in locations if not l.startswith("= ")) == ["/"]
+    assert _CATCH_ALL in conf.splitlines()
+
+
+def test_proxy_listens_on_bridge_only(tmp_path):
+    conf = _generate_conf(tmp_path)
+    assert re.findall(r"^\s*listen\s+(\S+)", conf, re.M) == ["172.17.0.1:8000"]
+
+
+@pytest.mark.parametrize("backend,key,expected", [
+    ("omlx", _FAKE_KEY, f'proxy_set_header Authorization "Bearer {_FAKE_KEY}";'),
+    ("omlx", None, 'proxy_set_header Authorization "";'),
+    ("omlx", "", 'proxy_set_header Authorization "";'),
+    ("ollama", _FAKE_KEY, 'proxy_set_header Authorization "";'),
+])
+def test_proxy_credentials(tmp_path, backend, key, expected):
+    conf = _generate_conf(tmp_path, backend=backend, key=key)
+    assert expected in conf
+    assert 'proxy_set_header x-api-key "";' in conf
+    if backend == "ollama":
+        assert _FAKE_KEY not in conf, "Ollama config must never carry the omlx key"
+
+
+@pytest.mark.parametrize("key", [
+    'a"b', "a'b", "a$b", "a b", "a\tb", "a\nb", "a\\b", "a;b",
+])
+def test_unsafe_omlx_key_refused_without_echoing_it(key):
+    fn = "check_omlx_key_safe() " + _function_body("check_omlx_key_safe")
+    r = subprocess.run(["bash", "-c", f"{fn}\ncheck_omlx_key_safe"],
+                       env={"PATH": "/usr/bin:/bin", "OMLX_API_KEY": key},
+                       capture_output=True, text=True)
+    assert r.returncode != 0
+    assert "OMLX_API_KEY" in r.stderr
+    assert key not in r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("key", ["", _FAKE_KEY, "abc-DEF_123.~+/=:"])
+def test_safe_omlx_key_accepted(key):
+    fn = "check_omlx_key_safe() " + _function_body("check_omlx_key_safe")
+    r = subprocess.run(["bash", "-c", f"{fn}\ncheck_omlx_key_safe"],
+                       env={"PATH": "/usr/bin:/bin", "OMLX_API_KEY": key},
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+def test_omlx_key_checked_before_vm_work():
+    check = _SCRIPT_TEXT.find("\n  check_omlx_key_safe\n")
+    assert check != -1, "check_omlx_key_safe is not called"
+    assert check < _SCRIPT_TEXT.find("vm-probe.sh"), "bad key must be refused before VM work"
+
+
+def _render_proxy_push(tmp_path, active="true", conf_text=None, path="/usr/bin:/bin"):
+    conf = tmp_path / "inference-proxy.conf"
+    conf.write_text(_generate_conf(tmp_path) if conf_text is None else conf_text)
+    fn = "write_inference_proxy_push() " + _function_body("write_inference_proxy_push")
+    r = subprocess.run(
+        ["bash", "-c", f"set -eo pipefail\n{fn}\nwrite_inference_proxy_push"],
+        env={"PATH": path, "TMP_WORK": str(tmp_path),
+             "NEW_INFERENCE_PROXY_HASH": "newhash", "NGINX_ACTIVE": active},
+        capture_output=True, text=True,
+    )
+    out = tmp_path / "inference-proxy-push.sh"
+    return r.returncode, r.stderr, (out.read_text() if out.exists() else None)
+
+
+def _run_proxy_push(tmp_path, script, nginx_rc=0, real_nginx=False, expect_ok=True,
+                    restart_rc=0):
+    """Run the VM script against a fake /etc/nginx; return (systemctl calls, nginx calls)."""
+    etc = tmp_path / "etc-nginx"
+    (etc / "conf.d").mkdir(parents=True, exist_ok=True)
+    (etc / "sites-enabled").mkdir(exist_ok=True)
+    (etc / "sites-enabled" / "default").write_text("default site\n")
+    sysl, ngl = tmp_path / "systemctl.log", tmp_path / "nginx.log"
+    stub = f'systemctl() {{ echo "$*" >> "{sysl}"; return {restart_rc}; }}\n'
+    if real_nginx:
+        stub += f'nginx() {{ "{_NGINX}" "$@"; }}\n'
+    else:
+        stub += f'nginx() {{ echo "$*" >> "{ngl}"; return {nginx_rc}; }}\n'
+    r = subprocess.run(["sh"], input=stub + script.replace("/etc/nginx/", f"{etc}/"),
+                       text=True, capture_output=True)
+    assert (r.returncode == 0) == expect_ok, r.stderr
+    read = lambda p: p.read_text().splitlines() if p.exists() else []
+    return read(sysl), read(ngl)
+
+
+def test_proxy_push_installs_root_only(tmp_path):
+    rc, err, script = _render_proxy_push(tmp_path)
+    assert rc == 0, err
+    calls, ngx = _run_proxy_push(tmp_path, script)
+    etc = tmp_path / "etc-nginx"
+    conf = etc / "conf.d" / "claude-agent-inference.conf"
+    hash_file = etc / "claude-agent-inference.hash"
+    assert conf.read_bytes() == (tmp_path / "inference-proxy.conf").read_bytes()
+    assert hash_file.read_text() == "newhash\n"
+    assert conf.stat().st_mode & 0o777 == 0o600
+    assert hash_file.stat().st_mode & 0o777 == 0o600
+    assert not (etc / "sites-enabled" / "default").exists(), "default site must be removed"
+    assert any(c.startswith("-t") or " -t" in c for c in ngx), "nginx -t must run"
+    assert calls == ["reload nginx"], calls
+    assert sorted(p.name for p in etc.iterdir()) == [
+        "claude-agent-inference.hash", "conf.d", "sites-enabled",
+    ], "no scratch files may be left behind"
+    assert [p.name for p in (etc / "conf.d").iterdir()] == ["claude-agent-inference.conf"]
+
+
+def test_proxy_push_restarts_when_inactive(tmp_path):
+    # restart, not start: the package's postinst has already started nginx.
+    rc, err, script = _render_proxy_push(tmp_path, active="false")
+    assert rc == 0, err
+    calls, _ = _run_proxy_push(tmp_path, script)
+    assert calls == ["enable nginx", "restart nginx"], calls
+
+
+def _seed_old_proxy_state(tmp_path):
+    etc = tmp_path / "etc-nginx"
+    (etc / "conf.d").mkdir(parents=True)
+    (etc / "conf.d" / "claude-agent-inference.conf").write_text("previous\n")
+    (etc / "claude-agent-inference.hash").write_text("old\n")
+    return etc
+
+
+def _assert_old_proxy_state_kept(etc):
+    assert (etc / "conf.d" / "claude-agent-inference.conf").read_text() == "previous\n"
+    assert (etc / "claude-agent-inference.hash").read_text() == "old\n", (
+        "hash must not advance, so the next run pushes again"
+    )
+    assert [p.name for p in (etc / "conf.d").iterdir()] == ["claude-agent-inference.conf"]
+
+
+def test_vm_refuses_proxy_conf_without_catch_all(tmp_path):
+    etc = _seed_old_proxy_state(tmp_path)
+    rc, err, script = _render_proxy_push(tmp_path, conf_text="server { listen 1.2.3.4:1; }\n")
+    assert rc == 0, err
+    calls, ngx = _run_proxy_push(tmp_path, script, expect_ok=False)
+    assert calls == [] and ngx == [], "must stop before testing or loading the config"
+    _assert_old_proxy_state_kept(etc)
+
+
+def test_vm_refuses_proxy_conf_failing_nginx_t(tmp_path):
+    etc = _seed_old_proxy_state(tmp_path)
+    rc, err, script = _render_proxy_push(tmp_path)
+    assert rc == 0, err
+    calls, _ = _run_proxy_push(tmp_path, script, nginx_rc=1, expect_ok=False)
+    assert calls == [], "nginx must not be reloaded with a config that fails -t"
+    _assert_old_proxy_state_kept(etc)
+
+
+def test_proxy_hash_not_advanced_when_load_fails(tmp_path):
+    # Otherwise the next run would skip the push and never retry the load.
+    etc = _seed_old_proxy_state(tmp_path)
+    rc, err, script = _render_proxy_push(tmp_path, active="false")
+    assert rc == 0, err
+    _run_proxy_push(tmp_path, script, restart_rc=1, expect_ok=False)
+    assert (etc / "claude-agent-inference.hash").read_text() == "old\n"
+
+
+def test_proxy_push_aborts_on_empty_conf(tmp_path):
+    rc, err, _ = _render_proxy_push(tmp_path, conf_text="")
+    assert rc != 0
+    assert "inference proxy" in err
+
+
+def test_proxy_push_aborts_when_encoding_fails(tmp_path):
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    (stubs / "base64").write_text("#!/bin/sh\nexit 1\n")
+    (stubs / "base64").chmod(0o755)
+    rc, err, _ = _render_proxy_push(tmp_path, path=f"{stubs}:/usr/bin:/bin")
+    assert rc != 0
+    assert "inference proxy" in err
+
+
+def test_proxy_probe_fields():
+    start = _SCRIPT_TEXT.find("vm-probe.sh\" <<PROBE_EOF")
+    probe = _SCRIPT_TEXT[start:_SCRIPT_TEXT.find("\nPROBE_EOF", start)]
+    for field in ("NGINX_INSTALLED", "NGINX_ACTIVE", "NGINX_STORED_HASH"):
+        assert f"{field}=" in probe, f"{field} missing from the batch probe"
+        assert re.search(rf"^{field}=\$\(\s*_probe_val {field}\)", _SCRIPT_TEXT, re.M)
+    assert "sudo cat /etc/nginx/claude-agent-inference.hash" in probe
+
+
+def _proxy_push_block() -> str:
+    start = _SCRIPT_TEXT.find('if [[ "$NEW_INFERENCE_PROXY_HASH" != "$NGINX_STORED_HASH"')
+    assert start != -1, "hash-gated inference proxy push not found"
+    return _SCRIPT_TEXT[start:_SCRIPT_TEXT.find("\nfi\n", start)]
+
+
+def test_proxy_push_gated_and_fails_closed():
+    block = _proxy_push_block()
+    assert '"$NGINX_ACTIVE" != "true"' in block
+    assert "write_inference_proxy_push || exit 1" in block
+    assert re.search(r'inference-proxy-push\.sh"\s*\|\|', block) or \
+        re.search(r'inference-proxy-push\.sh" *; then', block), "failed push must abort"
+    runs = [l for l in _SCRIPT_TEXT.splitlines()
+            if "colima ssh" in l and "inference-proxy-push.sh" in l]
+    assert len(runs) == 1 and runs[0] in block
+
+
+def test_proxy_pushed_before_firewall_on_every_path():
+    push = _SCRIPT_TEXT.find('if [[ "$NEW_INFERENCE_PROXY_HASH" != "$NGINX_STORED_HASH"')
+    firewall = _SCRIPT_TEXT.find('cat > "$TMP_WORK/firewall-apply.sh"')
+    assert -1 < push < firewall
+    # No --reload-allowlist exit may sit between the probe and the push.
+    assert "exit 0" not in _SCRIPT_TEXT[_SCRIPT_TEXT.find("vm-probe.sh"):push]
+
+
+def test_nginx_install_follows_probe():
+    block = re.search(r'if \[\[ "\$NGINX_INSTALLED" != "true" \]\]; then\n(.*?)\nfi\n',
+                      _SCRIPT_TEXT, re.S)
+    assert block, "nginx install is not gated on the probe"
+    assert "--force-confnew nginx" in block.group(1).replace("\\\n", " ").replace("    ", "")
+
+
+# Traffic through a real nginx ------------------------------------------------
+
+class _Upstream(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    seen: list = []
+    release = threading.Event()
+
+    def _handle(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        remaining = n
+        while remaining:
+            remaining -= len(self.rfile.read(min(remaining, 65536)))
+        _Upstream.seen.append((self.command, self.path, dict(self.headers.items()), n))
+        if self.path.startswith("/v1/chat/completions?stream"):
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self.wfile.write(b"6\r\nfirst\n\r\n")
+            self.wfile.flush()
+            _Upstream.release.wait(10)
+            self.wfile.write(b"7\r\nsecond\n\r\n0\r\n\r\n")
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(b"ok")
+
+    do_GET = do_POST = do_HEAD = do_PUT = do_DELETE = do_OPTIONS = _handle
+
+    def log_message(self, *a):
+        pass
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture(scope="module", params=["omlx", "ollama"])
+def _live_proxy_server(request, tmp_path_factory):
+    if not _NGINX:
+        pytest.skip("no nginx binary (set NGINX_BIN)")
+    tmp_path = tmp_path_factory.mktemp(f"nginx-{request.param}")
+    port = _free_port()
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.2", port), _Upstream)
+    threading.Thread(target=upstream.serve_forever, args=(0.01,), daemon=True).start()
+    conf = _generate_conf(tmp_path, backend=request.param, bridge="127.0.0.1",
+                          host="127.0.0.2", port=str(port))
+    (tmp_path / "server.conf").write_text(conf)
+    main = tmp_path / "main.conf"
+    temp_dirs = "".join(
+        f"  {d}_temp_path {tmp_path}/{d};\n"
+        for d in ("client_body", "proxy", "fastcgi", "uwsgi", "scgi"))
+    main.write_text(
+        f"daemon off;\nuser root;\npid {tmp_path}/nginx.pid;\nerror_log {tmp_path}/err.log;\n"
+        f"events {{}}\nhttp {{\n  access_log off;\n{temp_dirs}"
+        f"  include {tmp_path}/server.conf;\n}}\n")
+    proc = subprocess.Popen([_NGINX, "-c", str(main), "-p", str(tmp_path)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(100):
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.1).close()
+            break
+        except OSError:
+            time.sleep(0.05)
+    else:
+        proc.kill()
+        pytest.fail("nginx did not start: " + (tmp_path / "err.log").read_text())
+    yield request.param, port
+    proc.terminate()
+    proc.wait(5)
+    upstream.shutdown()
+
+
+@pytest.fixture
+def live_proxy(_live_proxy_server):
+    _Upstream.seen = []
+    _Upstream.release = threading.Event()
+    yield _live_proxy_server
+    _Upstream.release.set()
+
+
+def _raw(port, method, target, headers=(), body=b"") -> int:
+    """Send an unnormalized request; return the status code."""
+    lines = [f"{method} {target} HTTP/1.1", "Host: anything", "Connection: close",
+             *headers, f"Content-Length: {len(body)}", "", ""]
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
+        s.sendall("\r\n".join(lines).encode() + body)
+        data = b""
+        while b"\r\n" not in data:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+    return int(data.split(b" ", 2)[1])
+
+
+_DENIED_TARGETS = [
+    ("POST", "/v1/web/search"), ("POST", "/v1/web/fetch"), ("POST", "/v1/mcp/execute"),
+    ("GET", "/admin/api/global-settings"), ("POST", "/v1/responses"),
+    ("POST", "/v1/models/x/load"), ("GET", "/v1/models/status"), ("POST", "/api/pull"),
+    ("POST", "/api/push"), ("GET", "/v1/realtime"), ("GET", "/"),
+    ("GET", "/v1/models/"), ("POST", "/v1/messages/"), ("POST", "/v1/messages/x"),
+    # traversal and encoded forms of denied routes
+    ("POST", "/v1/chat/completions/../../web/search"),
+    ("GET", "/v1/models/../../admin/api/global-settings"),
+    ("POST", "/v1/web%2Fsearch"), ("POST", "/v1/%77eb/search"),
+    ("POST", "/v1/models%2Fx%2Fload"), ("GET", "/%61dmin/api/global-settings"),
+    ("POST", "/v1/models/x/..%2F..%2Fweb/search"),
+    # wrong method on an allowed path
+    ("GET", "/v1/chat/completions"), ("POST", "/v1/models"), ("HEAD", "/v1/models"),
+    ("DELETE", "/v1/models"), ("PUT", "/v1/chat/completions"),
+    ("OPTIONS", "/v1/chat/completions"),
+]
+
+
+@pytest.mark.parametrize("method,target", _DENIED_TARGETS)
+def test_live_denied_routes_never_reach_upstream(live_proxy, method, target):
+    _, port = live_proxy
+    assert _raw(port, method, target) in (403, 405)
+    assert _Upstream.seen == []
+
+
+def test_live_allowed_routes_get_injected_credentials(live_proxy):
+    backend, port = live_proxy
+    routes = _OMLX_ROUTES if backend == "omlx" else _OLLAMA_ROUTES
+    for method, path in sorted(routes):
+        _Upstream.seen = []
+        status = _raw(port, method, path, headers=(
+            "Authorization: Bearer agent-guess", "x-api-key: agent-guess",
+            "X-API-KEY: agent-guess", "Upgrade: websocket",
+        ))
+        assert status == 200, (method, path)
+        [(m, p, hdrs, _)] = _Upstream.seen
+        lower = {k.lower(): v for k, v in hdrs.items()}
+        assert (m, p) == (method, path)
+        assert "x-api-key" not in lower
+        assert "upgrade" not in lower
+        if backend == "omlx":
+            assert lower["authorization"] == f"Bearer {_FAKE_KEY}"
+        else:
+            assert "authorization" not in lower
+
+
+def test_live_unauthenticated_request_gets_key(live_proxy):
+    backend, port = live_proxy
+    assert _raw(port, "GET", "/v1/models") == 200
+    lower = {k.lower(): v for k, v in _Upstream.seen[0][2].items()}
+    assert lower.get("authorization") == (f"Bearer {_FAKE_KEY}" if backend == "omlx" else None)
+
+
+@pytest.mark.parametrize("target", [
+    "/admin/../v1/models", "/v1/web/../models", "//v1//models", "/v1%2Fmodels",
+])
+def test_live_forwards_fixed_path_not_raw_uri(live_proxy, target):
+    # These normalize to an allowed route, so they pass, but the upstream must
+    # see the fixed path: a raw forward would reach whatever the variant names.
+    _, port = live_proxy
+    assert _raw(port, "GET", target) == 200
+    assert _Upstream.seen[0][1] == "/v1/models"
+
+
+def test_live_query_string_preserved(live_proxy):
+    _, port = live_proxy
+    assert _raw(port, "POST", "/v1/chat/completions?beta=true&x=a%2Fb") == 200
+    assert _Upstream.seen[0][1] == "/v1/chat/completions?beta=true&x=a%2Fb"
+
+
+def test_live_large_body_not_capped(live_proxy):
+    _, port = live_proxy
+    body = b"x" * (5 * 1024 * 1024)
+    assert _raw(port, "POST", "/v1/chat/completions", body=body) == 200
+    assert _Upstream.seen[0][3] == len(body)
+
+
+def test_live_streaming_is_not_buffered(live_proxy):
+    _, port = live_proxy
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+        s.sendall(b"POST /v1/chat/completions?stream=1 HTTP/1.1\r\nHost: x\r\n"
+                  b"Connection: close\r\nContent-Length: 0\r\n\r\n")
+        data = b""
+        # The upstream holds "second" until released, so seeing "first" here
+        # proves nginx forwarded it without waiting for the response to end.
+        while b"first" not in data:
+            chunk = s.recv(4096)
+            assert chunk, "connection closed before the first chunk"
+            data += chunk
+        assert b"second" not in data
+        _Upstream.release.set()
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+    assert b"second" in data
+
+
+@needs_installed_nginx
+def test_real_nginx_guard_accepts_generated_conf(tmp_path):
+    # The script's own -t wrapper, with a real nginx and a bindable address.
+    conf = _generate_conf(tmp_path, bridge="127.0.0.1", host="127.0.0.2", port=str(_free_port()))
+    rc, err, script = _render_proxy_push(tmp_path, conf_text=conf)
+    assert rc == 0, err
+    calls, _ = _run_proxy_push(tmp_path, script, real_nginx=True)
+    assert calls == ["reload nginx"]
+
+
+@needs_nginx
+def test_real_nginx_guard_refuses_broken_conf(tmp_path):
+    etc = _seed_old_proxy_state(tmp_path)
+    broken = f"server {{\n{_CATCH_ALL}\n  not_a_directive on;\n}}\n"
+    rc, err, script = _render_proxy_push(tmp_path, conf_text=broken)
+    assert rc == 0, err
+    calls, _ = _run_proxy_push(tmp_path, script, real_nginx=True, expect_ok=False)
+    assert calls == []
+    _assert_old_proxy_state_kept(etc)
+
+
+@needs_installed_nginx
+def test_real_nginx_guard_tolerates_running_listener(tmp_path):
+    # Warm re-push: nginx already holds the address, and -t must still pass.
+    with socket.socket() as held:
+        held.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        held.bind(("127.0.0.1", 0))
+        held.listen()
+        conf = _generate_conf(tmp_path, bridge="127.0.0.1", host="127.0.0.2",
+                              port=str(held.getsockname()[1]))
+        rc, err, script = _render_proxy_push(tmp_path, conf_text=conf)
+        assert rc == 0, err
+        calls, _ = _run_proxy_push(tmp_path, script, real_nginx=True)
+    assert calls == ["reload nginx"]

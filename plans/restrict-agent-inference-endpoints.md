@@ -2,7 +2,7 @@
 
 ## Status
 
-- [ ] Add the in-VM inference proxy: install, config generation, guarded push, probe and hash integration (Opus recommended)
+- [x] Add the in-VM inference proxy: install, config generation, guarded push, probe and hash integration (Opus recommended)
 - [ ] Rewire the firewall: remove the direct host carve-out, open only the proxy, stop tinyproxy reaching the host (Opus recommended)
 - [ ] Repoint the container and client configs at the proxy, and remove the real key from them
 - [ ] Warn on reattach when a container predates the proxy
