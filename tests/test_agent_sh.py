@@ -1974,3 +1974,117 @@ def test_key_not_on_injector_argv(tmp_path):
     logged = argv_log.read_text()
     assert _placeholder() in logged, "shim did not see the injector's argv"
     assert _FAKE_KEY not in logged
+
+
+# ── reattach: container predates the inference proxy ─────────────────────────
+
+_SECRET = "sk-test-SECRETVALUE-123"
+
+
+def _run_predates_proxy_warning(tmp_path, env_lines, inspect_rc=0):
+    """Run the real warning function under bash with a stubbed docker.
+
+    The stub prints env_lines for any `docker container inspect` call (or fails
+    with inspect_rc), and records every argv so the test can see what was asked.
+    """
+    body = _function_body("warn_if_container_predates_proxy")
+    env_file = tmp_path / "env.txt"
+    env_file.write_text("".join(f"{line}\n" for line in env_lines))
+    script = (
+        "set -euo pipefail\n"
+        f'docker() {{ echo "$*" >> "{tmp_path}/docker.log"; '
+        f'[[ {inspect_rc} -eq 0 ]] || return {inspect_rc}; cat "{env_file}"; }}\n'
+        'CONTAINER_NAME=claude-agent\n'
+        'HOST_IP=192.168.5.2\n'
+        'BRIDGE_IP=172.17.0.1\n'
+        f"warn_if_container_predates_proxy() {body}\n"
+        "warn_if_container_predates_proxy\n"
+        'echo SCRIPT_CONTINUED\n'
+    )
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+
+
+_CLEAN_ENV = [
+    "PATH=/usr/bin",
+    "OMLX_HOST=http://172.17.0.1:8000",
+    "HTTPS_PROXY=http://172.17.0.1:8888",
+]
+
+
+def test_reattach_warns_when_container_holds_omlx_key(tmp_path):
+    proc = _run_predates_proxy_warning(
+        tmp_path, _CLEAN_ENV + [f"OMLX_API_KEY={_SECRET}"]
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "OMLX_API_KEY" in proc.stderr
+    assert "--reset-container" in proc.stderr
+    assert "read" in proc.stderr, "must say plainly that the agent can read the key"
+    assert "SCRIPT_CONTINUED" in proc.stdout, "must warn, not abort or prompt"
+
+
+def test_reattach_warning_never_prints_key_value(tmp_path):
+    proc = _run_predates_proxy_warning(
+        tmp_path,
+        ["OMLX_HOST=http://192.168.5.2:8000", f"OMLX_API_KEY={_SECRET}"],
+    )
+    assert "OMLX_API_KEY" in proc.stderr
+    assert _SECRET not in proc.stdout + proc.stderr
+    assert "SECRETVALUE" not in proc.stdout + proc.stderr
+
+
+def test_reattach_warns_on_stale_host_url_without_key(tmp_path):
+    for var in ("OLLAMA_HOST", "OMLX_HOST"):
+        proc = _run_predates_proxy_warning(
+            tmp_path, ["PATH=/usr/bin", f"{var}=http://192.168.5.2:11434"]
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "predates" in proc.stderr, var
+        assert "--reset-container" in proc.stderr, var
+        assert "SCRIPT_CONTINUED" in proc.stdout
+
+
+def test_reattach_stale_url_alone_does_not_claim_key_exposure(tmp_path):
+    proc = _run_predates_proxy_warning(
+        tmp_path, ["OMLX_HOST=http://192.168.5.2:8000"]
+    )
+    assert "predates" in proc.stderr
+    assert "OMLX_API_KEY" not in proc.stderr
+
+
+def test_reattach_silent_for_container_on_proxy(tmp_path):
+    proc = _run_predates_proxy_warning(tmp_path, _CLEAN_ENV)
+    assert proc.returncode == 0
+    assert proc.stderr == "" and proc.stdout.strip() == "SCRIPT_CONTINUED"
+
+
+def test_reattach_similarly_named_var_does_not_trigger(tmp_path):
+    proc = _run_predates_proxy_warning(
+        tmp_path,
+        _CLEAN_ENV
+        + [f"MY_OMLX_API_KEY_OLD={_SECRET}", f"OMLX_API_KEY_OLD={_SECRET}",
+           "NOT_OMLX_HOST=http://192.168.5.2:8000"],
+    )
+    assert proc.stderr == "", proc.stderr
+
+
+def test_reattach_proxy_check_survives_inspect_failure(tmp_path):
+    proc = _run_predates_proxy_warning(tmp_path, [], inspect_rc=1)
+    assert proc.returncode == 0, proc.stderr
+    assert "SCRIPT_CONTINUED" in proc.stdout
+
+
+def test_reattach_proxy_check_inspects_create_time_env_only(tmp_path):
+    _run_predates_proxy_warning(tmp_path, _CLEAN_ENV)
+    log = (tmp_path / "docker.log").read_text()
+    assert ".Config.Env" in log
+    assert log.count("\n") == 1, "one inspect call; never dumps the whole container"
+
+
+def test_reattach_calls_proxy_check_before_attaching():
+    block = _reattach_block()
+    assert "warn_if_container_predates_proxy" in block
+    assert block.find("warn_if_container_predates_proxy") < block.find("attach_existing")
+    assert block.find("HostConfig.Dns") < block.find("warn_if_container_predates_proxy")
+    # Warn only: never auto-remove (ADR-048) on this path.
+    warn_to_attach = block[block.find("warn_if_container_predates_proxy"):block.find("attach_existing\n")]
+    assert "docker rm" not in warn_to_attach and "read -" not in warn_to_attach

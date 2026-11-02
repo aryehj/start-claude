@@ -6,7 +6,7 @@
 - [x] Rewire the firewall: remove the direct host carve-out, open only the proxy, stop tinyproxy reaching the host (Opus recommended)
 - [x] Block tinyproxy from private address ranges, not only `$HOST_IP`
 - [x] Repoint the container and client configs at the proxy, and remove the real key from them
-- [ ] Warn on reattach when a container predates the proxy
+- [x] Warn on reattach when a container predates the proxy
 - [ ] Update static tests and the in-container and cross-VM smoke tests
 - [ ] Docs: ADR-050, README, CLAUDE.md, `templates/global-claude.md` (Haiku ok)
 - [ ] Live verification on a Mac host (see Unknowns)
@@ -87,7 +87,9 @@ The firewall phase rejects tinyproxy's TCP traffic to `$HOST_IP` only. The Mac h
 
 ### Migration
 
-`docker run -e` values are fixed at create time, so an existing container keeps its old `OMLX_HOST` and its real `OMLX_API_KEY`. In `attach_existing`, next to the `--dns` check at line 1519, inspect the container's env. If it holds `OMLX_API_KEY` or an inference URL pointing at `$HOST_IP`, warn prominently that inference is broken and the key is still exposed until `start-agent.sh --reset-container`. Do not auto-remove the container (ADR-048).
+`docker run -e` values are fixed at create time, so an existing container keeps its old `OMLX_HOST` and its real `OMLX_API_KEY`. `attach_existing` runs `docker exec -e ...`, which overrides the create-time `OLLAMA_HOST`/`OMLX_HOST` for the attached shell, and the client-config injectors rerun on reattach, so inference generally still works. What survives is the key: `-e` cannot unset a variable, so `OMLX_API_KEY` stays in the container's env and the shell inherits it. A stale URL for the non-active backend may also survive, but the firewall blocks it.
+
+`warn_if_container_predates_proxy`, called next to the `--dns` check before `attach_existing`, inspects the container's create-time env (`.Config.Env`). If it holds a non-empty `OMLX_API_KEY`, it warns first and plainly that the key is still exposed and the agent can read it. If it holds only an `OLLAMA_HOST`/`OMLX_HOST` URL pointing at `$HOST_IP`, it warns that the container predates the proxy and the stale URL no longer works. Both name `start-agent.sh --reset-container`. It matches on variable name, never prints the key's value or the env, does not abort on an inspect failure, and does not auto-remove the container (ADR-048) or prompt. (The old code never used `host.docker.internal` in these URLs, so only `$HOST_IP` is matched.)
 
 ### Tests
 

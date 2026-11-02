@@ -1714,6 +1714,29 @@ wait_inference_probe() {
   PROBE_PID=""
 }
 
+# A container created before the inference proxy keeps its create-time env:
+# the old direct-to-host URLs and, for omlx, the real API key. `docker exec -e`
+# overrides the URLs for the attached shell, but cannot unset a variable, so the
+# key is still inherited by the shell. Report by variable name only; never print
+# the value or the env. Warn, do not remove (ADR-048). An inspect failure must
+# not abort the script.
+warn_if_container_predates_proxy() {
+  local env_list="" line has_key=0 has_stale_url=0
+  env_list=$(docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null) || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      OMLX_API_KEY=?*) has_key=1 ;;
+      "OLLAMA_HOST=http://$HOST_IP:"*|"OMLX_HOST=http://$HOST_IP:"*) has_stale_url=1 ;;
+    esac
+  done <<< "$env_list"
+  if [[ "$has_key" == 1 ]]; then
+    echo "warning: container '$CONTAINER_NAME' predates the inference proxy and still holds the real OMLX_API_KEY in its environment. The agent can read it. Remove it with: start-agent.sh --reset-container" >&2
+  elif [[ "$has_stale_url" == 1 ]]; then
+    echo "warning: container '$CONTAINER_NAME' predates the inference proxy. Its stale direct-to-host inference URL no longer works. Recreate it with: start-agent.sh --reset-container" >&2
+  fi
+  return 0
+}
+
 attach_existing() {
   echo "==> Attaching to existing container '$CONTAINER_NAME'"
   # Report a failed start instead of letting docker exec die with a bare
@@ -1745,6 +1768,7 @@ if docker container inspect "$CONTAINER_NAME" &>/dev/null; then
     if [[ "$existing_dns" != *"\"$DNS_BLACKHOLE\""* ]]; then
       echo "warning: container '$CONTAINER_NAME' predates the DNS blackhole and can still resolve external names. Recreate it with: start-agent.sh --reset-container" >&2
     fi
+    warn_if_container_predates_proxy
     # Containers created with search disabled sat on the default bridge. Join
     # them to claude-agent-net (additive; works stopped or running). Never
     # disconnect: it can strand the container and cuts live shells.
