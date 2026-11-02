@@ -494,8 +494,9 @@ def test_secrets_not_in_docker_argv():
     assert not re.search(r'-e\s+"?\w*(API_KEY|TOKEN)\w*=', _SCRIPT_TEXT), (
         "secret passed as -e NAME=value; use value-less -e NAME passthrough"
     )
-    assert re.search(r"DOCKER_ENV_ARGS\+=\(-e OMLX_API_KEY\)", _SCRIPT_TEXT), (
-        "OMLX_API_KEY must be forwarded with value-less -e"
+    # The in-VM proxy holds the omlx key, so it is not forwarded at all.
+    assert not re.search(r"-e\s+\"?OMLX_API_KEY", _SCRIPT_TEXT), (
+        "OMLX_API_KEY must not be forwarded into the container"
     )
 
 
@@ -1727,3 +1728,249 @@ def test_real_nginx_guard_tolerates_running_listener(tmp_path):
         assert rc == 0, err
         calls, _ = _run_proxy_push(tmp_path, script, real_nginx=True)
     assert calls == ["reload nginx"]
+
+
+# ── container and client config (real key stays out of the container) ────────
+# The env block and both injectors are cut out of the script and run for real
+# against fixture files, so the argv wiring is exercised as well as the Python.
+
+import json
+
+_BRIDGE = "172.17.0.1"
+_STALE_URL = "http://192.168.5.2:8000/v1"
+_PORTS = {"omlx": "8000", "ollama": "11434"}
+
+
+def _placeholder() -> str:
+    m = re.search(r'^INFERENCE_PLACEHOLDER_KEY="([^"]+)"$', _SCRIPT_TEXT, re.M)
+    assert m, "INFERENCE_PLACEHOLDER_KEY constant not found"
+    return m.group(1)
+
+
+def _docker_env_args(backend="omlx", key=_FAKE_KEY, host="192.168.5.2", extra=None) -> dict:
+    """Run the DOCKER_ENV_ARGS block; return the -e values by name (None if value-less)."""
+    start = _SCRIPT_TEXT.index("DOCKER_ENV_ARGS=(")
+    end = _SCRIPT_TEXT.index("# ── inject project settings", start)
+    env = {"PATH": "/usr/bin:/bin", "BACKEND": backend, "BRIDGE_IP": _BRIDGE, "HOST_IP": host,
+           "INFERENCE_PORT": _PORTS[backend], "TINYPROXY_PORT": "8888",
+           "GIT_USER_NAME": "n", "GIT_USER_EMAIL": "e", **(extra or {})}
+    if key is not None:
+        env["OMLX_API_KEY"] = key
+    src = "set -euo pipefail\n" + _SCRIPT_TEXT[start:end] + '\nprintf "%s\\n" "${DOCKER_ENV_ARGS[@]}"\n'
+    r = subprocess.run(["bash", "-c", src], env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    args = r.stdout.splitlines()
+    assert all(flag == "-e" for flag in args[::2]), args
+    return {name: (value[0] if value else None)
+            for name, *value in (a.split("=", 1) for a in args[1::2])}
+
+
+def _run_injectors(tmp_path, backend="omlx", key=_FAKE_KEY, opencode=None, pi=None, port=None,
+                   host="127.0.0.1", path=None):
+    """Run both injectors. Port defaults to a closed one, so discovery finds nothing."""
+    opencode_dir = tmp_path / "opencode"
+    pi_dir = tmp_path / "pi"
+    (pi_dir / "agent").mkdir(parents=True, exist_ok=True)
+    opencode_dir.mkdir(exist_ok=True)
+    opencode_file = opencode_dir / "opencode.json"
+    models_file = pi_dir / "agent" / "models.json"
+    if opencode is not None:
+        opencode_file.write_text(opencode if isinstance(opencode, str) else json.dumps(opencode))
+    if pi is not None:
+        models_file.write_text(pi if isinstance(pi, str) else json.dumps(pi))
+    start = _SCRIPT_TEXT.index("# ── inject OpenCode config")
+    end = _SCRIPT_TEXT.index("# ── agent skills seed", start)
+    port = port or _free_port()
+    env = {"PATH": path or f"{os.path.dirname(sys.executable)}:/usr/bin:/bin",
+           "BACKEND": backend, "BRIDGE_IP": _BRIDGE, "HOST_IP": host,
+           "INFERENCE_PORT": str(port), "OPENCODE_CONFIG_DIR": str(opencode_dir),
+           "PI_CONFIG_DIR": str(pi_dir), "LOCAL_SEARCH_ENABLED": "false"}
+    if key is not None:
+        env["OMLX_API_KEY"] = key
+    r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + _SCRIPT_TEXT[start:end]],
+                       env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert _FAKE_KEY not in r.stdout + r.stderr, "injector printed the real key"
+    return (json.loads(opencode_file.read_text()), json.loads(models_file.read_text()),
+            opencode_file.read_text() + models_file.read_text(), f"http://{_BRIDGE}:{port}/v1")
+
+
+def _stale_entry(url=_STALE_URL, key=_FAKE_KEY):
+    return {"npm": "@ai-sdk/openai-compatible", "name": "old", "models": {"m1": {"name": "m1"}},
+            "options": {"baseURL": url, "apiKey": key}}
+
+
+def test_omlx_key_not_in_container_env():
+    args = _docker_env_args()
+    assert "OMLX_API_KEY" not in args
+    assert _FAKE_KEY not in json.dumps(args)
+    assert "OMLX_API_KEY" not in _fresh_container_section()
+
+
+@pytest.mark.parametrize("backend,var", [("omlx", "OMLX_HOST"), ("ollama", "OLLAMA_HOST")])
+def test_inference_env_points_at_proxy(backend, var):
+    args = _docker_env_args(backend)
+    assert args[var] == f"http://{_BRIDGE}:{_PORTS[backend]}"
+
+
+@pytest.mark.parametrize("var", ["NO_PROXY", "no_proxy"])
+def test_host_ip_gone_from_no_proxy(var):
+    entries = _docker_env_args()[var].split(",")
+    assert "192.168.5.2" not in entries
+    assert _BRIDGE in entries, "the proxy must be reached directly, not through tinyproxy"
+
+
+def test_host_ip_appears_nowhere_in_container_env():
+    assert "192.168.5.2" not in json.dumps(_docker_env_args())
+
+
+def test_cloud_keys_still_forwarded_value_less():
+    args = _docker_env_args(extra={"ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "b"})
+    assert args["ANTHROPIC_API_KEY"] is None and args["OPENAI_API_KEY"] is None
+
+
+def test_host_gateway_mapping_kept():
+    assert "--add-host=host.docker.internal:host-gateway" in _SCRIPT_TEXT
+
+
+def test_bridge_ip_known_before_every_consumer():
+    # The injectors and the env block both run before attach_existing, on the
+    # fresh and reattach paths alike, so the probe must come first on both.
+    assigned = _SCRIPT_TEXT.index("BRIDGE_IP=$(")
+    fallback = _SCRIPT_TEXT.index('BRIDGE_IP="172.17.0.1"')
+    consumers = [_SCRIPT_TEXT.index("# ── inject OpenCode config"),
+                 _SCRIPT_TEXT.index("DOCKER_ENV_ARGS=("),
+                 _SCRIPT_TEXT.index('if docker container inspect "$CONTAINER_NAME"')]
+    assert assigned < fallback < min(consumers)
+
+
+def test_startup_summary_shows_proxy_address():
+    line = next(l for l in _SCRIPT_TEXT.splitlines() if l.startswith('echo "    inference:'))
+    assert "$BRIDGE_IP:$INFERENCE_PORT" in line and "$HOST_IP" not in line
+
+
+@pytest.mark.parametrize("backend", ["omlx", "ollama"])
+def test_opencode_scrubs_active_and_inactive_entries(tmp_path, backend):
+    seeded = {"provider": {"omlx": _stale_entry(), "ollama": _stale_entry()}}
+    data, _, raw, url = _run_injectors(tmp_path, backend=backend, opencode=seeded)
+    assert _FAKE_KEY not in raw
+    for name in ("omlx", "ollama"):
+        opts = data["provider"][name]["options"]
+        assert opts == {"baseURL": url, "apiKey": _placeholder()}, name
+    assert "192.168.5.2" not in raw
+
+
+@pytest.mark.parametrize("backend", ["omlx", "ollama"])
+def test_pi_scrubs_seeded_key(tmp_path, backend):
+    seeded = {"providers": {"local": {"baseUrl": _STALE_URL, "apiKey": _FAKE_KEY, "models": [{"id": "m1"}]}}}
+    _, models, raw, url = _run_injectors(tmp_path, backend=backend, pi=seeded)
+    local = models["providers"]["local"]
+    assert _FAKE_KEY not in raw and "192.168.5.2" not in raw
+    assert local["apiKey"] == _placeholder()
+    assert local["baseUrl"] == url
+    assert local["models"] == [{"id": "m1"}], "existing models lost when discovery found none"
+
+
+@pytest.mark.parametrize("backend", ["omlx", "ollama"])
+def test_stale_key_scrubbed_when_host_key_unset(tmp_path, backend):
+    # What setdefault got wrong: no key this run, so a stale one was kept.
+    data, models, raw, _ = _run_injectors(
+        tmp_path, backend=backend, key=None,
+        opencode={"provider": {"omlx": _stale_entry(), "ollama": _stale_entry()}},
+        pi={"providers": {"local": {"apiKey": _FAKE_KEY}}})
+    assert _FAKE_KEY not in raw
+    assert data["provider"]["omlx"]["options"]["apiKey"] == _placeholder()
+    assert models["providers"]["local"]["apiKey"] == _placeholder()
+
+
+@pytest.mark.parametrize("backend,key", [("omlx", _FAKE_KEY), ("omlx", None), ("ollama", None)])
+def test_fresh_configs_get_non_empty_placeholder(tmp_path, backend, key):
+    # Clients that insist on a non-empty apiKey must work with no user setup.
+    data, models, _, url = _run_injectors(tmp_path, backend=backend, key=key)
+    assert _placeholder()
+    assert data["provider"][backend]["options"] == {"baseURL": url, "apiKey": _placeholder()}
+    assert models["providers"]["local"]["apiKey"] == _placeholder()
+    other = "ollama" if backend == "omlx" else "omlx"
+    assert other not in data["provider"], "inactive entry must not be invented"
+
+
+def test_unrelated_settings_survive(tmp_path):
+    cloud = {"options": {"baseURL": "https://api.example.com/v1", "apiKey": "sk-cloud-own"}}
+    pi_cloud = {"baseUrl": "https://api.example.com/v1", "apiKey": "sk-cloud-own", "api": "x"}
+    seeded = {"provider": {"omlx": {**_stale_entry(), "name": "mine", "extra": 1}, "anthropic": cloud},
+              "theme": "custom", "mcp": {"mine": {"type": "local"}},
+              "permission": {"webfetch": "deny"}}
+    data, models, _, _ = _run_injectors(
+        tmp_path, opencode=seeded, pi={"providers": {"cloud": pi_cloud}, "note": "keep"})
+    assert data["provider"]["anthropic"] == cloud
+    assert data["theme"] == "custom" and data["mcp"]["mine"] == {"type": "local"}
+    assert data["permission"]["webfetch"] == "deny"
+    omlx = data["provider"]["omlx"]
+    assert (omlx["name"], omlx["extra"], omlx["models"]) == ("mine", 1, {"m1": {"name": "m1"}})
+    assert models["providers"]["cloud"] == pi_cloud and models["note"] == "keep"
+
+
+def test_copies_of_real_key_scrubbed_from_any_entry(tmp_path):
+    # A hand-made provider holding the key is still the key inside the container.
+    custom = {"options": {"apiKey": _FAKE_KEY, "headers": {"Authorization": f"Bearer {_FAKE_KEY}"}}}
+    _, _, raw, _ = _run_injectors(
+        tmp_path, opencode={"provider": {"my-omlx": custom}},
+        pi={"providers": {"my-omlx": {"apiKey": _FAKE_KEY}}})
+    assert _FAKE_KEY not in raw
+
+
+def test_malformed_config_replaced_without_key(tmp_path):
+    bad = '{"apiKey": "' + _FAKE_KEY + '", '
+    _, _, raw, _ = _run_injectors(tmp_path, opencode=bad, pi=bad)
+    assert _FAKE_KEY not in raw
+
+
+def test_inactive_entry_without_options_handled(tmp_path):
+    data, _, _, url = _run_injectors(
+        tmp_path, opencode={"provider": {"ollama": {"options": None}, "custom": "not-a-dict"}})
+    assert data["provider"]["ollama"]["options"] == {"baseURL": url, "apiKey": _placeholder()}
+    assert data["provider"]["custom"] == "not-a-dict"
+
+
+def test_discovery_uses_real_key_and_writes_only_the_placeholder(tmp_path):
+    seen = []
+
+    class Models(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append((self.path, self.headers.get("Authorization")))
+            body = json.dumps({"data": [{"id": "disc-1"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Models)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        data, models, raw, url = _run_injectors(tmp_path, port=server.server_address[1])
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert seen and all(s == ("/v1/models", f"Bearer {_FAKE_KEY}") for s in seen)
+    assert list(data["provider"]["omlx"]["models"]) == ["disc-1"]
+    assert models["providers"]["local"]["models"] == [{"id": "disc-1"}]
+    assert _FAKE_KEY not in raw
+    assert data["provider"]["omlx"]["options"]["baseURL"] == url
+    assert models["providers"]["local"]["baseUrl"] == url
+
+
+def test_key_not_on_injector_argv(tmp_path):
+    # Argv is visible in host `ps`; the injectors must take the key from the env.
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    argv_log = tmp_path / "argv.log"
+    shim = shim_dir / "python3"
+    shim.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" >> "{argv_log}"\nexec "{sys.executable}" "$@"\n')
+    shim.chmod(0o755)
+    _run_injectors(tmp_path, path=f"{shim_dir}:/usr/bin:/bin")
+    logged = argv_log.read_text()
+    assert _placeholder() in logged, "shim did not see the injector's argv"
+    assert _FAKE_KEY not in logged

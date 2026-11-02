@@ -126,8 +126,8 @@ ENVIRONMENT:
   CLAUDE_AGENT_BACKEND   Default backend (overridden by --backend).
   GIT_USER_NAME          Default git name (overridden by --git-name).
   GIT_USER_EMAIL         Default git email (overridden by --git-email).
-  OMLX_API_KEY           API key for omlx (passed into the container when
-                         --backend=omlx).
+  OMLX_API_KEY           API key for omlx with --backend=omlx. Held by the
+                         in-VM inference proxy; not passed into the container.
   ANTHROPIC_API_KEY      Forwarded into the container when set (Pi cloud
   OPENAI_API_KEY         providers).
   CLAUDE_SKILLS_ARCHIVE_URL  Tarball that skills are synced from on a fresh
@@ -1262,13 +1262,19 @@ else
 fi
 
 # ── inject OpenCode config (inference provider) ─────────────────────────────
+# Clients reach inference only through the in-VM proxy at $BRIDGE_IP, which
+# overwrites client credentials on every request. Some clients need a non-empty
+# apiKey, so both configs get this placeholder. The real key is for host-side
+# model discovery only: it reaches the injectors through the environment (argv
+# shows in host `ps`) and is never written to these bind-mounted files.
+INFERENCE_PLACEHOLDER_KEY="not-a-real-key-inference-proxy-injects-credentials"
 OPENCODE_CONFIG_FILE="$OPENCODE_CONFIG_DIR/opencode.json"
-python3 - \
+OMLX_API_KEY="${OMLX_API_KEY:-}" python3 - \
   "$OPENCODE_CONFIG_FILE" \
   "$BACKEND" \
-  "http://$HOST_IP:$INFERENCE_PORT/v1" \
+  "http://$BRIDGE_IP:$INFERENCE_PORT/v1" \
   "http://127.0.0.1:$INFERENCE_PORT/v1,http://$HOST_IP:$INFERENCE_PORT/v1" \
-  "${OMLX_API_KEY:-}" \
+  "$INFERENCE_PLACEHOLDER_KEY" \
   "${CLAUDE_AGENT_DEFAULT_MODEL:-}" \
   "${PLAN_MODEL:-}" \
   "${EXEC_MODEL:-}" \
@@ -1278,9 +1284,10 @@ python3 - \
 import json, os, sys, urllib.request, urllib.error
 path        = sys.argv[1]
 backend     = sys.argv[2]
-runtime_url = sys.argv[3]   # what the container will hit (HOST_IP)
-probe_urls  = [u for u in sys.argv[4].split(',') if u]
-api_key     = sys.argv[5] if len(sys.argv) > 5 else ""
+runtime_url = sys.argv[3]   # what the container will hit (the in-VM proxy)
+probe_urls  = [u for u in sys.argv[4].split(',') if u]  # host-side discovery only
+placeholder = sys.argv[5]   # the only apiKey ever written
+api_key     = os.environ.get("OMLX_API_KEY", "")  # discovery only; never written
 default_model_override = sys.argv[6] if len(sys.argv) > 6 else ""
 plan_model  = sys.argv[7] if len(sys.argv) > 7 else ""
 exec_model  = sys.argv[8] if len(sys.argv) > 8 else ""
@@ -1324,6 +1331,20 @@ def discover_models():
         print(f"[opencode-config] discovery failed across {probe_urls}: {last_err}", file=sys.stderr)
     return {}, None
 
+def scrub_key_copies(node):
+    """Replace copies of the real key anywhere in the config, in place."""
+    if isinstance(node, dict):
+        items = node.items()
+    elif isinstance(node, list):
+        items = enumerate(node)
+    else:
+        return
+    for k, v in list(items):
+        if v in (api_key, f"Bearer {api_key}"):
+            node[k] = placeholder
+        else:
+            scrub_key_copies(v)
+
 data.setdefault('$schema', 'https://opencode.ai/config.json')
 providers = data.setdefault('provider', {})
 
@@ -1341,16 +1362,6 @@ if provider_key:
         "options": {},
         "models": {},
     })
-    opts = entry.setdefault('options', {})
-    opts['baseURL'] = runtime_url
-    # @ai-sdk/openai-compatible requires a non-empty apiKey in some versions.
-    # Ollama ignores the value; omlx uses it if the server enforces auth.
-    if backend == "ollama":
-        opts['apiKey'] = "ollama"
-    elif backend == "omlx" and api_key:
-        opts['apiKey'] = api_key
-    elif backend == "omlx":
-        opts.setdefault('apiKey', "omlx")
 
     discovered, working_url = discover_models()
     if discovered:
@@ -1379,6 +1390,20 @@ if provider_key:
     if exec_model:
         data.setdefault('agent', {}).setdefault('build', {})['model'] = qualify(exec_model)
 
+# Both local entries can coexist in this file, and an earlier run may have left
+# the real key and the host URL in either. The active backend's proxy is the only
+# inference path, so the inactive entry gets the same address.
+# @ai-sdk/openai-compatible requires a non-empty apiKey in some versions.
+for name in ("ollama", "omlx"):
+    local_entry = providers.get(name)
+    if isinstance(local_entry, dict):
+        if not isinstance(local_entry.get('options'), dict):
+            local_entry['options'] = {}
+        local_entry['options']['baseURL'] = runtime_url
+        local_entry['options']['apiKey'] = placeholder
+if api_key:
+    scrub_key_copies(data)
+
 perms = data.setdefault('permission', {})
 perms.setdefault('webfetch', 'allow')
 if local_search_enabled:
@@ -1406,22 +1431,23 @@ PYEOF
 # get backfilled without --init-sandbox.
 PI_MODELS_FILE="$PI_CONFIG_DIR/agent/models.json"
 PI_SETTINGS_FILE="$PI_CONFIG_DIR/agent/settings.json"
-python3 - \
+OMLX_API_KEY="${OMLX_API_KEY:-}" python3 - \
   "$PI_MODELS_FILE" \
   "$PI_SETTINGS_FILE" \
   "$BACKEND" \
-  "http://$HOST_IP:$INFERENCE_PORT/v1" \
+  "http://$BRIDGE_IP:$INFERENCE_PORT/v1" \
   "http://127.0.0.1:$INFERENCE_PORT/v1,http://$HOST_IP:$INFERENCE_PORT/v1" \
-  "${OMLX_API_KEY:-}" \
+  "$INFERENCE_PLACEHOLDER_KEY" \
   "${CLAUDE_AGENT_DEFAULT_MODEL:-}" \
   << 'PYEOF'
 import json, os, sys, urllib.request, urllib.error
 models_path   = sys.argv[1]
 settings_path = sys.argv[2]
 backend       = sys.argv[3]
-runtime_url   = sys.argv[4]
-probe_urls    = [u for u in sys.argv[5].split(',') if u]
-api_key       = sys.argv[6] if len(sys.argv) > 6 else ""
+runtime_url   = sys.argv[4]  # what the container will hit (the in-VM proxy)
+probe_urls    = [u for u in sys.argv[5].split(',') if u]  # host-side discovery only
+placeholder   = sys.argv[6]  # the only apiKey ever written
+api_key       = os.environ.get("OMLX_API_KEY", "")  # discovery only; never written
 default_model_override = sys.argv[7] if len(sys.argv) > 7 else ""
 
 if os.path.exists(models_path):
@@ -1470,6 +1496,20 @@ def discover_models():
         print(f"[pi-config] discovery failed across {probe_urls}: {last_err}", file=sys.stderr)
     return [], None
 
+def scrub_key_copies(node):
+    """Replace copies of the real key anywhere in the config, in place."""
+    if isinstance(node, dict):
+        items = node.items()
+    elif isinstance(node, list):
+        items = enumerate(node)
+    else:
+        return
+    for k, v in list(items):
+        if v in (api_key, f"Bearer {api_key}"):
+            node[k] = placeholder
+        else:
+            scrub_key_copies(v)
+
 providers = models_data.setdefault("providers", {})
 provider_key = "local"
 
@@ -1477,12 +1517,7 @@ entry = providers.setdefault(provider_key, {})
 entry["name"] = "Local (Ollama)" if backend == "ollama" else "Local (omlx)"
 entry["baseUrl"] = runtime_url
 entry["api"] = "openai-completions"
-if backend == "ollama":
-    entry["apiKey"] = "ollama"
-elif backend == "omlx" and api_key:
-    entry["apiKey"] = api_key
-else:
-    entry.setdefault("apiKey", "omlx")
+entry["apiKey"] = placeholder
 entry["compat"] = {
     "supportsDeveloperRole": False,
     "supportsReasoningEffort": False,
@@ -1495,6 +1530,9 @@ if discovered:
 else:
     print(f"[pi-config] no {backend} models discovered; preserving existing models list "
           f"({len(entry.get('models', []))} entries)", file=sys.stderr)
+
+if api_key:
+    scrub_key_copies(models_data)
 
 with open(models_path, 'w') as f:
     json.dump(models_data, f, indent=2)
@@ -1583,7 +1621,7 @@ DOCKER_ENV_ARGS=(
   -e "GIT_COMMITTER_EMAIL=$GIT_USER_EMAIL"
   -e "HTTPS_PROXY=http://$BRIDGE_IP:$TINYPROXY_PORT"
   -e "HTTP_PROXY=http://$BRIDGE_IP:$TINYPROXY_PORT"
-  -e "NO_PROXY=localhost,127.0.0.1,$BRIDGE_IP,$HOST_IP,searxng"
+  -e "NO_PROXY=localhost,127.0.0.1,$BRIDGE_IP,searxng"
   # Lowercase duplicates: apt (and curl/wget/git) only consult lowercase
   # http_proxy/https_proxy, ignoring the uppercase forms Node honors. Without
   # these, apt connects direct to the bridge and hits the CLAUDE_AGENT REJECT
@@ -1591,25 +1629,23 @@ DOCKER_ENV_ARGS=(
   # the same hostname allowlist as everything else. No firewall change needed.
   -e "http_proxy=http://$BRIDGE_IP:$TINYPROXY_PORT"
   -e "https_proxy=http://$BRIDGE_IP:$TINYPROXY_PORT"
-  -e "no_proxy=localhost,127.0.0.1,$BRIDGE_IP,$HOST_IP,searxng"
+  -e "no_proxy=localhost,127.0.0.1,$BRIDGE_IP,searxng"
   -e "NODE_USE_ENV_PROXY=1"
   -e "TMPDIR=/tmp"
 )
+# The in-VM proxy, not the host: it holds the omlx key, so OMLX_API_KEY is never
+# forwarded into the container.
 case "$BACKEND" in
   ollama)
-    DOCKER_ENV_ARGS+=(-e "OLLAMA_HOST=http://$HOST_IP:$INFERENCE_PORT")
+    DOCKER_ENV_ARGS+=(-e "OLLAMA_HOST=http://$BRIDGE_IP:$INFERENCE_PORT")
     ;;
   omlx)
-    DOCKER_ENV_ARGS+=(-e "OMLX_HOST=http://$HOST_IP:$INFERENCE_PORT")
-    # Value-less -e: docker reads the value from its own environment, keeping
-    # the secret out of the docker argv (visible in host `ps`).
-    if [[ -n "${OMLX_API_KEY:-}" ]]; then
-      export OMLX_API_KEY
-      DOCKER_ENV_ARGS+=(-e OMLX_API_KEY)
-    fi
+    DOCKER_ENV_ARGS+=(-e "OMLX_HOST=http://$BRIDGE_IP:$INFERENCE_PORT")
     ;;
 esac
 # Cloud provider keys for Pi (ADR-036), forwarded only when set on the host.
+# Value-less -e: docker reads the value from its own environment, keeping the
+# secret out of the docker argv (visible in host `ps`).
 for key in ANTHROPIC_API_KEY OPENAI_API_KEY; do
   if [[ -n "${!key:-}" ]]; then
     DOCKER_ENV_ARGS+=(-e "$key")
@@ -1741,7 +1777,7 @@ echo "==> Creating container '$CONTAINER_NAME'"
 echo "    sandbox  : $SANDBOX_NAME  ($SANDBOX_ROOT)"
 echo "    project  : $PROJECT_DIR"
 echo "    proxy    : http://$BRIDGE_IP:$TINYPROXY_PORT  (allowlist: $ALLOWLIST_FILE, ro in container)"
-echo "    inference: $INFERENCE_LABEL at http://$HOST_IP:$INFERENCE_PORT$INFERENCE_STATUS"
+echo "    inference: $INFERENCE_LABEL via proxy at http://$BRIDGE_IP:$INFERENCE_PORT$INFERENCE_STATUS"
 echo "    network  : $AGENT_NET_NAME"
 $LOCAL_SEARCH_ENABLED && echo "    search   : SearXNG on $AGENT_NET_NAME"
 
