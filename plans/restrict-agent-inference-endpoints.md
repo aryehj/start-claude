@@ -88,7 +88,7 @@ The proxy also holds the omlx key. It overwrites client credentials on every req
 - `tests/test-agent-firewall.sh` (rename the Ollama carve-out test at lines 83-102, and update `test_env_wiring`, which requires `OLLAMA_HOST` regardless of backend):
   - Allowed routes succeed. Streaming chat works. An unauthenticated request succeeds, which proves injection.
   - Refused: `/v1/web/search`, `/v1/web/fetch`, `/v1/mcp/execute`, `/admin/api/global-settings`, `/v1/responses`, `/v1/models/x/load`, `/v1/models/status`, `/api/pull`, the wrong method on an allowed path, and traversal and percent-encoded variants of denied paths.
-  - Direct `$HOST_IP:$INFERENCE_PORT` and `curl -x $HTTP_PROXY http://$HOST_IP:$INFERENCE_PORT/...` are both blocked.
+  - Direct `$HOST_IP:$INFERENCE_PORT`, `host.docker.internal:$INFERENCE_PORT` (it maps to `$HOST_IP`), and the same URL through tinyproxy are all blocked. For the tinyproxy case, clear `NO_PROXY`/`no_proxy` and pass `--noproxy ''`: curl honours `NO_PROXY` even with `-x`, so a host listed there goes direct and the test measures the wrong path.
   - `OMLX_API_KEY` is absent from the env, and the key does not appear in `opencode.json` or `models.json`.
 - `tests/test-cross-vm-isolation.sh:136-160`: `ECONNREFUSED` no longer proves the carve-out, because nginx answers with a 502 when the backend is down. Rewrite the test to expect the proxy.
 
@@ -99,14 +99,24 @@ The proxy also holds the omlx key. It overwrites client credentials on every req
 - `CLAUDE.md`: start-agent key decisions.
 - `templates/global-claude.md:65`: state which endpoints are available.
 
+## Verified against the live server (2026-11-02)
+
+Run from the agent container against the installed omlx **0.7.3**, the same version as the source read for this plan.
+
+- **Remote images are rejected.** `http://` and `file://` image URLs on `/v1/chat/completions`, and an Anthropic `url` image source on `/v1/messages`, each returned 400 "Remote URLs and local file paths are not supported". omlx's README is out of date on this. A base64 image was analysed correctly on the vision model `gemma-4-e4b-it-6bit`. Still add this as a smoke test to catch regressions on upgrade, skipped when no vision model is available.
+- **Chat loads models automatically.** A chat request succeeded with no model loaded and no load call, so blocking `/v1/models/{id}/load` is safe.
+- **OpenCode and Pi stay inside the allowlist.** Both were run through a logging proxy that replaced client credentials with the real key, using a placeholder `apiKey` in throwaway configs. Each completed a prompt and called only `POST /v1/chat/completions`. Neither called `/v1/models` at runtime, because discovery happens on the macOS host. This was a text prompt with no tool calls or images from either client.
+- **Streaming works, and `x-api-key` is accepted** on `/v1/messages/count_tokens?beta=true`, so clearing that header in the proxy matters.
+- **tinyproxy currently refuses the host:** `403 Filtered` for both `http://192.168.5.2:8000` and CONNECT to the host IP. The owner-match rule is still needed, because the current protection is only the hostname filter.
+- **The real key is in both client configs today** (`opencode.json` at `provider.omlx.options.apiKey`, and Pi's `models.json`), confirming the scrub is needed.
+
 ## Unknowns / To Verify
 
-These need a Mac host running Colima and a real omlx server. The omlx host was not reachable from the session that wrote this plan, so the installed version is unknown.
+These can't be checked from inside the container.
 
-- **Does the installed omlx fetch remote images?** omlx's README says URL images work, but `omlx/utils/image.py:66-68` at `HEAD` rejects anything except base64 data URIs, including Anthropic `url` image sources, which map onto the same path. If the installed version is older and fetches URLs, `/v1/chat/completions` is itself an Internet path that this proxy can't see, because it doesn't inspect bodies. Verify by POSTing a remote `image_url` to a vision model and pointing it at a URL you can observe. If it fetches, the fix is to upgrade omlx and record a minimum version in the README. Add this as a smoke test, skipped when no vision model is available.
-- **Does chat run any tools on the server?** At `HEAD`, the only callers of the web and MCP tool functions are the routes above, so MCP tool definitions merged into a chat request can't execute without `/v1/mcp/execute`. Confirm on the installed version: with an MCP server configured, a model-emitted tool call must return to the client unexecuted.
-- **Do OpenCode and Pi call anything outside the allowlist?** The config says `openai-completions`, but check the nginx access log during a real session, and check Pi's and OpenCode's model discovery. Also confirm that chat loads an unloaded model automatically, since `/v1/models/{id}/load` is blocked. If it does not, stop and decide with the user rather than widening the list silently.
-- **Package and boot behaviour on the Colima VM:** confirm `nginx` installs from the VM's apt sources (the comments suggest Ubuntu 24.04), and that a VM reboot recovers. nginx can fail at boot if `docker0` isn't up yet when it binds `$BRIDGE_IP`; the active-status gate should re-push and restart on the next run, but verify this.
+- **Server-side tool execution with MCP configured.** This server has no MCP servers (`/v1/mcp/servers` is empty, `/health` reports `mcp: null`), so this could not be tested live. At `HEAD`, the only caller of MCP tool execution is the `/v1/mcp/execute` route, so a model-emitted tool call should return to the client unexecuted. Re-test this if an MCP server is ever added to omlx.
+- **Package and boot behaviour on the Colima VM.** Needs a Mac host: confirm `nginx` installs from the VM's apt sources (the comments suggest Ubuntu 24.04), and that a VM reboot recovers. nginx can fail at boot if `docker0` isn't up yet when it binds `$BRIDGE_IP`; the active-status gate should re-push and restart on the next run, but verify this.
+- **The implementation itself.** Run `tests/test-agent-firewall.sh` in a container recreated after the change, and check the nginx access log during a real OpenCode and Pi session, including one with tool calls and one with an image.
 
 ## Notes
 
