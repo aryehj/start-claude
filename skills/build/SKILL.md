@@ -12,6 +12,11 @@ allowed-tools:
   - Bash
   - Agent
   - AskUserQuestion
+  - ToolSearch
+  - TaskCreate
+  - TaskList
+  - TaskUpdate
+  - TaskGet
   - WebSearch
   - WebFetch
 ---
@@ -31,13 +36,17 @@ You are the **orchestrator**. The per-phase procedure lives in `${CLAUDE_SKILL_D
    - A flat step-level Status list is one unit of work.
    - **Oversized units.** If a phase or flat list would obviously not fit in one fresh session (many files, many slow roundtrips, many independent pieces), split it into worker-sized chunks yourself, each startable from the repo and plan alone, and record the split as indented sub-entries in Status. Ask the user only if choosing the split is itself a judgment call.
 
-4. **Choose inline or orchestrated.**
+4. **Set up the task list.** The task list is how the user watches progress in the TUI; the plan file is the durable record across sessions. Load the task tools if they aren't loaded yet — they are deferred: ToolSearch with `select:TaskCreate,TaskUpdate,TaskList,TaskGet`. If they are unavailable, say so in one line and carry on; the plan file's checkboxes still track progress.
+   - **Orchestrated:** create one task per unit in the run (e.g. "Phase 2: <label>"). Mark each in-progress when you dispatch it and completed only after step 7 verifies it. Add a task when you split a unit or re-dispatch to fix something. Workers don't keep task lists — yours is the single view.
+   - **Inline:** `phase.md` covers it — one task per step.
+
+5. **Choose inline or orchestrated.**
    - **Inline** when the run is a single unit: read `${CLAUDE_SKILL_DIR}/phase.md` and follow it yourself in inline mode. You can ask the user questions directly.
-   - **Orchestrated** when the run has two or more units: dispatch each to a worker subagent, one at a time, in order (step 5). Don't do phase work yourself in this mode — keep your context for verifying and deciding.
+   - **Orchestrated** when the run has two or more units: dispatch each to a worker subagent, one at a time, in order (step 6). Don't do phase work yourself in this mode — keep your context for verifying and deciding.
 
-5. **Dispatch a worker** with the Agent tool (`general-purpose`). The prompt must give: the absolute plan path; the exact Status line to execute; "Read `${CLAUDE_SKILL_DIR}/phase.md` and follow it in **worker** mode"; and anything you settled since the plan was written (answers from the user, resolved blockers, defaults to honor). Model: `opus` for entries annotated `(Opus recommended)`; otherwise omit the override. Wait for the result before dispatching the next — phases are sequential.
+6. **Dispatch a worker** with the Agent tool (`general-purpose`). The prompt must give: the absolute plan path; the exact Status line to execute; "Read `${CLAUDE_SKILL_DIR}/phase.md` and follow it in **worker** mode"; and anything you settled since the plan was written (answers from the user, resolved blockers, defaults to honor). Model: `opus` for entries annotated `(Opus recommended)`; otherwise omit the override. Wait for the result before dispatching the next — phases are sequential.
 
-6. **Verify, don't trust.** After each worker reports:
+7. **Verify, don't trust.** After each worker reports:
    - Run the test suite yourself and confirm it's green.
    - `git log` shows the reported commits; `git status` is clean or every dirty file is accounted for.
    - The phase's Status checkbox is ticked.
@@ -46,14 +55,14 @@ You are the **orchestrator**. The per-phase procedure lives in `${CLAUDE_SKILL_D
 
    If verification fails on something mechanical (a red test, a missed tick, an uncommitted file), send it back: dispatch a worker with the specific problem, or fix a trivial miss yourself.
 
-7. **Decide whether to continue.**
+8. **Decide whether to continue.**
    - `DONE`, verified, no drift, not a gate → dispatch the next unit.
    - `BLOCKED` on a factual or mechanical question → settle it yourself (research, read the code, diagnose the failure), then re-dispatch with the answer.
    - `BLOCKED` on a substantive judgment call, or `PLAN DRIFT` that changes later phases → stop and put the question to the user via AskUserQuestion, using the worker's options. On an answer, record it (in the plan if it changes the plan) and continue the run.
-   - The unit just finished was a human gate, or the worker returned `NEEDS-HUMAN` → read the script the worker wrote, run whatever part of it you can, then stop and hand off (step 8). After the user replies "done", read the log the script wrote and continue from there. Don't ask them to paste output.
+   - The unit just finished was a human gate, or the worker returned `NEEDS-HUMAN` → read the script the worker wrote, run whatever part of it you can, then stop and hand off (step 9). After the user replies "done", read the log the script wrote and continue from there. Don't ask them to paste output.
    - End of the run (`--one`, or end of plan) → stop and report.
 
-8. **Report.** End with:
+9. **Report.** End with:
    - Which entries completed this session, and their commits.
    - The exact test command and its result.
    - Any defaults workers took that the user may want to revisit.

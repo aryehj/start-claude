@@ -9,9 +9,8 @@ SKILLS = ROOT / "skills"
 SKILLS_AGENTS = ROOT / "skills-agents"
 
 SKILL_FILES = sorted(SKILLS.glob("*/SKILL.md"))
-ALL_SKILL_TEXT_FILES = sorted(
-    p for base in (SKILLS, SKILLS_AGENTS) for p in base.rglob("*.md")
-)
+SMALL_MODEL_FILES = sorted(SKILLS_AGENTS.rglob("*.md"))
+TASK_TOOL_RE = re.compile(r"\bTask(Create|List|Update|Get)\b")
 
 
 def _frontmatter(text: str) -> list[str]:
@@ -31,15 +30,38 @@ def _frontmatter(text: str) -> list[str]:
     return lines[1:end]
 
 
-# ── Task tools no longer exist ───────────────────────────────────────────────
+# ── Task tools ───────────────────────────────────────────────────────────────
+# Claude Code's task tools are deferred: they exist, but only after ToolSearch
+# loads them. A skill that requires them without loading them breaks.
 
-@pytest.mark.parametrize("path", ALL_SKILL_TEXT_FILES, ids=lambda p: str(p.relative_to(ROOT)))
-def test_no_task_tools(path):
-    hits = re.findall(r"\bTask(Create|List|Update|Get)\b", path.read_text())
-    assert not hits, (
-        f"{path.relative_to(ROOT)} references Task{hits[0]}; those tools no longer "
-        "exist in Claude Code — track progress in the plan file instead"
+@pytest.mark.parametrize("path", SMALL_MODEL_FILES, ids=lambda p: str(p.relative_to(ROOT)))
+def test_small_model_skills_have_no_task_tools(path):
+    hit = TASK_TOOL_RE.search(path.read_text())
+    assert not hit, (
+        f"{path.relative_to(ROOT)} references {hit.group(0)}, a Claude Code-only tool; "
+        "use a TODO file instead"
     )
+
+
+@pytest.mark.parametrize(
+    "path", sorted(SKILLS.rglob("*.md")), ids=lambda p: str(p.relative_to(ROOT))
+)
+def test_task_tools_are_loaded_and_optional(path):
+    text = path.read_text()
+    if not TASK_TOOL_RE.search(text):
+        return
+    assert "ToolSearch" in text, (
+        f"{path.relative_to(ROOT)} uses the task tools but never says to load them "
+        "with ToolSearch; they are deferred"
+    )
+    assert re.search(r"unavailable|not available|if .*can't be loaded", text, re.IGNORECASE), (
+        f"{path.relative_to(ROOT)} must say what to do when the task tools are unavailable"
+    )
+
+
+def test_build_uses_task_tools():
+    text = (SKILLS / "build" / "SKILL.md").read_text()
+    assert "TaskCreate" in text and "TaskUpdate" in text
 
 
 # ── Frontmatter ──────────────────────────────────────────────────────────────

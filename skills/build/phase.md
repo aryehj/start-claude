@@ -10,7 +10,11 @@ This is the per-phase procedure for `/build`. You are running it either **inline
    - **Inline:** ask via AskUserQuestion, batched in one call. Don't ask what the plan already answers; don't ask cosmetic questions.
    - **Worker:** never ask the user (you can't). If you can proceed on a clearly-safe default, do so and note it in your report. Otherwise stop before writing code and return `BLOCKED` (see Report).
 
-3. **Order the work.** Track progress in the plan file, not a separate task tool: tick step-level checkboxes in Status as each completes, and post a short progress line when you start each step. Work in this order:
+3. **Track and order the work.** The plan file is the durable record: tick step-level checkboxes in Status as each completes.
+   - **Inline:** also keep a task list so the user can watch progress in the TUI — one task per numbered step in the phase (or per meaningful unit if it isn't numbered), plus any spike/research tasks. The tools are deferred: if TaskCreate isn't loaded, load it with ToolSearch `select:TaskCreate,TaskUpdate,TaskList,TaskGet`. Mark each task in-progress before starting it and completed as soon as it's done, not in batches. If the tools are unavailable, say so in one line and post a short progress line per step instead.
+   - **Worker:** don't keep a task list — the orchestrator's list is the user's single view. Tick the plan's checkboxes.
+
+   Work in this order:
    - **Spikes / research first,** when a step depends on a factual unknown that takes more than a quick grep (library behavior, API shape). Throwaway exploratory code is fine here.
    - **Then tests.** Write tests that pin down the phase's "done" state before production code. Derive "done" from phase-level `### Acceptance criteria` if present → plan-level `## Goals` if not → the phase's Steps as a last resort. Tests live in `tests/` at the project root. They should fail (or skip pending implementation) when first written. If the phase has no testable behavior (pure docs, config with no logic), say so explicitly and skip — don't invent ceremonial tests.
    - **Then production code.** If a step reveals new work, add it to the plan's Status rather than silently expanding the current step.
