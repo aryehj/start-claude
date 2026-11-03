@@ -49,7 +49,13 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
 # Both shipped as canonical npm packages: opencode-ai (binary `opencode`) and
 # @earendil-works/pi-coding-agent (binary `pi`, requires Node >=22.19.0 which
 # setup_lts.x satisfies). Installed in one layer so npm bootstraps once.
-RUN npm install -g --allow-scripts=opencode-ai,@google/genai,protobufjs opencode-ai@latest @earendil-works/pi-coding-agent@latest
+# TOOLS_CACHE_BUST: `start-agent.sh --refresh-tools` passes a fresh value so
+# this layer and every later one rerun (pulling the current @latest), while
+# the apt, Node, uv and Claude Code layers above stay cached. A plain build
+# leaves it at 0, so the cached npm layer is reused.
+ARG TOOLS_CACHE_BUST=0
+RUN echo "tools cache bust: ${TOOLS_CACHE_BUST}" \
+ && npm install -g --allow-scripts=opencode-ai,@google/genai,protobufjs opencode-ai@latest @earendil-works/pi-coding-agent@latest
 
 # ── Office document toolchain ────────────────────────────────────────────────
 # LibreOffice headless components for format conversion (soffice --headless --convert-to).

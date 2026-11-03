@@ -80,3 +80,47 @@ def test_searxng_mcp_pinned_below_v2():
         "searxng MCP shim must pin 'mcp[cli]<2'; mcp 2.x renamed FastMCP and "
         "the shim fails on import"
     )
+
+
+# ── tools cache bust (--refresh-tools) ────────────────────────────────────────
+# start-agent.sh --refresh-tools passes a fresh TOOLS_CACHE_BUST so the npm
+# layer (and every later one) reruns while apt/Node/Claude Code/uv stay cached.
+
+def _npm_install_line_index(lines):
+    idx = [i for i, l in enumerate(lines)
+           if "npm install -g" in l and "opencode-ai@latest" in l]
+    assert len(idx) == 1, f"expected one opencode/pi npm install line, found {len(idx)}"
+    return idx[0]
+
+
+def test_tools_cache_bust_arg_declared_before_npm_install():
+    lines = _TEXT.splitlines()
+    npm = _npm_install_line_index(lines)
+    args = [i for i, l in enumerate(lines) if l.strip().startswith("ARG TOOLS_CACHE_BUST")]
+    assert len(args) == 1, "Dockerfile must declare exactly one ARG TOOLS_CACHE_BUST"
+    assert args[0] < npm, "ARG TOOLS_CACHE_BUST must come before the npm install line"
+    run = npm
+    while not lines[run].lstrip().startswith("RUN"):
+        run -= 1
+    between = [l for l in lines[args[0] + 1:run] if l.strip().startswith(("RUN", "COPY", "ADD"))]
+    assert not between, (
+        "no layer may sit between ARG TOOLS_CACHE_BUST and the npm install, "
+        f"or a refresh would rerun it too: {between}"
+    )
+
+
+def test_tools_cache_bust_referenced_by_npm_run():
+    lines = _TEXT.splitlines()
+    npm = _npm_install_line_index(lines)
+    run = npm
+    while not lines[run].lstrip().startswith("RUN"):
+        run -= 1
+    block = "\n".join(lines[run:npm + 1])
+    assert "TOOLS_CACHE_BUST" in block.split("ARG")[-1], (
+        "the npm install RUN must reference $TOOLS_CACHE_BUST so a new value reruns it"
+    )
+
+
+def test_tools_still_installed_at_latest():
+    # The user chose to keep @latest (plans/safe-tool-version-updates.md).
+    assert "opencode-ai@latest" in _TEXT and "@earendil-works/pi-coding-agent@latest" in _TEXT
