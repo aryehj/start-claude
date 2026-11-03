@@ -3308,7 +3308,11 @@ setup never has neither path. `$HOST_IP` is dropped from the container's
 catch-all line or fails `nginx -t` (run against the candidate on its own, before
 it is moved into place), leaving the old config and hash. The hash file is
 written only after nginx has loaded the config, so a failed push is retried on
-the next run. A push failure aborts the run. nginx's install status, active
+the next run. "Loaded" is checked by `ss` showing the listener on
+`$BRIDGE_IP:$INFERENCE_PORT`, not by `systemctl reload`'s exit status: a reload
+whose new listen address cannot bind exits 0 while nginx keeps the old config,
+and `nginx -t` never binds. If the listener is missing the push restarts nginx
+once, then fails. A push failure aborts the run. nginx's install status, active
 status and stored hash ride in the existing batch probe (ADR-045), and the push
 is gated on the hash and active status. The hash covers the key, so rotating the
 key triggers a push.
@@ -3408,8 +3412,9 @@ stance above, and the IPv4 rules are already applied by then.
   through tinyproxy.
 - The VM gains an nginx dependency. If a VM reboot starts nginx before `docker0`
   is up, it can fail to bind `$BRIDGE_IP`; the active-status gate re-pushes and
-  restarts on the next run. Package install and reboot behaviour are unverified
-  on a Mac host.
+  restarts on the next run. Package install and the firewall suite were verified
+  live on a Mac host (2026-11-02); VM-reboot recovery and allowlist hot-reload
+  were not run.
 - Upgraders must run `start-agent.sh --reset-container` to get the key out of an
   existing container.
 

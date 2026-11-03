@@ -1008,6 +1008,25 @@ else
   systemctl enable nginx >/dev/null 2>&1 || true
   systemctl restart nginx
 fi
+# reload exits 0 even when nginx keeps the old config (a new listen address that
+# cannot bind; nginx -t never binds), and the hash below would then stop every
+# later run from retrying. Confirm the listener; restart once; else fail.
+listening() {
+  n=0
+  while [ "\$n" -lt 10 ]; do
+    ss -ltn 2>/dev/null | awk '{print \$4}' | grep -qxF '$BRIDGE_IP:$INFERENCE_PORT' && return 0
+    n=\$((n + 1))
+    sleep 0.5
+  done
+  return 1
+}
+if ! listening; then
+  systemctl restart nginx || true
+  if ! listening; then
+    echo "error: the inference proxy is not listening on $BRIDGE_IP:$INFERENCE_PORT after a restart; see 'journalctl -u nginx' in the VM" >&2
+    exit 1
+  fi
+fi
 printf '%s\n' '$NEW_INFERENCE_PROXY_HASH' > /etc/nginx/claude-agent-inference.hash
 chmod 600 /etc/nginx/claude-agent-inference.hash
 PUSHEOF

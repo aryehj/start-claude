@@ -1428,7 +1428,8 @@ def _render_proxy_push(tmp_path, active="true", conf_text=None, path="/usr/bin:/
     r = subprocess.run(
         ["bash", "-c", f"set -eo pipefail\n{fn}\nwrite_inference_proxy_push"],
         env={"PATH": path, "TMP_WORK": str(tmp_path),
-             "NEW_INFERENCE_PROXY_HASH": "newhash", "NGINX_ACTIVE": active},
+             "NEW_INFERENCE_PROXY_HASH": "newhash", "NGINX_ACTIVE": active,
+             "BRIDGE_IP": "172.17.0.1", "INFERENCE_PORT": "8000"},
         capture_output=True, text=True,
     )
     out = tmp_path / "inference-proxy-push.sh"
@@ -1436,14 +1437,23 @@ def _render_proxy_push(tmp_path, active="true", conf_text=None, path="/usr/bin:/
 
 
 def _run_proxy_push(tmp_path, script, nginx_rc=0, real_nginx=False, expect_ok=True,
-                    restart_rc=0):
-    """Run the VM script against a fake /etc/nginx; return (systemctl calls, nginx calls)."""
+                    restart_rc=0, listen="always"):
+    """Run the VM script against a fake /etc/nginx; return (systemctl calls, nginx calls).
+
+    listen: when the stubbed `ss` shows the proxy's listener -- "always", "never",
+    or "after-restart" (only once systemctl has been asked to restart nginx).
+    """
     etc = tmp_path / "etc-nginx"
     (etc / "conf.d").mkdir(parents=True, exist_ok=True)
     (etc / "sites-enabled").mkdir(exist_ok=True)
     (etc / "sites-enabled" / "default").write_text("default site\n")
     sysl, ngl = tmp_path / "systemctl.log", tmp_path / "nginx.log"
     stub = f'systemctl() {{ echo "$*" >> "{sysl}"; return {restart_rc}; }}\n'
+    stub += "sleep() { :; }\n"
+    line = 'echo "LISTEN 0 511 172.17.0.1:8000 0.0.0.0:*"'
+    show = {"always": line, "never": ":",
+            "after-restart": f'grep -q "^restart" "{sysl}" 2>/dev/null && {line} || :'}[listen]
+    stub += f'ss() {{ echo "State Recv-Q Send-Q Local:Port Peer:Port"; {show}; }}\n'
     if real_nginx:
         stub += f'nginx() {{ "{_NGINX}" "$@"; }}\n'
     else:
@@ -1523,6 +1533,25 @@ def test_proxy_hash_not_advanced_when_load_fails(tmp_path):
     rc, err, script = _render_proxy_push(tmp_path, active="false")
     assert rc == 0, err
     _run_proxy_push(tmp_path, script, restart_rc=1, expect_ok=False)
+    assert (etc / "claude-agent-inference.hash").read_text() == "old\n"
+
+
+def test_proxy_push_restarts_when_reload_leaves_no_listener(tmp_path):
+    # reload exits 0 even when nginx keeps the old config, e.g. it cannot bind.
+    rc, err, script = _render_proxy_push(tmp_path)
+    assert rc == 0, err
+    calls, _ = _run_proxy_push(tmp_path, script, listen="after-restart")
+    assert calls == ["reload nginx", "restart nginx"], calls
+    assert (tmp_path / "etc-nginx" / "claude-agent-inference.hash").read_text() == "newhash\n"
+
+
+def test_proxy_hash_not_advanced_without_listener(tmp_path):
+    # Otherwise warm reattaches skip the push and the new address is never served.
+    etc = _seed_old_proxy_state(tmp_path)
+    rc, err, script = _render_proxy_push(tmp_path)
+    assert rc == 0, err
+    calls, _ = _run_proxy_push(tmp_path, script, listen="never", expect_ok=False)
+    assert calls == ["reload nginx", "restart nginx"], calls
     assert (etc / "claude-agent-inference.hash").read_text() == "old\n"
 
 
