@@ -3540,7 +3540,13 @@ reference (CLI 2.1.317) found three problems:
 - A broken `settings.json` no longer stops a launch.
 - These deny rules are defense in depth, not a boundary. The permissions docs
   say Bash rules are "not a security boundary", and quoting or other
-  rewrites can still get past them. Push is already mostly blocked at the
+  rewrites can still get past them. Commands the template's own allow list
+  approves can also run push or publish indirectly: `git rebase --exec 'git
+  push'` (`git rebase*`), `git config core.hooksPath` plus a hook written with
+  the Write tool, then `git commit` (`git config*`, `git commit*`), or a
+  package.json script run with `npm run` (`npm run*`). Listing more spellings
+  can't close these; only narrowing the allow list could, and the allow list
+  was deliberately left alone. Push is already mostly blocked at the
   network level, because `github.com` is absent from both egress allowlists
   (ADR-044, ADR-049).
 

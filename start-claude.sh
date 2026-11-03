@@ -15,6 +15,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # ── args ──────────────────────────────────────────────────────────────────────
 REBUILD=false
 RESEED_GLOBAL_CLAUDEMD=false
@@ -100,7 +102,7 @@ fi
 # ── inject project settings ───────────────────────────────────────────────────
 # settings.local.json is gitignored by Claude Code and project-specific.
 PROJECT_SETTINGS_FILE="$PROJECT_DIR/.claude/settings.local.json"
-ALLOWLIST_TEMPLATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/templates/sandbox-allowlist.txt"
+ALLOWLIST_TEMPLATE="$SCRIPT_DIR/templates/sandbox-allowlist.txt"
 mkdir -p "$PROJECT_DIR/.claude"
 python3 - "$PROJECT_SETTINGS_FILE" "$ALLOWLIST_TEMPLATE" "$RESEED_SANDBOX_ALLOWLIST" << 'PYEOF'
 import json, sys, os
@@ -215,7 +217,7 @@ PYEOF
 # container check so re-attach invocations also seed/reseed.
 mkdir -p "$CLAUDE_CONFIG_DIR"
 GLOBAL_CLAUDEMD_FILE="$CLAUDE_CONFIG_DIR/CLAUDE.md"
-GLOBAL_CLAUDEMD_TEMPLATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/templates/global-claude.md"
+GLOBAL_CLAUDEMD_TEMPLATE="$SCRIPT_DIR/templates/global-claude.md"
 if [[ -f "$GLOBAL_CLAUDEMD_TEMPLATE" ]]; then
   if $RESEED_GLOBAL_CLAUDEMD; then
     cp "$GLOBAL_CLAUDEMD_TEMPLATE" "$GLOBAL_CLAUDEMD_FILE"
@@ -391,8 +393,8 @@ mkdir -p "$CLAUDE_CONFIG_DIR"
 # Ensure global user settings are configured. The shared helper owns the
 # merge rules (forced / merged / seeded keys); a failure warns, not aborts.
 GLOBAL_SETTINGS_FILE="$CLAUDE_CONFIG_DIR/settings.json"
-GLOBAL_SETTINGS_TEMPLATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/templates/global-claude-settings.json"
-if ! python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/merge_global_settings.py" "$GLOBAL_SETTINGS_FILE" "$GLOBAL_SETTINGS_TEMPLATE"; then
+GLOBAL_SETTINGS_TEMPLATE="$SCRIPT_DIR/templates/global-claude-settings.json"
+if ! python3 "$SCRIPT_DIR/merge_global_settings.py" "$GLOBAL_SETTINGS_FILE" "$GLOBAL_SETTINGS_TEMPLATE"; then
   echo "WARNING: could not update $GLOBAL_SETTINGS_FILE (see error above); continuing with it as-is" >&2
 fi
 
