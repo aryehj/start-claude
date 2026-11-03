@@ -40,7 +40,7 @@ HELPER = REPO / "merge_global_settings.py"
 TEMPLATE = REPO / "templates" / "global-claude-settings.json"
 TEST_FILE = REPO / "tests" / "test_global_settings_helper.py"
 LOG = REPO / ".verify" / "probe-deny-rules.log"
-SHIMMED = ("git", "cargo", "uv", "docker", "npm", "yarn", "pnpm", "gh")
+SHIMMED = ("git", "cargo", "uv", "uvx", "twine", "python", "docker", "npm", "yarn", "pnpm", "gh")
 
 # Forms the matcher doesn't model: compound commands, wrappers, env prefixes,
 # and the accepted false positive from the plan (a -C commit mentioning push).

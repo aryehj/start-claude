@@ -3506,10 +3506,15 @@ reference (CLI 2.1.317) found three problems:
 
 4. **The deny list covers push and publish paths the allow list would
    otherwise open.**
-   - `git push*`, `git -C * push*`, `git -c * push*`
+   - `git push*`, `git -C * push*`, `git -c * push*`, `git --git-dir* push*`,
+     `git --work-tree* push*`
    - Git alias definitions: `git config *alias.*`, `git -C * config *alias.*`,
      `git -c *alias.*`
-   - `npm`, `yarn`, `pnpm`, `cargo` and `uv publish*`, plus `docker push*`
+   - `npm`, `yarn`, `pnpm`, `cargo` and `uv publish*`, plus `docker push*` and
+     `docker image push*`
+   - `*twine upload*`, because `Bash(uv*)` and `Bash(python*)` would otherwise
+     approve `uvx twine upload`, `uv run twine upload` and
+     `python -m twine upload`. The leading `*` catches every launcher.
    - `gh` write paths, in case `gh` is ever installed: `gh pr create*`,
      `gh pr merge*`, `gh release*`, `gh repo create*`, and `gh api*` (which can
      POST)
@@ -3519,8 +3524,10 @@ reference (CLI 2.1.317) found three problems:
    the rule's only wildcard. So `Bash(git -C * push *)` would not match a
    bare `git -C . push`. `Bash(git -C * push*)` does. A bare `git * push*` was
    rejected because it would block ordinary commits whose message mentions
-   push. The accepted trade-off is that `git -C dir commit -m "push fix"` is
-   denied, which shows up as a visible refusal, not a silent failure. The
+   push. The accepted trade-off is that `git -C dir commit -m "fix push"` is
+   denied (` push` follows a space), which shows up as a visible refusal, not
+   a silent failure. A broader `git --* push*` was rejected for the same
+   reason: it would refuse `git --no-pager log --grep " push"`. The
    allow list is unchanged, because deny takes precedence over allow.
 
 ### Consequences
