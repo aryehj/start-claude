@@ -2,7 +2,7 @@
 
 ## Status
 
-- [ ] Keep the inference proxy's omlx key when a later run lacks `OMLX_API_KEY` (Opus recommended)
+- [x] Keep the inference proxy's omlx key when a later run lacks `OMLX_API_KEY` (Opus recommended)
 - [ ] Take the omlx key off the argv in the startup reachability probe
 - [ ] Live check against omlx on the Mac (human gate: needs the macOS host, colima and a running omlx)
 

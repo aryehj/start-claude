@@ -3590,3 +3590,63 @@ template still seeds `dark-ansi`, so fresh files keep ADR-040's default.
   template. So `auto` now appears only when someone selects it.
 - The Ghostty misdetection ADR-040 describes is back for anyone who selects
   `auto`; `/theme` to `dark-ansi` undoes it.
+
+## ADR-053: `start-agent.sh` keeps the inference proxy's backend and omlx key across runs
+
+**Date:** 2026-11-03
+**Status:** Accepted (amends ADR-050)
+
+### Context
+
+ADR-050 moved the omlx key from the container into the in-VM nginx proxy, and
+`start-agent.sh` rebuilds that config on every run from the current shell's
+`BACKEND` and `OMLX_API_KEY`. Two kinds of run could therefore break a live
+omlx session that an earlier run set up:
+
+- **A run without `OMLX_API_KEY`** (another terminal, `--reload-allowlist`)
+  generated `proxy_set_header Authorization "";`. The config hash covers the
+  key, so the hash changed and the keyless config was pushed. Every omlx
+  request then got a 401. Before ADR-050 the key lived in the container's
+  create-time env and survived such runs.
+- **A run that named no backend** fell back to `ollama`, which moved the proxy
+  and the `CLAUDE_AGENT_IN` rule to port 11434 for every attached session.
+
+### Decision
+
+**The backend is sticky.** `--backend`, then `CLAUDE_AGENT_BACKEND`, then the
+backend the installed proxy serves, then `ollama`. Only an explicit choice
+switches the proxy. The installed backend is read from the proxy's `listen`
+port (8000 is omlx), which also works for configs written before this ADR. A
+named value is still validated before any VM work; the default is resolved
+right after the batch probe (`resolve_backend`).
+
+**A keyless omlx run keeps the proxy's key.** The batch probe (ADR-045)
+reports `NGINX_PORT` and `NGINX_HAS_KEY`, a yes/no from a `grep` for
+`Authorization "Bearer `; the key itself never leaves the VM. `keep_proxy_key`
+succeeds when the backend is omlx, this run has no key, and the installed omlx
+proxy holds one. It is handed `set` or `""`, never the key. Then the VM-side
+push script copies the installed `Authorization` line into the new config with
+`awk`, which reads it from the file, so the key is on no argv. Only that line
+is carried: the rest of the config still updates (a changed `$HOST_IP`, for
+example), and the catch-all check and `nginx -t` still run on the result.
+
+The stored hash is the hash of the config the host generated, keyless here. So
+the first keyless run after a keyed one pushes once (a reload, no dropped
+connections), and later keyless runs skip the push. A run with a key generates
+a different config, so rotation still pushes and replaces the key.
+
+### Consequences
+
+- Running `start-agent.sh` from any shell no longer breaks an omlx session. A
+  keyless run prints `keeping the key the inference proxy already holds`
+  instead of the missing-key warning.
+- Using omlx once makes it the default for later runs that name no backend.
+  `--backend=ollama` switches back, and the run prints which backend it kept.
+- An explicit switch drops the key: omlx to Ollama to omlx without
+  `OMLX_API_KEY` ends keyless, with the missing-key warning.
+- There is no way to remove a key by running without it. To stop sending one,
+  switch to `--backend=ollama` and back, or set a new key. Sending a stale key
+  to an omlx server that no longer checks one is harmless.
+- `check_omlx_key_safe` now runs whenever the backend is not named `ollama`,
+  since an unnamed backend may resolve to omlx. An unsafe `OMLX_API_KEY` in the
+  environment of an Ollama user who names no backend is therefore refused.
