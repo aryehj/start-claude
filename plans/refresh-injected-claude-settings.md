@@ -5,7 +5,7 @@
 - [x] Write failing tests for the shared settings helper (Opus recommended)
 - [x] Extract the global-settings merge into one shared helper and call it from both scripts
 - [x] Replace `coauthorTag` with `attribution`, and remove the stale key from existing files
-- [ ] Force `prefersReducedMotion: true`
+- [x] Force `prefersReducedMotion: true`
 - [ ] Widen the push/publish deny list and merge it into existing files on every run (Opus recommended)
 - [ ] Update the template, its tests, README, CLAUDE.md, and add an ADR (Haiku ok)
 
