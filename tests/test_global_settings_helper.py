@@ -81,9 +81,6 @@ HELPER = REPO / "merge_global_settings.py"
 TEMPLATE = REPO / "templates" / "global-claude-settings.json"
 SCRIPTS = [REPO / "start-claude.sh", REPO / "start-agent.sh"]
 
-PENDING_PHASE_4 = pytest.mark.skip(
-    reason="pending Phase 4 (force prefersReducedMotion); Phase 4 removes this marker"
-)
 PENDING_PHASE_5 = pytest.mark.skip(
     reason="pending Phase 5 (merge push/publish deny list); Phase 5 removes this marker"
 )
@@ -405,13 +402,11 @@ def test_missing_file_gets_attribution_and_no_coauthor_tag(helper, tmp_path):
 
 # ── Phase 4: reduced motion ──────────────────────────────────────────────────
 
-@PENDING_PHASE_4
 @pytest.mark.parametrize("initial", [{}, {"prefersReducedMotion": False}, {"prefersReducedMotion": "yes"}])
 def test_prefers_reduced_motion_forced_true(helper, template, initial):
     assert _merged(helper, initial, template)["prefersReducedMotion"] is True
 
 
-@PENDING_PHASE_4
 def test_missing_file_gets_reduced_motion(helper, tmp_path):
     settings = tmp_path / "settings.json"
     assert _run_cli(settings).returncode == 0

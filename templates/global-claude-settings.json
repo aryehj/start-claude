@@ -5,6 +5,7 @@
     "pr": ""
   },
   "theme": "dark-ansi",
+  "prefersReducedMotion": true,
   "permissions": {
     "allow": [
       "Read",

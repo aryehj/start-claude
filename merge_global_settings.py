@@ -32,6 +32,7 @@ import sys
 FORCED = {
     "showThinkingSummaries": True,
     "attribution": {"commit": "", "pr": ""},
+    "prefersReducedMotion": True,
 }
 
 # ── removed: deleted whenever present ────────────────────────────────────────

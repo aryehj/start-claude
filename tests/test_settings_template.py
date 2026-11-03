@@ -22,6 +22,7 @@ def test_required_top_level_keys():
     assert "coauthorTag" not in data
     assert data.get("attribution") == {"commit": "", "pr": ""}
     assert data.get("theme") == "dark-ansi"
+    assert data.get("prefersReducedMotion") is True
 
 
 def test_permissions_structure():
