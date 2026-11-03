@@ -2,7 +2,7 @@
 
 ## Status
 
-- [ ] Write failing tests for the shared settings helper (Opus recommended)
+- [x] Write failing tests for the shared settings helper (Opus recommended)
 - [ ] Extract the global-settings merge into one shared helper and call it from both scripts
 - [ ] Replace `coauthorTag` with `attribution`, and remove the stale key from existing files
 - [ ] Force `prefersReducedMotion: true`
@@ -63,6 +63,8 @@ Don't remove or narrow entries in the template's `allow` list. Deny takes preced
 - **Whether attribution actually changes.** After implementing, start a session with the new settings and check whether the system-reminder still tells Claude to add `Co-Authored-By`. Depends on: the attribution step.
 
 ## Notes
+
+**Helper interface.** `tests/test_global_settings_helper.py` pins it in its docstring: `merge_global_settings.py` at the repo root, stdlib-only and Python 3.9-compatible, CLI `python3 merge_global_settings.py SETTINGS_PATH TEMPLATE_PATH`, plus `apply_rules`, `merge_file`, and `main`. Tests for later phases carry `PENDING_PHASE_<N>` skip markers. The worker for phase N deletes that marker's definition and its uses.
 
 **Inventory of what the scripts inject today** (after this plan, `coauthorTag` → `attribution` and reduced motion is added):
 
