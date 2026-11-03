@@ -3650,3 +3650,14 @@ a different config, so rotation still pushes and replaces the key.
 - `check_omlx_key_safe` now runs whenever the backend is not named `ollama`,
   since an unnamed backend may resolve to omlx. An unsafe `OMLX_API_KEY` in the
   environment of an Ollama user who names no backend is therefore refused.
+
+### Addendum: the startup probe no longer sends the key
+
+The omlx reachability probe passed `-H "Authorization: Bearer $OMLX_API_KEY"`
+through `vm_ssh`, which puts the key on `curl`'s argv inside the VM, where `ps`
+shows it. The probe now sends no header and drops `curl -f`: any HTTP answer
+means omlx is reachable, and only no answer (`000`, exit 7) warns. A live check
+(2026-11-03) showed omlx answers an unauthenticated `GET /v1/models` with 401,
+so `-f` would have reported a healthy server as unreachable. The key now
+appears on no argv, host or VM. `tests/test_agent_sh.py` enforces it and
+`tests/verify-omlx-key-handling.sh` is the live check.

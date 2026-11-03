@@ -308,6 +308,7 @@ start-agent.sh --git-name "Jane" --git-email jane@example.com
 # With omlx instead of Ollama (the key stays on the host and in the VM proxy)
 export OMLX_API_KEY=your-secret-key
 start-agent.sh --backend=omlx
+# Later runs stay on omlx and keep the key, even from a shell without OMLX_API_KEY
 
 # Rebuild image + container (prompts before deleting the Colima VM)
 start-agent.sh --rebuild
@@ -818,10 +819,10 @@ uv run --with pytest pytest tests/
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CLAUDE_AGENT_BACKEND` | `ollama` | Inference backend: `ollama` or `omlx` (overridden by `--backend`) |
+| `CLAUDE_AGENT_BACKEND` | the backend the inference proxy already serves, else `ollama` | Inference backend: `ollama` or `omlx` (overridden by `--backend`). Only an explicit choice switches the proxy |
 | `CLAUDE_AGENT_MEMORY` | `8` | VM memory in GiB (overridden by `--memory`) |
 | `CLAUDE_AGENT_CPUS` | `6` | VM CPU count (overridden by `--cpus`) |
-| `OMLX_API_KEY` | *(unset)* | API key for omlx with `--backend=omlx`. Held by the in-VM inference proxy; not passed into the container |
+| `OMLX_API_KEY` | *(unset)* | API key for omlx with `--backend=omlx`. Held by the in-VM inference proxy; not passed into the container. A later run without it keeps the key the proxy already holds; a new value replaces it |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | *(unset)* | Forwarded into the container when set on the host (Pi cloud providers) |
 | `CLAUDE_AGENT_DISABLE_SEARCH` | *(unset)* | Set to `1` to disable SearXNG (also disables OpenCode websearch; overridden by `--disable-search`) |
 | `CLAUDE_AGENT_DEFAULT_MODEL` | *(unset)* | Default model for both OpenCode and Pi (env var only — no CLI flag). Written to `opencode.json` and `~/.pi/agent/settings.json` on each run |
