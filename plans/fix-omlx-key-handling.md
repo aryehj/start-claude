@@ -3,8 +3,8 @@
 ## Status
 
 - [x] Keep the inference proxy's omlx key when a later run lacks `OMLX_API_KEY` (Opus recommended)
-- [ ] Take the omlx key off the argv in the startup reachability probe
-- [ ] Live check against omlx on the Mac (human gate: needs the macOS host, colima and a running omlx)
+- [x] Take the omlx key off the argv in the startup reachability probe
+- [ ] Live check against omlx on the Mac (human gate: needs the macOS host, colima and a running omlx): `tests/verify-omlx-key-handling.sh`
 
 ## Context
 
@@ -36,21 +36,11 @@ A related case: running without `--backend=omlx` (the default is `ollama`, ~293)
 
 ## Unknowns / To Verify
 
-- Whether omlx answers an unauthenticated `GET /v1/models` with 401, or with something else, when a key is configured. This only matters for the drop-the-header option. The live check confirms it.
+- Whether omlx answers an unauthenticated `GET /v1/models` with 401, or with something else, when a key is configured. This only matters for the drop-the-header option. Phase 2 made this moot: the probe takes any HTTP answer as reachable. The live check records the code.
 
-## Manual verification for Phase 1 (run during the Phase 3 live check)
+## Live check (Phase 3)
 
-On the Mac, with omlx serving `gemma-4-e4b-it-6bit`. Phase 1 made the backend sticky and has a keyless run keep the proxy's key (ADR-053).
-
-1. `OMLX_API_KEY=<key> start-agent.sh --backend=omlx`, then in the container: `curl -s -o /dev/null -w '%{http_code}\n' http://$BRIDGE_IP:8000/v1/models`. Expect `200`.
-2. From a new terminal *without* `OMLX_API_KEY`: `start-agent.sh --reload-allowlist`. Expect these lines:
-   - `==> Inference backend: omlx (the one the inference proxy already serves; --backend switches it)`
-   - `==> OMLX_API_KEY not set; keeping the key the inference proxy already holds`
-
-   Re-run the curl from step 1 in the still-attached container. Expect `200`, not `401`.
-3. Check that the key survived in the VM: `colima ssh -p claude-agent -- sudo grep -c 'Authorization "Bearer ' /etc/nginx/conf.d/claude-agent-inference.conf`. Expect `1`.
-4. Run `start-agent.sh` with no backend flag: it should stay on omlx. Then `start-agent.sh --backend=ollama`: the proxy should move to port 11434.
-5. Phase 1's automated tests that need nginx were skipped in the container (no nginx binary). If nginx is available somewhere, run `NGINX_BIN=$(which nginx) uv run --with pytest pytest tests/test_agent_sh.py`.
+One script covers Phases 1 and 2: `tests/verify-omlx-key-handling.sh`, run on the Mac. Its header lists the checks. It needs no key. Its precondition is a container already started with `OMLX_API_KEY=<key> start-agent.sh --backend=omlx`. It writes its log to `.verify/verify-omlx-key-handling.log`. The script leaves two checks out: a backend switch to Ollama and back, which would drop the key from a live session, and key rotation. Unit tests in `tests/test_agent_sh.py` cover both.
 
 ## Notes
 
