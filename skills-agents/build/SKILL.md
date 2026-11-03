@@ -36,7 +36,11 @@ The user wants you to implement a plan previously written by `/scope`. The argum
 
 9. **Mark the phase done.** Change the active phase's `- [ ]` to `- [x]` in the plan file. Commit the update.
 
-10. **Final report.** Run the full test suite one last time. Report: what changed, the exact test command and result, and a **Manual verification** section for anything tests cannot cover — with concrete steps to check each item.
+10. **Test it yourself first.** Run every check you can yourself — the test suite, the CLI, the script, `curl` against a local service. Leave for the user only what you cannot run, and give a one-line reason for each.
+
+11. **Script the user's checks.** Put all remaining manual checks in one script inside the project directory (not `/tmp`). It prints PASS/FAIL per check and saves its output to a log file in the project. Give the user one short command to run it, and ask them to reply "done". Then read the log yourself instead of asking them to paste output.
+
+12. **Final report.** Run the full test suite one last time. Report: what changed, the exact test command and result, and, if manual checks remain, the one-line command to run the script.
 
 ## Rules
 

@@ -47,7 +47,7 @@ Omit this section if there are no unresolved unknowns.
 
 ### When to use phases
 
-Use a flat Status checklist (step-level checkboxes) by default. Add phases only when a later step genuinely depends on confirming an earlier result — because a key assumption might be wrong, or a human must judge output before continuing. Each phase label must name the uncertainty it resolves (e.g., "Validate omlx port compatibility"), not the activity ("Add constants"). If two phases always ship together, collapse them into one.
+Use a flat Status checklist (step-level checkboxes) by default. Add phases only when a later step genuinely depends on confirming an earlier result — because a key assumption might be wrong, or a human must judge output before continuing. A human-review phase is only for a judgment call or a check you cannot run yourself; say why in its label. Each phase label must name the uncertainty it resolves (e.g., "Validate omlx port compatibility"), not the activity ("Add constants"). If two phases always ship together, collapse them into one.
 
 ## Rules
 
