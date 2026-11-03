@@ -349,11 +349,8 @@ test_no_direct_host_path() {
 # private ranges. That needs an allowlisted name resolving to a private address.
 # tinyproxy resolves names in the VM and the allowlist is read-only in here, so
 # this container cannot set one up, and the default allowlist has no
-# wildcard-DNS name. From the macOS host instead, expecting "No route to host":
-#   colima ssh -p claude-agent -- sudo -u tinyproxy curl -v --noproxy '*' \
-#     --connect-timeout 5 http://$HOST_IP:$INFERENCE_PORT/
-# and again for an address in each range, then the same curl without `sudo -u
-# tinyproxy` as a control, which must not say "No route to host" for $HOST_IP.
+# wildcard-DNS name. Run tests/probe-tinyproxy-owner-rule.sh from the macOS host
+# instead.
 assert_tinyproxy_filters() {
   local url=$1 out rc connect
   out=$(env -u NO_PROXY -u no_proxy curl --noproxy '' -x "${HTTPS_PROXY:-}" -sS -i --max-time 10 "$url" 2>&1)
@@ -580,20 +577,28 @@ test_searxng_port_isolation() {
 # names must not resolve. It should fail fast (REJECT), not after a resolver
 # timeout; a slow failure means queries are not leaving from the container's
 # namespace.
+#
+# The kernel rate-limits the ICMP errors REJECT sends, per destination, and the
+# rejected connects earlier in this script drain that allowance. A lookup whose
+# error is suppressed waits out Docker's 4s resolver timeout, so one slow failure
+# proves nothing. Pause first, and pass on any fast failure in three attempts.
 test_external_dns_blackholed() {
-  local start end ms
-  start=$(date +%s%N)
-  if getent hosts example.com >/dev/null 2>&1; then
-    fail "external-dns-blackholed" "example.com resolved — DNS is a channel past the allowlist"
-    return
-  fi
-  end=$(date +%s%N)
-  ms=$(( (end - start) / 1000000 ))
-  if (( ms < 2000 )); then
-    pass "external-dns-blackholed: example.com did not resolve (${ms} ms)"
-  else
-    fail "external-dns-blackholed" "blocked, but took ${ms} ms (resolver timeout, not a REJECT)"
-  fi
+  local attempt start end ms
+  for attempt in 1 2 3; do
+    sleep 4
+    start=$(date +%s%N)
+    if getent hosts example.com >/dev/null 2>&1; then
+      fail "external-dns-blackholed" "example.com resolved — DNS is a channel past the allowlist"
+      return
+    fi
+    end=$(date +%s%N)
+    ms=$(( (end - start) / 1000000 ))
+    if (( ms < 2000 )); then
+      pass "external-dns-blackholed: example.com did not resolve (${ms} ms, attempt $attempt)"
+      return
+    fi
+  done
+  fail "external-dns-blackholed" "blocked, but took ${ms} ms on all 3 attempts (resolver timeout, not a REJECT)"
 }
 
 # ── 12. Container-name DNS ────────────────────────────────────────────────────

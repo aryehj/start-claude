@@ -9,7 +9,7 @@
 - [x] Warn on reattach when a container predates the proxy
 - [x] Update static tests and the in-container and cross-VM smoke tests
 - [x] Docs: ADR-050, README, CLAUDE.md, `templates/global-claude.md` (Haiku ok)
-- [ ] Live verification on a Mac host (see Unknowns)
+- [x] Live verification on a Mac host (see Live results; VM restart recovery and allowlist hot-reload were not run, by decision)
 
 ## Context
 
@@ -129,13 +129,22 @@ These can't be checked from inside the container.
 
 - **Server-side tool execution with MCP configured.** This server has no MCP servers (`/v1/mcp/servers` is empty, `/health` reports `mcp: null`), so this could not be tested live. At `HEAD`, the only caller of MCP tool execution is the `/v1/mcp/execute` route, so a model-emitted tool call should return to the client unexecuted. Re-test this if an MCP server is ever added to omlx.
 - **Package and boot behaviour on the Colima VM.** Needs a Mac host: confirm `nginx` installs from the VM's apt sources (the comments suggest Ubuntu 24.04), and that a VM reboot recovers. nginx can fail at boot if `docker0` isn't up yet when it binds `$BRIDGE_IP`; the active-status gate should re-push and restart on the next run, but verify this.
-- **IPv6 in the Colima VM.** Needs a Mac host: run `ip -6 route` in the VM and check whether tinyproxy can reach anything over IPv6. If it can, add matching `ip6tables` rules for tinyproxy (at least `fc00::/7` and `fe80::/10`, plus any global addresses of the host), since the iptables rules do not apply to IPv6.
+- **IPv6 in the Colima VM.** Live result (2026-11-02): no default route, but `col0` has a private prefix and the Mac has an address on it. The tinyproxy user timed out reaching that address on both inference ports, which does not show which side dropped the traffic. Decision: added `CLAUDE_AGENT_OUT6`, refusing tinyproxy all IPv6 but loopback. After `--reload-allowlist`, the user reported `tests/probe-vm-ipv6.sh` passing. The in-container firewall tests that show allowlisted hosts still work have not been rerun with a healthy backend since that reload.
 - **The implementation itself.** Run `tests/test-agent-firewall.sh` in a container recreated after the change, and check the nginx access log during a real OpenCode and Pi session, including one with tool calls and one with an image.
 
 ## Notes
 
 - Because the proxy filters by route, a new omlx release that adds an internal network feature to an allowed route would not be caught. Re-check the callers listed above when upgrading omlx.
 - Filtering request bodies (for example, rejecting `image_url` values that aren't data URIs) was rejected. It would need scripting in the proxy and would break streaming pass-through. Pin a verified omlx version instead.
+
+## Live results (2026-11-02, on `gemma-4-e4b-it-6bit`)
+
+- **Firewall suite:** 55 passed, 0 failed, 0 skipped, including vision with `INFERENCE_VISION_MODEL` set.
+- **Tool calls:** OpenCode and Pi each read a file holding a random token and returned it.
+- **nginx access log:** both clients called only `POST /v1/chat/completions`, every one 200.
+- **Images:** both clients dropped images, because the injectors listed models with no input types, so each client assumed text only. This predates the branch. Fixed by declaring every model image-capable, keeping any entry that declares its own; both clients then identified a test image.
+- **OpenCode upgrade:** accepting OpenCode's 2.0 prompt installed `@opencode/cli`, whose postinstall npm blocked, leaving no binary. Restored 1.19.3 in the container and forced `autoupdate: false`.
+- **Not yet run:** VM restart recovery and allowlist hot-reload.
 
 ## Live finding (2026-11-02): rebuilt containers lost all Internet access
 

@@ -725,8 +725,11 @@ _FW_ENV = {
 }
 
 
-def _run_firewall(tmp_path, output_jump_present=False, restore_rc=0):
-    """Run firewall-apply.sh for real, recording what reaches iptables-restore."""
+def _run_firewall(tmp_path, output_jump_present=False, restore_rc=0, restore6_rc=0):
+    """Run firewall-apply.sh for real, recording what reaches iptables-restore.
+
+    What reaches ip6tables-restore lands in tmp_path / "restore6.txt".
+    """
     body = _firewall_script().split("\n", 1)[1]
     rendered = subprocess.run(
         ["bash", "-c", f"cat <<FWEOF\n{body}\nFWEOF"],
@@ -744,6 +747,10 @@ def _run_firewall(tmp_path, output_jump_present=False, restore_rc=0):
 if [ "$1" = iptables-restore ]; then
   cat > '{restore_log}'
   exit {restore_rc}
+fi
+if [ "$1" = ip6tables-restore ]; then
+  cat > '{tmp_path / "restore6.txt"}'
+  exit {restore6_rc}
 fi
 echo "$*" >> '{calls_log}'
 case "$*" in
@@ -848,6 +855,57 @@ def test_firewall_apply_failure_is_fatal(tmp_path):
     assert proc.returncode != 0
     assert not [c for c in calls if "-j CLAUDE_AGENT" in c and "-I" in c], (
         "jumps installed after a failed restore"
+    )
+
+
+def test_opencode_update_checks_disabled():
+    # Accepting OpenCode's 2.0 upgrade prompt left no working binary: the new
+    # package's postinstall is not covered by npm's allow-scripts.
+    assert "data['autoupdate'] = False" in _SCRIPT_TEXT
+
+
+def _restore6(tmp_path, **kwargs):
+    proc, _, calls = _run_firewall(tmp_path, **kwargs)
+    return proc, (tmp_path / "restore6.txt").read_text().splitlines(), calls
+
+
+def test_firewall_refuses_tinyproxy_all_ipv6_but_loopback(tmp_path):
+    proc, restore6, _ = _restore6(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert ":CLAUDE_AGENT_OUT6 - [0:0]" in restore6
+    assert [l for l in restore6 if l.startswith("-A CLAUDE_AGENT_OUT6 ")] == [
+        "-A CLAUDE_AGENT_OUT6 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN",
+        "-A CLAUDE_AGENT_OUT6 -o lo -j RETURN",
+        "-A CLAUDE_AGENT_OUT6 -p tcp -m owner --uid-owner tinyproxy -j REJECT --reject-with icmp6-adm-prohibited",
+    ]
+
+
+def test_ipv6_block_active_in_its_own_commit(tmp_path):
+    _, restore6, calls = _restore6(tmp_path)
+    jump = "-I OUTPUT 1 -j CLAUDE_AGENT_OUT6"
+    assert restore6.count(jump) == 1
+    assert restore6.index(jump) < restore6.index("COMMIT")
+    assert not [c for c in calls if "ip6tables -I" in c], "OUTPUT jump added outside the commit"
+
+
+def test_ipv6_jump_not_duplicated_on_reapply(tmp_path):
+    _, restore6, _ = _restore6(tmp_path, output_jump_present=True)
+    assert ":CLAUDE_AGENT_OUT6 - [0:0]" in restore6
+    assert not [l for l in restore6 if "-I OUTPUT" in l]
+
+
+def test_ipv6_jump_checked_before_restore_starts():
+    # Same xtables lock race as test_output_jump_checked_before_restore_starts.
+    fw = _firewall_script()
+    assert -1 < fw.find("ip6tables -C OUTPUT") < fw.find("ip6tables-restore")
+
+
+def test_ipv6_failure_is_fatal_with_ipv4_rules_already_applied(tmp_path):
+    proc, restore, calls = _run_firewall(tmp_path, restore6_rc=1)
+    assert proc.returncode != 0
+    assert ":CLAUDE_AGENT_OUT - [0:0]" in restore
+    assert [c for c in calls if c.startswith("iptables -C INPUT") and "CLAUDE_AGENT_IN" in c], (
+        "IPv4 jumps must be handled before the IPv6 step can fail"
     )
 
 
@@ -1898,7 +1956,9 @@ def test_pi_scrubs_seeded_key(tmp_path, backend):
     assert _FAKE_KEY not in raw and "192.168.5.2" not in raw
     assert local["apiKey"] == _placeholder()
     assert local["baseUrl"] == url
-    assert local["models"] == [{"id": "m1"}], "existing models lost when discovery found none"
+    assert local["models"] == [{"id": "m1", "input": ["text", "image"]}], (
+        "existing models lost when discovery found none"
+    )
 
 
 @pytest.mark.parametrize("backend", ["omlx", "ollama"])
@@ -1936,8 +1996,32 @@ def test_unrelated_settings_survive(tmp_path):
     assert data["theme"] == "custom" and data["mcp"]["mine"] == {"type": "local"}
     assert data["permission"]["webfetch"] == "deny"
     omlx = data["provider"]["omlx"]
-    assert (omlx["name"], omlx["extra"], omlx["models"]) == ("mine", 1, {"m1": {"name": "m1"}})
+    assert (omlx["name"], omlx["extra"], omlx["models"]) == ("mine", 1, {"m1": {"name": "m1", **_OC_VISION}})
     assert models["providers"]["cloud"] == pi_cloud and models["note"] == "keep"
+
+
+# Models are assumed to take images: discovery can't tell, and without these
+# keys both clients drop images before the request.
+_OC_VISION = {"modalities": {"input": ["text", "image"], "output": ["text"]}, "attachment": True}
+
+
+def test_preserved_models_assumed_image_capable(tmp_path):
+    # Discovery fails here (nothing listens), so the existing entries are kept.
+    data, models, _, _ = _run_injectors(
+        tmp_path, opencode={"provider": {"omlx": _stale_entry()}},
+        pi={"providers": {"local": {"models": [{"id": "p1"}]}}})
+    assert data["provider"]["omlx"]["models"] == {"m1": {"name": "m1", **_OC_VISION}}
+    assert models["providers"]["local"]["models"] == [{"id": "p1", "input": ["text", "image"]}]
+
+
+def test_declared_text_only_model_kept(tmp_path):
+    text_only = {"name": "m1", "modalities": {"input": ["text"], "output": ["text"]}, "attachment": False}
+    entry = {**_stale_entry(), "models": {"m1": text_only}}
+    data, models, _, _ = _run_injectors(
+        tmp_path, opencode={"provider": {"omlx": entry}},
+        pi={"providers": {"local": {"models": [{"id": "p1", "input": ["text"]}]}}})
+    assert data["provider"]["omlx"]["models"]["m1"] == text_only
+    assert models["providers"]["local"]["models"] == [{"id": "p1", "input": ["text"]}]
 
 
 def test_copies_of_real_key_scrubbed_from_any_entry(tmp_path):
@@ -1985,8 +2069,8 @@ def test_discovery_uses_real_key_and_writes_only_the_placeholder(tmp_path):
         server.shutdown()
         server.server_close()
     assert seen and all(s == ("/v1/models", f"Bearer {_FAKE_KEY}") for s in seen)
-    assert list(data["provider"]["omlx"]["models"]) == ["disc-1"]
-    assert models["providers"]["local"]["models"] == [{"id": "disc-1"}]
+    assert data["provider"]["omlx"]["models"] == {"disc-1": {"name": "disc-1", **_OC_VISION}}
+    assert models["providers"]["local"]["models"] == [{"id": "disc-1", "input": ["text", "image"]}]
     assert _FAKE_KEY not in raw
     assert data["provider"]["omlx"]["options"]["baseURL"] == url
     assert models["providers"]["local"]["baseUrl"] == url

@@ -1118,6 +1118,25 @@ if [ -n "\$AGENT_NET_CIDR" ]; then
   sudo iptables -C INPUT -s "\$AGENT_NET_CIDR" -j CLAUDE_AGENT_IN 2>/dev/null \
     || sudo iptables -I INPUT 1 -s "\$AGENT_NET_CIDR" -j CLAUDE_AGENT_IN
 fi
+
+# IPv6: the chains above are IPv4 only, and the VM shares a private IPv6 prefix
+# with the Mac on col0. tinyproxy listens on IPv4 and tries a name's other
+# addresses when a connect fails, so it needs no IPv6 beyond loopback: refuse all
+# of it rather than list ranges, which would miss the Mac's global addresses. Last,
+# so a failure here aborts the run with the IPv4 rules already in place.
+OUTPUT6_JUMP_PRESENT=false
+sudo ip6tables -C OUTPUT -j CLAUDE_AGENT_OUT6 2>/dev/null && OUTPUT6_JUMP_PRESENT=true
+{
+  echo '*filter'
+  echo ':CLAUDE_AGENT_OUT6 - [0:0]'
+  echo "-A CLAUDE_AGENT_OUT6 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
+  echo "-A CLAUDE_AGENT_OUT6 -o lo -j RETURN"
+  echo "-A CLAUDE_AGENT_OUT6 -p tcp -m owner --uid-owner tinyproxy -j REJECT --reject-with icmp6-adm-prohibited"
+  if [ "\$OUTPUT6_JUMP_PRESENT" != "true" ]; then
+    echo "-I OUTPUT 1 -j CLAUDE_AGENT_OUT6"
+  fi
+  echo 'COMMIT'
+} | sudo ip6tables-restore --noflush
 FWEOF
 
 echo "==> Applying firewall rules in VM"
@@ -1375,6 +1394,15 @@ if provider_key:
     else:
         print(f"[opencode-config] no {backend} models discovered; preserving existing models dict ({len(entry.get('models', {}))} entries)", file=sys.stderr)
 
+    # Assume every model takes images. Most local models served here do, and
+    # discovery can't tell (/v1/models doesn't say). Without this OpenCode drops
+    # attachments before the request. An entry that declares its own is kept,
+    # which only matters when discovery failed and the old list was preserved.
+    for m in entry.get('models', {}).values():
+        if isinstance(m, dict):
+            m.setdefault('modalities', {"input": ["text", "image"], "output": ["text"]})
+            m.setdefault('attachment', True)
+
     def qualify(m):
         return m if '/' in m else f"{provider_key}/{m}"
 
@@ -1385,6 +1413,10 @@ if provider_key:
         data['model'] = qualify(default_model_override)
     elif discovered and (not data.get('model') or data['model'].split('/')[0] != provider_key):
         data['model'] = qualify(next(iter(discovered)))
+
+    # The image pins what gets installed. OpenCode's own major upgrade swaps in a
+    # package whose postinstall npm blocks, leaving no working binary.
+    data['autoupdate'] = False
 
     if small_model:
         data['small_model'] = qualify(small_model)
@@ -1534,6 +1566,13 @@ if discovered:
 else:
     print(f"[pi-config] no {backend} models discovered; preserving existing models list "
           f"({len(entry.get('models', []))} entries)", file=sys.stderr)
+
+# Assume every model takes images, as for OpenCode: without "input", Pi treats
+# a model as text-only and drops images. An entry that declares its own is kept
+# when discovery failed and the old list was preserved.
+for m in entry.get("models", []):
+    if isinstance(m, dict):
+        m.setdefault("input", ["text", "image"])
 
 if api_key:
     scrub_key_copies(models_data)

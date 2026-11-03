@@ -3339,9 +3339,27 @@ Known limits:
   service) stops working through tinyproxy.
 - A Mac with a public address is not covered, though that also needs a matching
   DNS name.
-- IPv6 is not covered. The script has no `ip6tables` rules, so none of the
-  `CLAUDE_AGENT*` chains apply to IPv6. Whether tinyproxy can reach anything
-  over IPv6 in the VM is unverified.
+- IPv6 is covered for tinyproxy only, by `CLAUDE_AGENT_OUT6` below. The other
+  `CLAUDE_AGENT*` chains stay IPv4 only: containers have IPv6 disabled on `eth0`
+  on their non-IPv6 Docker networks, so they have no IPv6 path to filter.
+
+### IPv6: `CLAUDE_AGENT_OUT6`
+
+The VM has no IPv6 default route, but `col0` carries a private prefix learned
+from a router advertisement, and the Mac has an address on it. A live probe from
+the tinyproxy user to that address timed out on both inference ports, and nothing
+was seen listening on them over IPv6. A timeout does not show which side dropped
+the traffic, so that protection may rest on macOS firewall settings, which the
+VM boundary cannot rely on. `start-agent.sh` therefore refuses tinyproxy's new
+TCP connections over IPv6, except on loopback, with `ip6tables-restore --noflush`
+as a separate commit at the end of the firewall script.
+
+It refuses everything rather than listing `fc00::/7` and `fe80::/10`, which
+would miss the Mac's global addresses. tinyproxy listens on IPv4, and tries a
+name's other addresses when a connect fails, so a dual-stack allowlisted host
+still works over IPv4. A failure aborts the run, in line with the fail-closed
+stance above, and the IPv4 rules are already applied by then.
+`tests/probe-vm-ipv6.sh` checks it from the macOS host.
 
 ### As implemented
 

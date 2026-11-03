@@ -429,7 +429,9 @@ tinyproxy and the inference proxy are open) and `CLAUDE_AGENT_OUT` (from
 `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` and
 `100.64.0.0/10`, so an allowlisted name cannot be used to reach the host's
 inference port or the LAN; an allowlisted host on a private address will not
-work through tinyproxy). The rules cover IPv4 only. The container has no
+work through tinyproxy). Those rules cover IPv4 only. For IPv6, a fourth chain,
+`CLAUDE_AGENT_OUT6`, refuses tinyproxy everything but loopback, and containers
+have IPv6 disabled on their network interface. The container has no
 `CAP_NET_ADMIN` and cannot touch the rules even if fully compromised. See
 `ADR.md` §ADR-010 for the threat model and §ADR-050 for the inference proxy.
 
@@ -527,6 +529,13 @@ any other method on these paths, returns 403:
 That excludes model pull/push, load/unload, omlx's web search, fetch and MCP
 routes, and its admin API: do those on the host. The proxy is configured for the
 active `--backend` only. See `ADR.md` §ADR-050.
+
+OpenCode and Pi treat every discovered model as able to take images, because
+`/v1/models` doesn't say which can, and most can. A text-only model gets the
+image anyway and fails or ignores it. To mark one as text-only, give its entry
+`"modalities": {"input": ["text"], "output": ["text"]}` in `opencode.json` or
+`"input": ["text"]` in Pi's `models.json`. That only lasts until model discovery
+next succeeds, because discovery rebuilds both model lists from scratch.
 
 ### Ollama (default)
 
