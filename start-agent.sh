@@ -83,7 +83,9 @@ OPTIONS:
                          template (default is seed-if-missing).
   --memory=VALUE         VM memory (e.g. 8, 8G, 8GB). Default: 8 GiB.
   --cpus=N               VM CPU count. Default: 6.
-  --backend=BACKEND      Local inference backend: ollama (default) or omlx.
+  --backend=BACKEND      Local inference backend: ollama or omlx. Default: the
+                         one the VM's inference proxy already serves, else
+                         ollama.
   --git-name=NAME        Git author/committer name inside the container.
   --git-email=EMAIL      Git author/committer email inside the container.
   --disable-search       Skip SearXNG container (also disables OpenCode
@@ -128,6 +130,7 @@ ENVIRONMENT:
   GIT_USER_EMAIL         Default git email (overridden by --git-email).
   OMLX_API_KEY           API key for omlx with --backend=omlx. Held by the
                          in-VM inference proxy; not passed into the container.
+                         A run without it keeps the key the proxy holds.
   ANTHROPIC_API_KEY      Forwarded into the container when set (Pi cloud
   OPENAI_API_KEY         providers).
   CLAUDE_SKILLS_ARCHIVE_URL  Tarball that skills are synced from on a fresh
@@ -290,21 +293,43 @@ fi
 GIT_USER_NAME="${CLI_GIT_NAME:-${GIT_USER_NAME:-Dev}}"
 GIT_USER_EMAIL="${CLI_GIT_EMAIL:-${GIT_USER_EMAIL:-dev@localhost}}"
 
-BACKEND="${CLI_BACKEND:-${CLAUDE_AGENT_BACKEND:-ollama}}"
-case "$BACKEND" in
-  ollama)
-    INFERENCE_PORT=11434
-    INFERENCE_LABEL="Ollama"
-    ;;
-  omlx)
-    INFERENCE_PORT=8000
-    INFERENCE_LABEL="omlx"
-    ;;
+# The backend is resolved after the VM probe (resolve_backend): a run that
+# names none keeps the one the inference proxy already serves. A named one is
+# validated here, before any VM work.
+REQUESTED_BACKEND="${CLI_BACKEND:-${CLAUDE_AGENT_BACKEND:-}}"
+case "$REQUESTED_BACKEND" in
+  ""|ollama|omlx) ;;
   *)
-    echo "error: unknown --backend value '$BACKEND'. Must be 'ollama' or 'omlx'." >&2
+    echo "error: unknown --backend value '$REQUESTED_BACKEND'. Must be 'ollama' or 'omlx'." >&2
     exit 1
     ;;
 esac
+
+# Echo the backend: the named one, else the one the installed inference proxy
+# serves (from its port), else ollama. Switching backends rewrites the proxy
+# and the firewall for every attached session, so only an explicit choice may.
+resolve_backend() {
+  local requested="$1" proxy_port="$2"
+  if [[ -n "$requested" ]]; then
+    echo "$requested"
+    return
+  fi
+  case "$proxy_port" in
+    8000) echo omlx ;;
+    *)    echo ollama ;;
+  esac
+}
+
+# Succeed when the proxy push must carry over the key the installed proxy
+# already sends: an omlx proxy staying omlx, on a run with no OMLX_API_KEY.
+# Otherwise a run from a shell without the key would strip it, and every omlx
+# request from a live session would get a 401. A run with a key still replaces
+# it. Takes "set" or "" for the key, never the key itself.
+keep_proxy_key() {
+  local backend="$1" key_set="$2" proxy_port="$3" proxy_has_key="$4"
+  [[ "$backend" == omlx && -z "$key_set" && "$proxy_port" == 8000 \
+     && "$proxy_has_key" == true ]]
+}
 
 # The key is written into a double-quoted nginx value. Refuse anything nginx
 # would interpret rather than trying to escape it. Never echoes the key.
@@ -317,12 +342,10 @@ check_omlx_key_safe() {
   esac
 }
 
-if [[ "$BACKEND" == "omlx" ]]; then
+# Unnamed may still resolve to omlx, so check then too.
+if [[ "$REQUESTED_BACKEND" != "ollama" ]]; then
   OMLX_API_KEY="${OMLX_API_KEY:-}"
   check_omlx_key_safe
-  if [[ -z "$OMLX_API_KEY" ]]; then
-    echo "warning: OMLX_API_KEY not set. omlx requests from the container will fail if the server requires auth." >&2
-  fi
 fi
 
 PLAN_MODEL="${CLI_PLAN_MODEL:-${CLAUDE_AGENT_PLAN_MODEL:-}}"
@@ -648,6 +671,17 @@ else
 fi
 ngx_hash=\$(sudo cat /etc/nginx/claude-agent-inference.hash 2>/dev/null || true)
 echo "NGINX_STORED_HASH=\$ngx_hash"
+
+# What the installed proxy serves: its port (so its backend), and whether it
+# sends an omlx key. Yes or no only; the key itself never leaves the VM.
+ngx_conf=/etc/nginx/conf.d/claude-agent-inference.conf
+ngx_port=\$(sudo sed -n 's/^  listen [^ ]*:\([0-9][0-9]*\) default_server;\$/\1/p' "\$ngx_conf" 2>/dev/null | head -n 1)
+echo "NGINX_PORT=\$ngx_port"
+if sudo grep -q '^  proxy_set_header Authorization "Bearer ' "\$ngx_conf" 2>/dev/null; then
+  echo "NGINX_HAS_KEY=true"
+else
+  echo "NGINX_HAS_KEY=false"
+fi
 PROBE_EOF
 
 if ! PROBE_OUTPUT=$(colima ssh -p "$COLIMA_PROFILE" -- sh < "$TMP_WORK/vm-probe.sh" 2>"$TMP_WORK/probe-stderr"); then
@@ -670,6 +704,37 @@ TINYPROXY_STORED_HASH=$(_probe_val TINYPROXY_STORED_HASH)
 NGINX_INSTALLED=$(    _probe_val NGINX_INSTALLED)
 NGINX_ACTIVE=$(       _probe_val NGINX_ACTIVE)
 NGINX_STORED_HASH=$(  _probe_val NGINX_STORED_HASH)
+NGINX_PORT=$(         _probe_val NGINX_PORT)
+NGINX_HAS_KEY=$(      _probe_val NGINX_HAS_KEY)
+
+# Resolved here, the first point that knows what the proxy serves, and before
+# anything below reads the backend, its port or its label.
+BACKEND=$(resolve_backend "$REQUESTED_BACKEND" "$NGINX_PORT")
+case "$BACKEND" in
+  ollama)
+    INFERENCE_PORT=11434
+    INFERENCE_LABEL="Ollama"
+    ;;
+  omlx)
+    INFERENCE_PORT=8000
+    INFERENCE_LABEL="omlx"
+    ;;
+esac
+if [[ -z "$REQUESTED_BACKEND" && -n "$NGINX_PORT" ]]; then
+  echo "==> Inference backend: $INFERENCE_LABEL (the one the inference proxy already serves; --backend switches it)"
+fi
+
+KEEP_PROXY_KEY=false
+if keep_proxy_key "$BACKEND" "${OMLX_API_KEY:+set}" "$NGINX_PORT" "$NGINX_HAS_KEY"; then
+  KEEP_PROXY_KEY=true
+fi
+if [[ "$BACKEND" == "omlx" && -z "${OMLX_API_KEY:-}" ]]; then
+  if $KEEP_PROXY_KEY; then
+    echo "==> OMLX_API_KEY not set; keeping the key the inference proxy already holds"
+  else
+    echo "warning: OMLX_API_KEY not set. omlx requests from the container will fail if the server requires auth." >&2
+  fi
+fi
 
 # Fallbacks — same behaviour as the former individual vm_ssh calls.
 if [[ -z "$BRIDGE_IP" ]]; then
@@ -983,6 +1048,15 @@ umask 077
 conf=/etc/nginx/conf.d/claude-agent-inference.conf
 check=/etc/nginx/claude-agent-inference.check.conf
 printf '%s' '$conf_b64' | base64 -d > "\$conf.new"
+# KEEP_PROXY_KEY: this run had no OMLX_API_KEY, so copy the installed config's
+# Authorization line into the new one. awk reads it from the file; the key is
+# never on an argv and never leaves the VM.
+if [ "$KEEP_PROXY_KEY" = "true" ] && [ -f "\$conf" ]; then
+  awk 'NR == FNR { if (index(\$0, "  proxy_set_header Authorization \"Bearer ") == 1) keep = \$0; next }
+       \$0 == "  proxy_set_header Authorization \"\";" && keep != "" { print keep; next }
+       { print }' "\$conf" "\$conf.new" > "\$conf.keep"
+  mv "\$conf.keep" "\$conf.new"
+fi
 if ! grep -qxF '  location / { return 403; }' "\$conf.new"; then
   rm -f "\$conf.new"
   echo "error: pushed inference proxy config lacks its catch-all; refusing it" >&2

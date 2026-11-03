@@ -1421,7 +1421,8 @@ def test_omlx_key_checked_before_vm_work():
     assert check < _SCRIPT_TEXT.find("vm-probe.sh"), "bad key must be refused before VM work"
 
 
-def _render_proxy_push(tmp_path, active="true", conf_text=None, path="/usr/bin:/bin"):
+def _render_proxy_push(tmp_path, active="true", conf_text=None, path="/usr/bin:/bin",
+                       keep="false"):
     conf = tmp_path / "inference-proxy.conf"
     conf.write_text(_generate_conf(tmp_path) if conf_text is None else conf_text)
     fn = "write_inference_proxy_push() " + _function_body("write_inference_proxy_push")
@@ -1429,6 +1430,7 @@ def _render_proxy_push(tmp_path, active="true", conf_text=None, path="/usr/bin:/
         ["bash", "-c", f"set -eo pipefail\n{fn}\nwrite_inference_proxy_push"],
         env={"PATH": path, "TMP_WORK": str(tmp_path),
              "NEW_INFERENCE_PROXY_HASH": "newhash", "NGINX_ACTIVE": active,
+             "KEEP_PROXY_KEY": keep,
              "BRIDGE_IP": "172.17.0.1", "INFERENCE_PORT": "8000"},
         capture_output=True, text=True,
     )
@@ -1461,6 +1463,7 @@ def _run_proxy_push(tmp_path, script, nginx_rc=0, real_nginx=False, expect_ok=Tr
     r = subprocess.run(["sh"], input=stub + script.replace("/etc/nginx/", f"{etc}/"),
                        text=True, capture_output=True)
     assert (r.returncode == 0) == expect_ok, r.stderr
+    (tmp_path / "push.out").write_text(r.stdout + r.stderr)
     read = lambda p: p.read_text().splitlines() if p.exists() else []
     return read(sysl), read(ngl)
 
@@ -1610,6 +1613,189 @@ def test_nginx_install_follows_probe():
                       _SCRIPT_TEXT, re.S)
     assert block, "nginx install is not gated on the probe"
     assert "--force-confnew nginx" in block.group(1).replace("\\\n", " ").replace("    ", "")
+
+
+# Keeping the omlx key and the backend across runs ---------------------------
+# A run from a shell without OMLX_API_KEY, or one that names no backend, must
+# not break a live omlx session by rewriting the proxy.
+
+def _run_fn(name, call):
+    fn = f"{name}() " + _function_body(name)
+    return subprocess.run(["bash", "-c", f"set -u\n{fn}\n{call}"],
+                          env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("requested,proxy_port,expected", [
+    ("omlx", "", "omlx"),
+    ("omlx", "11434", "omlx"),     # a named backend always wins
+    ("ollama", "8000", "ollama"),
+    ("", "8000", "omlx"),          # none named: keep what the proxy serves
+    ("", "11434", "ollama"),
+    ("", "", "ollama"),            # no proxy yet: the default
+    ("", "1234", "ollama"),
+])
+def test_backend_named_else_kept_from_proxy(requested, proxy_port, expected):
+    r = _run_fn("resolve_backend", f'resolve_backend "{requested}" "{proxy_port}"')
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == expected
+
+
+@pytest.mark.parametrize("backend,key_set,proxy_port,has_key,keep", [
+    ("omlx", "", "8000", "true", True),      # keyless run: keep the key
+    ("omlx", "set", "8000", "true", False),  # a key given: it replaces (rotation)
+    ("omlx", "", "8000", "false", False),    # nothing to keep
+    ("omlx", "", "11434", "false", False),   # switching from Ollama
+    ("omlx", "", "", "false", False),        # fresh VM
+    ("ollama", "", "8000", "true", False),   # explicit switch away from omlx
+])
+def test_keep_proxy_key_decision(backend, key_set, proxy_port, has_key, keep):
+    r = _run_fn("keep_proxy_key", f'keep_proxy_key {backend} "{key_set}" "{proxy_port}" {has_key}')
+    assert (r.returncode == 0) == keep, r.stderr
+
+
+def test_keep_proxy_key_never_handed_the_key():
+    calls = re.findall(r"keep_proxy_key [^\n]*", _SCRIPT_TEXT.split("keep_proxy_key() {", 1)[1])
+    assert calls, "keep_proxy_key is never called"
+    for call in calls:
+        assert "OMLX_API_KEY}" not in call.replace("${OMLX_API_KEY:+set}", "") and \
+            "$OMLX_API_KEY" not in call, call
+
+
+def _run_probe(tmp_path, conf_text):
+    start = _SCRIPT_TEXT.find('cat > "$TMP_WORK/vm-probe.sh" <<PROBE_EOF')
+    end = _SCRIPT_TEXT.find("\nPROBE_EOF\n", start) + len("\nPROBE_EOF\n")
+    r = subprocess.run(["bash", "-c", _SCRIPT_TEXT[start:end]],
+                       env={"PATH": "/usr/bin:/bin", "TMP_WORK": str(tmp_path),
+                            "AGENT_NET_NAME": "claude-agent-net"},
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    script = (tmp_path / "vm-probe.sh").read_text()
+    etc = tmp_path / "etc-nginx"
+    (etc / "conf.d").mkdir(parents=True)
+    if conf_text is not None:
+        (etc / "conf.d" / "claude-agent-inference.conf").write_text(conf_text)
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    for name, body in {"sudo": 'exec "$@"', "docker": "exit 1", "dpkg-query": "exit 1",
+                       "systemctl": "exit 1", "ip": "exit 0", "getent": "exit 1"}.items():
+        (stubs / name).write_text(f"#!/bin/sh\n{body}\n")
+        (stubs / name).chmod(0o755)
+    r = subprocess.run(["sh"], input=script.replace("/etc/nginx/", f"{etc}/"),
+                       env={"PATH": f"{stubs}:/usr/bin:/bin"}, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert _FAKE_KEY not in r.stdout + r.stderr, "the probe must never print the key"
+    return dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+
+
+@pytest.mark.parametrize("backend,key,port,has_key", [
+    ("omlx", _FAKE_KEY, "8000", "true"),
+    ("omlx", None, "8000", "false"),
+    ("ollama", None, "11434", "false"),
+    (None, None, "", "false"),               # no proxy installed yet
+])
+def test_probe_reports_proxy_backend_and_key_presence(tmp_path, backend, key, port, has_key):
+    conf = None
+    if backend:
+        conf = _generate_conf(tmp_path, backend=backend, key=key,
+                              port="8000" if backend == "omlx" else "11434")
+    facts = _run_probe(tmp_path, conf)
+    assert facts["NGINX_PORT"] == port
+    assert facts["NGINX_HAS_KEY"] == has_key
+
+
+def test_probe_fields_parsed():
+    for field in ("NGINX_PORT", "NGINX_HAS_KEY"):
+        assert re.search(rf"^{field}=\$\(\s*_probe_val {field}\)", _SCRIPT_TEXT, re.M), field
+
+
+def _with_key(conf: str) -> str:
+    return conf.replace('Authorization "";', f'Authorization "Bearer {_FAKE_KEY}";')
+
+
+def _install_old_conf(tmp_path, conf: str):
+    etc = tmp_path / "etc-nginx"
+    (etc / "conf.d").mkdir(parents=True)
+    (etc / "conf.d" / "claude-agent-inference.conf").write_text(conf)
+    return etc / "conf.d" / "claude-agent-inference.conf"
+
+
+def test_proxy_push_keeps_installed_key(tmp_path):
+    # The rest of the config still updates: here the upstream host moved.
+    installed = _install_old_conf(tmp_path, _generate_conf(tmp_path, host="192.168.5.9"))
+    new = _generate_conf(tmp_path, key=None)
+    rc, err, script = _render_proxy_push(tmp_path, conf_text=new, keep="true")
+    assert rc == 0, err
+    assert _FAKE_KEY not in script, "the key must never leave the VM"
+    calls, _ = _run_proxy_push(tmp_path, script)
+    assert installed.read_text() == _with_key(new)
+    assert installed.stat().st_mode & 0o777 == 0o600
+    assert calls == ["reload nginx"], calls
+    assert [p.name for p in installed.parent.iterdir()] == ["claude-agent-inference.conf"]
+    assert _FAKE_KEY not in (tmp_path / "push.out").read_text()
+
+
+def test_proxy_push_key_carry_stays_off_argv(tmp_path):
+    rc, err, script = _render_proxy_push(tmp_path, conf_text=_generate_conf(tmp_path, key=None),
+                                         keep="true")
+    assert rc == 0, err
+    carry = script[script.find("KEEP"):]
+    assert "Bearer" in carry, "carry-forward block not found"
+    # The key is read from the installed file by awk, never expanded into a command.
+    assert not re.search(r"\$\{?(key|auth|old_auth)\b", carry), carry
+
+
+def test_proxy_push_without_keep_replaces_key(tmp_path):
+    installed = _install_old_conf(tmp_path, _generate_conf(tmp_path))
+    new = _generate_conf(tmp_path, key=None)
+    rc, err, script = _render_proxy_push(tmp_path, conf_text=new, keep="false")
+    assert rc == 0, err
+    _run_proxy_push(tmp_path, script)
+    assert installed.read_text() == new
+
+
+def test_proxy_push_keep_with_no_installed_key_is_harmless(tmp_path):
+    installed = _install_old_conf(tmp_path, _generate_conf(tmp_path, key=None))
+    new = _generate_conf(tmp_path, key=None, host="192.168.5.9")
+    rc, err, script = _render_proxy_push(tmp_path, conf_text=new, keep="true")
+    assert rc == 0, err
+    _run_proxy_push(tmp_path, script)
+    assert installed.read_text() == new
+
+
+def test_backend_resolved_after_probe_before_use():
+    probe_parse = _SCRIPT_TEXT.find("NGINX_PORT=$(")
+    resolve = _SCRIPT_TEXT.find('BACKEND=$(resolve_backend "$REQUESTED_BACKEND" "$NGINX_PORT")')
+    assert -1 < probe_parse < resolve, "backend must be resolved from the probe's facts"
+    head = _SCRIPT_TEXT[:resolve]
+    body = head[head.find("# ── constants"):]
+    assert not re.search(r"\$\{?(BACKEND|INFERENCE_PORT|INFERENCE_LABEL)\b", body), (
+        "BACKEND or its port/label is used before it is resolved")
+    assert resolve < _SCRIPT_TEXT.find('echo "==> Probing $INFERENCE_LABEL')
+    assert resolve < _SCRIPT_TEXT.find('generate_inference_proxy_conf "$TMP_WORK/')
+
+
+def test_named_backend_still_validated_before_vm_work():
+    check = _SCRIPT_TEXT.find("unknown --backend value")
+    assert -1 < check < _SCRIPT_TEXT.find("vm-probe.sh")
+
+
+def test_keep_decision_feeds_the_push():
+    keep = _SCRIPT_TEXT.find("KEEP_PROXY_KEY=")
+    assert -1 < keep < _SCRIPT_TEXT.find("\n  write_inference_proxy_push || exit 1")
+    assert "KEEP_PROXY_KEY" in _function_body("write_inference_proxy_push")
+
+
+def test_missing_key_warning_knows_about_the_kept_key():
+    resolve = _SCRIPT_TEXT.find('BACKEND=$(resolve_backend')
+    warn = _SCRIPT_TEXT.find("OMLX_API_KEY not set")
+    assert -1 < resolve < warn, "the missing-key warning must follow the probe"
+    assert "keeping the key the inference proxy already holds" in _SCRIPT_TEXT
+
+
+def test_usage_documents_sticky_backend():
+    usage = _SCRIPT_TEXT[_SCRIPT_TEXT.find("--backend=BACKEND"):]
+    usage = usage[:usage.find("--git-name")]
+    assert "already serves" in usage, usage
 
 
 # Traffic through a real nginx ------------------------------------------------
