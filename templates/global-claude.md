@@ -69,7 +69,7 @@ Only these endpoints are available; every other route, and any other method, ret
 - Ollama: `POST /v1/chat/completions`, `GET /v1/models`, `GET /api/tags`
 - omlx: `POST /v1/chat/completions` (image analysis uses base64 images here), `GET /v1/models`, `POST /v1/messages`, `POST /v1/messages/count_tokens`
 
-Model management (pull, load, unload) is not available from here.
+Model management (pull, load, unload) is not available from here. Ollama's native API (`/api/chat`, `/api/generate`, `/api/show`, `/api/embed`) is blocked too, so the `ollama` CLI and the `ollama` Python/JS libraries fail with 403 even though they read `$OLLAMA_HOST`; use an OpenAI-compatible client against `$OLLAMA_HOST/v1` instead.
 
 ## Office Document Toolchain (claude-agent)
 
