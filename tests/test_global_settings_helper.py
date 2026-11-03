@@ -80,9 +80,6 @@ HELPER = REPO / "merge_global_settings.py"
 TEMPLATE = REPO / "templates" / "global-claude-settings.json"
 SCRIPTS = [REPO / "start-claude.sh", REPO / "start-agent.sh"]
 
-PENDING_PHASE_2 = pytest.mark.skip(
-    reason="pending Phase 2 (scripts call the shared helper); Phase 2 removes this marker"
-)
 PENDING_PHASE_3 = pytest.mark.skip(
     reason="pending Phase 3 (attribution replaces coauthorTag); Phase 3 removes this marker"
 )
@@ -346,7 +343,6 @@ def test_missing_template_fails_without_writing(helper, tmp_path):
 
 # ── Phase 2: both scripts call the helper ────────────────────────────────────
 
-@PENDING_PHASE_2
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
 def test_script_calls_helper_without_inline_merge(helper, script):
     text = script.read_text()

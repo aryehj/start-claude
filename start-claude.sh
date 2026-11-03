@@ -388,55 +388,12 @@ mkdir -p "$CLAUDE_CONFIG_DIR"
 # so it needs to survive --rebuild alongside ~/.claude/.credentials.json.
 [[ -f "$CLAUDE_JSON_FILE" ]] || echo '{}' > "$CLAUDE_JSON_FILE"
 
-# Ensure global user settings are configured.
+# Ensure global user settings are configured. The shared helper owns the
+# merge rules (forced / merged / seeded keys); a failure warns, not aborts.
 GLOBAL_SETTINGS_FILE="$CLAUDE_CONFIG_DIR/settings.json"
 GLOBAL_SETTINGS_TEMPLATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/templates/global-claude-settings.json"
-if [[ -f "$GLOBAL_SETTINGS_FILE" ]]; then
-  python3 - "$GLOBAL_SETTINGS_FILE" "$GLOBAL_SETTINGS_TEMPLATE" << 'PYEOF'
-import json, sys
-path = sys.argv[1]
-tmpl_path = sys.argv[2] if len(sys.argv) > 2 else None
-with open(path) as f:
-    data = json.load(f)
-changed = False
-if data.get('showThinkingSummaries') is not True:
-    data['showThinkingSummaries'] = True
-    changed = True
-    print(f"==> Enabled showThinkingSummaries in {path}")
-if data.get('coauthorTag') != 'none':
-    data['coauthorTag'] = 'none'
-    changed = True
-    print(f"==> Disabled coauthorTag in {path}")
-if 'effortLevel' in data:
-    del data['effortLevel']
-    changed = True
-    print(f"==> Removed effortLevel from {path}")
-if data.get('theme') in (None, 'auto'):
-    data['theme'] = 'dark-ansi'
-    changed = True
-    print(f"==> Set theme to dark-ansi in {path}")
-if 'permissions' not in data and tmpl_path:
-    import os
-    if os.path.exists(tmpl_path):
-        with open(tmpl_path) as tf:
-            tmpl = json.load(tf)
-        if 'permissions' in tmpl:
-            data['permissions'] = tmpl['permissions']
-            changed = True
-            print(f"==> Seeded permissions from template in {path}")
-if changed:
-    with open(path, 'w') as f:
-        json.dump(data, f, indent=2)
-        f.write('\n')
-PYEOF
-else
-  if [[ -f "$GLOBAL_SETTINGS_TEMPLATE" ]]; then
-    cp "$GLOBAL_SETTINGS_TEMPLATE" "$GLOBAL_SETTINGS_FILE"
-    echo "==> Created $GLOBAL_SETTINGS_FILE from template"
-  else
-    echo '{"showThinkingSummaries": true, "coauthorTag": "none"}' > "$GLOBAL_SETTINGS_FILE"
-    echo "==> Created $GLOBAL_SETTINGS_FILE with showThinkingSummaries, coauthorTag disabled"
-  fi
+if ! python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/merge_global_settings.py" "$GLOBAL_SETTINGS_FILE" "$GLOBAL_SETTINGS_TEMPLATE"; then
+  echo "WARNING: could not update $GLOBAL_SETTINGS_FILE (see error above); continuing with it as-is" >&2
 fi
 
 # ── sync skills from upstream repo ────────────────────────────────────────────
