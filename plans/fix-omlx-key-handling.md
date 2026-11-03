@@ -4,7 +4,7 @@
 
 - [x] Keep the inference proxy's omlx key when a later run lacks `OMLX_API_KEY` (Opus recommended)
 - [x] Take the omlx key off the argv in the startup reachability probe
-- [ ] Live check against omlx on the Mac (human gate: needs the macOS host, colima and a running omlx): `tests/verify-omlx-key-handling.sh`
+- [x] Live check against omlx on the Mac (human gate: needs the macOS host, colima and a running omlx): `tests/verify-omlx-key-handling.sh`
 
 ## Context
 
@@ -41,6 +41,8 @@ A related case: running without `--backend=omlx` (the default is `ollama`, ~293)
 ## Live check (Phase 3)
 
 One script covers Phases 1 and 2: `tests/verify-omlx-key-handling.sh`, run on the Mac. Its header lists the checks. It needs no key. Its precondition is a container already started with `OMLX_API_KEY=<key> start-agent.sh --backend=omlx`. It writes its log to `.verify/verify-omlx-key-handling.log`. The script leaves two checks out: a backend switch to Ollama and back, which would drop the key from a live session, and key rotation. Unit tests in `tests/test_agent_sh.py` cover both.
+
+Result, 2026-11-03: 11 passed, 0 failed. The nginx-backed unit tests were skipped because the Mac has no nginx. omlx answers a keyless `GET /v1/models` with 401.
 
 ## Notes
 
