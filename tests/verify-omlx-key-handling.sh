@@ -7,7 +7,8 @@
 # This script never needs the key itself. It checks:
 #   1. Precondition: the inference proxy serves omlx (port 8000) and holds a key.
 #   2. The container gets 200 from omlx through the proxy.
-#   3. A keyless `start-agent.sh --reload-allowlist` keeps omlx as the backend
+#   3. A keyless `start-agent.sh --reload-allowlist`, with no backend named
+#      (CLAUDE_AGENT_BACKEND unset too), keeps omlx as the backend
 #      and keeps the key (ADR-053), says so, and prints no key material.
 #   4. Afterwards the VM config still holds the key, and the container still
 #      gets 200 (not 401).
@@ -79,8 +80,11 @@ code=$(container_code)
 
 # ── 3. keyless --reload-allowlist ─────────────────────────────────────────────
 echo
-echo "==> start-agent.sh --reload-allowlist with OMLX_API_KEY unset"
-RELOAD_OUT=$(env -u OMLX_API_KEY "$START_AGENT" --reload-allowlist 2>&1); rc=$?
+# CLAUDE_AGENT_BACKEND counts as naming a backend, which would skip the
+# "already serves" fallback this checks, so unset it too.
+echo "INFO  CLAUDE_AGENT_BACKEND in this shell: ${CLAUDE_AGENT_BACKEND:-<unset>} (unset for the reload)"
+echo "==> start-agent.sh --reload-allowlist with OMLX_API_KEY and CLAUDE_AGENT_BACKEND unset"
+RELOAD_OUT=$(env -u OMLX_API_KEY -u CLAUDE_AGENT_BACKEND "$START_AGENT" --reload-allowlist 2>&1); rc=$?
 printf '%s\n' "$RELOAD_OUT" | sed 's/^/    | /'
 echo
 [[ $rc -eq 0 ]] && pass "reload exits 0" || fail "reload exits 0" "exit $rc"
