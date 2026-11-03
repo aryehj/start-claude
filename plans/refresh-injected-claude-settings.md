@@ -8,7 +8,7 @@
 - [x] Force `prefersReducedMotion: true`
 - [x] Widen the push/publish deny list and merge it into existing files on every run (Opus recommended)
   - Verified against the real CLI (2.1.100, 2.1.182, 2.1.317) with `tests/probe-deny-rules.py`, which needs no account: a mock Messages API on 127.0.0.1 plus PATH shims. Phase 6 should list it, and `.verify/`, in CLAUDE.md's layout.
-- [ ] Update the template, its tests, README, CLAUDE.md, and add an ADR (Haiku ok)
+- [x] Update the template, its tests, README, CLAUDE.md, and add an ADR (Haiku ok)
 
 ## Context
 
