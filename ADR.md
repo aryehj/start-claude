@@ -2455,7 +2455,7 @@ noisy prompts for routine dev-loop operations.
 ## ADR-040: Default `theme` to `dark-ansi`; promote `auto` on existing files
 
 **Date:** 2026-05-27
-**Status:** Accepted (partially supersedes ADR-003's supersession)
+**Status:** Partially superseded by ADR-052 (`auto` is no longer promoted; the unset default stays). Partially supersedes ADR-003's supersession.
 
 ### Context
 
@@ -3486,7 +3486,7 @@ reference (CLI 2.1.317) found three problems:
    |---|---|
    | forced (overwritten every run) | `showThinkingSummaries: true`, `attribution: {"commit": "", "pr": ""}`, `prefersReducedMotion: true` |
    | removed | `effortLevel` (ADR-017), `coauthorTag` |
-   | promoted (only from unset or `auto`) | `theme` → `dark-ansi` (ADR-040) |
+   | promoted (only from unset) | `theme` → `dark-ansi` (ADR-040; `auto` kept since ADR-052) |
    | seeded (only if absent) | the whole `permissions` block (ADR-039) |
    | merged (entries added if missing, never removed) | `permissions.deny` from the template |
 
@@ -3561,3 +3561,32 @@ reference (CLI 2.1.317) found three problems:
 - 2.0.62 skips the template's `permissions` block whatever this ADR decides:
   that version rejects the `Bash(x*)` form (`Bash(x:*)` loads). This
   predates this ADR and is left alone. 2.1.100 accepts both forms.
+
+## ADR-052: Keep an explicit `theme: "auto"`; promote only an unset theme
+
+**Date:** 2026-11-03
+**Status:** Accepted (partially supersedes ADR-040)
+
+### Context
+
+ADR-040 rewrote `theme: "auto"` to `dark-ansi` on every run, because OSC 11
+background detection misread Ghostty's mid-gray background. That rule treats
+`auto` as "unset", but `auto` is also what `/theme` writes when the user picks
+it on purpose. A user who chose `auto` saw it reverted to `dark-ansi` by the
+next `start-claude.sh --rebuild` (or any launch of either script), with no way
+to keep it short of editing the helper.
+
+### Decision
+
+`merge_global_settings.py` promotes `theme` to `dark-ansi` only when the key is
+missing or `null`. Any explicit value, `auto` included, is left alone. The
+template still seeds `dark-ansi`, so fresh files keep ADR-040's default.
+
+### Consequences
+
+- Choosing `auto` via `/theme` now survives relaunches and `--rebuild`.
+- Files that picked up `auto` as Claude Code's own default before ADR-040 ran
+  were already promoted to `dark-ansi`; new files get `dark-ansi` from the
+  template. So `auto` now appears only when someone selects it.
+- The Ghostty misdetection ADR-040 describes is back for anyone who selects
+  `auto`; `/theme` to `dark-ansi` undoes it.

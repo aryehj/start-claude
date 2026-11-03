@@ -41,9 +41,10 @@ FORCED = {
 REMOVED = ("effortLevel", "coauthorTag")
 
 # ── promoted: replaced only when unset or set to a listed value ──────────────
-# theme "auto" misreads Ghostty's background (ADR-040); explicit choices stay.
+# theme defaults to dark-ansi when unset (ADR-040); any explicit choice,
+# "auto" included, stays (ADR-052).
 PROMOTED = {
-    "theme": ((None, "auto"), "dark-ansi"),
+    "theme": ((None,), "dark-ansi"),
 }
 
 # ── merged: template list entries added when missing, never removed ─────────

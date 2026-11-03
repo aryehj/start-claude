@@ -48,8 +48,8 @@ removed; seeded = written only if absent):
   out because CLIs up to at least 2.1.100 skip a settings file that sets it)
 - forced   ``prefersReducedMotion: true``
 - removed  ``effortLevel`` and ``coauthorTag``
-- promoted ``theme`` from unset or ``"auto"`` to ``"dark-ansi"``; any other
-  value is kept
+- promoted ``theme`` from unset to ``"dark-ansi"``; any explicit value,
+  ``"auto"`` included, is kept
 - seeded   the template's whole ``permissions`` block, when ``permissions`` is
   absent
 - merged   the template's ``permissions.deny`` entries into an existing
@@ -170,12 +170,12 @@ def test_effort_level_removed(helper, template):
     assert "effortLevel" not in _merged(helper, {"effortLevel": "high"}, template)
 
 
-@pytest.mark.parametrize("initial", [{}, {"theme": None}, {"theme": "auto"}])
+@pytest.mark.parametrize("initial", [{}, {"theme": None}])
 def test_theme_promoted_to_dark_ansi(helper, template, initial):
     assert _merged(helper, initial, template)["theme"] == "dark-ansi"
 
 
-@pytest.mark.parametrize("theme", ["dark", "light", "dark-daltonized", "light-ansi"])
+@pytest.mark.parametrize("theme", ["auto", "dark", "light", "dark-daltonized", "light-ansi"])
 def test_explicit_theme_preserved(helper, template, theme):
     assert _merged(helper, {"theme": theme}, template)["theme"] == theme
 

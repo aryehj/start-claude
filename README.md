@@ -121,8 +121,7 @@ On every run, the shared helper `merge_global_settings.py` updates the file
   `permissions.deny` if missing. Your own allow, ask, and deny entries are left
   alone.
 - **Seeded** only when absent: the whole `permissions` block. `theme` is set to
-  `dark-ansi` when unset or `auto` (OSC 11 background detection misreads
-  Ghostty); any other choice is kept.
+  `dark-ansi` when unset; any explicit choice, `auto` included, is kept.
 
 If the helper fails (for example, the file is not valid JSON), the script warns
 and launches with the file as-is. Your customizations survive `--rebuild`.
