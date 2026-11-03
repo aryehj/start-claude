@@ -803,10 +803,11 @@ WARN
       PROBE_PID=$!
       ;;
     omlx)
-      OMLX_CURL_ARGS=(-sf --max-time 3)
-      [[ -n "${OMLX_API_KEY:-}" ]] && OMLX_CURL_ARGS+=(-H "Authorization: Bearer $OMLX_API_KEY")
+      # No Authorization header: vm_ssh would put the key on curl's argv in the
+      # VM, where ps shows it. This only checks reachability, so no -f: any
+      # HTTP answer, 401 included, means omlx is up; only no answer fails.
       {
-        if ! probe_retry vm_ssh curl "${OMLX_CURL_ARGS[@]}" "http://$HOST_IP:$INFERENCE_PORT/v1/models"; then
+        if ! probe_retry vm_ssh curl -s -o /dev/null --max-time 3 "http://$HOST_IP:$INFERENCE_PORT/v1/models"; then
           cat <<WARN
 warning: omlx not reachable at http://$HOST_IP:$INFERENCE_PORT from inside the
 Colima VM. Ensure omlx is running on the host with:

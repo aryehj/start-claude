@@ -2417,3 +2417,55 @@ def test_reattach_calls_proxy_check_before_attaching():
     # Warn only: never auto-remove (ADR-048) on this path.
     warn_to_attach = block[block.find("warn_if_container_predates_proxy"):block.find("attach_existing\n")]
     assert "docker rm" not in warn_to_attach and "read -" not in warn_to_attach
+
+
+# ── omlx key never on a VM argv (plans/fix-omlx-key-handling.md, phase 2) ────
+
+def _logical_lines(text: str) -> list[str]:
+    """Join backslash-continued lines so a multi-line command is one string."""
+    out, cur = [], ""
+    for line in text.splitlines():
+        if line.rstrip().endswith("\\"):
+            cur += line.rstrip()[:-1] + " "
+            continue
+        out.append(cur + line)
+        cur = ""
+    if cur:
+        out.append(cur)
+    return out
+
+
+def test_omlx_key_not_on_vm_ssh_argv():
+    # vm_ssh %q-joins its args into a script that runs in the VM, so anything
+    # passed to it ends up on an argv there, where `ps` shows it.
+    offenders = [
+        line.strip()
+        for line in _logical_lines(_SCRIPT_TEXT)
+        if re.search(r"\b(vm_ssh|vm_sh|colima\s+ssh)\b", line)
+        and not line.strip().startswith("#")
+        and re.search(r"OMLX_API_KEY|OMLX_CURL_ARGS", line)
+    ]
+    assert not offenders, (
+        "OMLX_API_KEY (directly or via OMLX_CURL_ARGS) reaches a VM command line:\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_omlx_probe_sends_no_auth_header():
+    assert "Authorization: Bearer $OMLX_API_KEY" not in _SCRIPT_TEXT, (
+        "the omlx reachability probe must not send the key; it only checks reachability"
+    )
+
+
+def test_omlx_probe_counts_any_http_response_as_reachable():
+    # Without the key, omlx may answer 401. That still proves it is reachable,
+    # so the probe must not use curl -f (which fails on 4xx).
+    m = re.search(r"probe_retry vm_ssh curl ([^\n]*?/v1/models)", _SCRIPT_TEXT)
+    assert m, "omlx probe (probe_retry vm_ssh curl … /v1/models) not found"
+    flags = m.group(1)
+    assert "$" not in flags.split('"http')[0], (
+        f"omlx probe flags must be literal so this check can see them: {flags}"
+    )
+    assert not re.search(r"(?:^|\s)-[a-zA-Z]*f", flags), (
+        f"omlx probe uses curl -f, so a 401 would read as unreachable: {flags}"
+    )
