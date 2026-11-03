@@ -15,6 +15,7 @@
 # Usage:
 #   start-agent.sh --init-sandbox PATH
 #   start-agent.sh [--rebuild] [--reset-container] [--reload-allowlist]
+#                  [--refresh-tools] [--restore-previous-image]
 #                  [--backend=ollama|omlx]
 #                  [--disable-search]
 #                  [--memory=VALUE] [--cpus=N]
@@ -29,6 +30,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ── args ──────────────────────────────────────────────────────────────────────
 REBUILD=false
 RESET_CONTAINER=false
+REFRESH_TOOLS=false
+RESTORE_PREVIOUS=false
 RELOAD_ALLOWLIST=false
 RESEED_ALLOWLIST=false
 RESEED_GLOBAL_CLAUDEMD=false
@@ -69,6 +72,19 @@ OPTIONS:
                          but keep the image and VM. Cheaper than --rebuild
                          when you only need to reset container state.
                          Mutually exclusive with --rebuild.
+  --refresh-tools        Pull the current OpenCode and Pi (@latest) into the
+                         image: tag it as claude-agent:previous, rebuild from
+                         the npm layer onward (OS packages, Node, uv and
+                         Claude Code stay cached), and recreate the
+                         containers like --reset-container. Prints the old
+                         and new versions. --rebuild alone may reuse the
+                         cached npm layer.
+  --restore-previous-image  Point claude-agent:latest back at the image saved
+                         by the last --refresh-tools and recreate the
+                         containers. --refresh-tools and
+                         --restore-previous-image cannot be combined with
+                         each other, --rebuild, --reset-container or the
+                         allowlist flags.
   --reload-allowlist     Regenerate tinyproxy's filter file from the sandbox's
                          allowlist.txt and reload tinyproxy. Fast path; does
                          not restart the container.
@@ -147,6 +163,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --rebuild)           REBUILD=true ;;
     --reset-container)   RESET_CONTAINER=true ;;
+    --refresh-tools)     REFRESH_TOOLS=true ;;
+    --restore-previous-image) RESTORE_PREVIOUS=true ;;
     --reload-allowlist)  RELOAD_ALLOWLIST=true ;;
     --reseed-allowlist)  RESEED_ALLOWLIST=true; RELOAD_ALLOWLIST=true ;;
     --reseed-global-claudemd) RESEED_GLOBAL_CLAUDEMD=true ;;
@@ -189,6 +207,23 @@ if $RELOAD_ALLOWLIST && ($REBUILD || $RESET_CONTAINER); then
   echo "error: --reload-allowlist / --reseed-allowlist cannot be combined with --rebuild or --reset-container." >&2
   echo "  Run them separately. Every normal run already pushes allowlist edits to tinyproxy." >&2
   exit 1
+fi
+if $REFRESH_TOOLS && $RESTORE_PREVIOUS; then
+  echo "error: --refresh-tools and --restore-previous-image are mutually exclusive." >&2
+  exit 1
+fi
+if $REFRESH_TOOLS || $RESTORE_PREVIOUS; then
+  image_flag="--refresh-tools"; $RESTORE_PREVIOUS && image_flag="--restore-previous-image"
+  other_flag=""
+  if $REBUILD; then other_flag="--rebuild"
+  elif $RESET_CONTAINER; then other_flag="--reset-container"
+  elif $RELOAD_ALLOWLIST; then other_flag="--reload-allowlist / --reseed-allowlist"
+  fi
+  if [[ -n "$other_flag" ]]; then
+    echo "error: $image_flag and $other_flag are mutually exclusive." >&2
+    echo "  $image_flag already recreates the containers; it keeps the VM and the allowlist as they are." >&2
+    exit 1
+  fi
 fi
 
 # ── sandbox helpers ───────────────────────────────────────────────────────────
@@ -362,6 +397,9 @@ fi
 COLIMA_PROFILE="claude-agent"
 CONTAINER_NAME="claude-agent"
 IMAGE_TAG="claude-agent:latest"
+# --refresh-tools keeps the image it replaces here; --restore-previous-image
+# moves latest back to it. One generation only.
+PREVIOUS_IMAGE_TAG="claude-agent:previous"
 DOCKERFILE_PATH="$SCRIPT_DIR/dockerfiles/claude-agent.Dockerfile"
 DOCKERFILE_DIR="$(dirname "$DOCKERFILE_PATH")"
 CLAUDE_CONFIG_DIR="$SANDBOX_ROOT/.sandbox_config/claude"
@@ -369,6 +407,9 @@ CLAUDE_JSON_FILE="$SANDBOX_ROOT/.sandbox_config/claude.json"
 OPENCODE_CONFIG_DIR="$SANDBOX_ROOT/.sandbox_config/opencode/config"
 OPENCODE_DATA_DIR="$SANDBOX_ROOT/.sandbox_config/opencode/data"
 PI_CONFIG_DIR="$SANDBOX_ROOT/.sandbox_config/pi"
+# OpenCode/Pi versions in the current image, keyed by image ID. The Dockerfile
+# says @latest, so the build is the only place the real versions are known.
+TOOL_VERSIONS_FILE="$SANDBOX_ROOT/.sandbox_config/tool-versions"
 AGENTS_SKILLS_DIR="$SANDBOX_ROOT/.sandbox_config/agents/skills"
 ALLOWLIST_FILE="$SANDBOX_ROOT/.sandbox_config/allowlist.txt"
 # Shared with start-claude.sh, which turns it into sandbox.network.allowedDomains.
@@ -1243,18 +1284,83 @@ if $RELOAD_ALLOWLIST; then
   exit 0  # on_exit removes TMP_WORK (no inference probe on this path)
 fi
 
-# ── build the image if missing ───────────────────────────────────────────────
-if ! docker image inspect "$IMAGE_TAG" &>/dev/null; then
-  echo "==> Building $IMAGE_TAG from $DOCKERFILE_PATH"
-  # Build uses --network=host so RUN steps share the VM's network namespace
-  # and bypass the DOCKER-USER bridge firewall. Without this, apt/curl/npm
-  # would hit "no route to host" because the default-deny rule rejects
-  # everything from the bridge CIDR except the tinyproxy allowlist path, and
-  # legacy-builder build ARGs don't reliably forward HTTP_PROXY to every tool
-  # (apt, for one, only consults lowercase http_proxy). Runtime containers
-  # still attach to the bridge and are firewalled normally.
-  docker build --network=host \
+# ── image lifecycle: build if missing, --refresh-tools, --restore-previous-image ──
+# Build uses --network=host so RUN steps share the VM's network namespace
+# and bypass the DOCKER-USER bridge firewall. Without this, apt/curl/npm
+# would hit "no route to host" because the default-deny rule rejects
+# everything from the bridge CIDR except the tinyproxy allowlist path, and
+# legacy-builder build ARGs don't reliably forward HTTP_PROXY to every tool
+# (apt, for one, only consults lowercase http_proxy). Runtime containers
+# still attach to the bridge and are firewalled normally.
+build_image() {
+  docker build --network=host "$@" \
     -t "$IMAGE_TAG" -f "$DOCKERFILE_PATH" "$DOCKERFILE_DIR"
+}
+
+# Write the image's OpenCode/Pi versions to $TOOL_VERSIONS_FILE, keyed by
+# image ID. A no-op when the file already describes the current image, so it
+# starts a throwaway container (no network) once per image, never on a warm
+# reattach. Never fails the launch: on any error it warns and keeps the old file.
+record_tool_versions() {
+  local image_id out
+  image_id=$(docker image inspect -f '{{.Id}}' "$IMAGE_TAG" 2>/dev/null) || return 0
+  [[ -n "$image_id" ]] || return 0
+  if [[ -f "$TOOL_VERSIONS_FILE" ]] && grep -qxF "image_id=$image_id" "$TOOL_VERSIONS_FILE"; then
+    return 0
+  fi
+  out=$(docker run --rm --network none --entrypoint /bin/sh "$IMAGE_TAG" -c \
+    'printf "opencode=%s\npi=%s\n" "$(timeout 30 opencode --version 2>/dev/null | head -n 1)" "$(timeout 30 pi --version 2>/dev/null | head -n 1)"' \
+    2>/dev/null) || out=""
+  if ! grep -q '^opencode=.' <<<"$out" || ! grep -q '^pi=.' <<<"$out"; then
+    echo "warning: could not read the OpenCode/Pi versions in $IMAGE_TAG; launch-time version checks will skip them." >&2
+    return 0
+  fi
+  { echo "image_id=$image_id"; printf '%s\n' "$out"; echo "recorded=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; } \
+    > "$TOOL_VERSIONS_FILE.tmp" && mv "$TOOL_VERSIONS_FILE.tmp" "$TOOL_VERSIONS_FILE"
+  return 0
+}
+
+# Always returns 0: under pipefail, a missing file would otherwise abort the
+# assignment it sits in.
+tool_version() { sed -n "s/^$1=//p" "$TOOL_VERSIONS_FILE" 2>/dev/null | head -n 1 || true; }
+
+# $1: label; $2, $3: the opencode and pi versions read before the image moved.
+print_tool_versions_change() {
+  echo "==> $1: opencode ${2:-?} → $(tool_version opencode), pi ${3:-?} → $(tool_version pi)"
+}
+
+if $REFRESH_TOOLS; then
+  old_opencode=""; old_pi=""
+  if docker image inspect "$IMAGE_TAG" &>/dev/null; then
+    record_tool_versions
+    old_opencode=$(tool_version opencode); old_pi=$(tool_version pi)
+    docker tag "$IMAGE_TAG" "$PREVIOUS_IMAGE_TAG"
+    echo "==> --refresh-tools: saved the current image as $PREVIOUS_IMAGE_TAG (undo with --restore-previous-image)"
+  fi
+  echo "==> --refresh-tools: rebuilding $IMAGE_TAG from the OpenCode/Pi npm layer onward"
+  # A fresh value reruns the npm RUN and every later layer; the layers above
+  # the ARG stay cached. A failed build exits here (set -e), leaving latest
+  # and the containers as they were.
+  build_image --build-arg TOOLS_CACHE_BUST="$(date +%s)"
+  remove_containers "--refresh-tools"
+  record_tool_versions
+  print_tool_versions_change "--refresh-tools" "$old_opencode" "$old_pi"
+elif $RESTORE_PREVIOUS; then
+  if ! docker image inspect "$PREVIOUS_IMAGE_TAG" &>/dev/null; then
+    echo "error: there is no $PREVIOUS_IMAGE_TAG image to restore; --refresh-tools saves one." >&2
+    exit 1
+  fi
+  record_tool_versions
+  old_opencode=$(tool_version opencode); old_pi=$(tool_version pi)
+  remove_containers "--restore-previous-image"
+  docker tag "$PREVIOUS_IMAGE_TAG" "$IMAGE_TAG"
+  echo "==> --restore-previous-image: $IMAGE_TAG now points at $PREVIOUS_IMAGE_TAG"
+  record_tool_versions
+  print_tool_versions_change "--restore-previous-image" "$old_opencode" "$old_pi"
+elif ! docker image inspect "$IMAGE_TAG" &>/dev/null; then
+  echo "==> Building $IMAGE_TAG from $DOCKERFILE_PATH"
+  build_image
+  record_tool_versions
 fi
 
 # ── SearXNG container lifecycle ──────────────────────────────────────────────
@@ -1263,6 +1369,13 @@ fi
 # policy: dockerd would start it at VM boot, before the firewall exists.
 if $LOCAL_SEARCH_ENABLED; then
   echo "==> Starting SearXNG container"
+  # A container from another pin (a bump or its git revert) is replaced, so
+  # changing SEARXNG_IMAGE takes effect on the next launch of any kind.
+  searxng_running_image=$(docker container inspect -f '{{.Config.Image}}' "$SEARXNG_CONTAINER" 2>/dev/null || true)
+  if [[ -n "$searxng_running_image" && "$searxng_running_image" != "$SEARXNG_IMAGE" ]]; then
+    echo "    searxng: pinned image changed; recreating the container"
+    docker rm -f "$SEARXNG_CONTAINER" >/dev/null 2>&1 || true
+  fi
   if docker container inspect "$SEARXNG_CONTAINER" &>/dev/null; then
     searxng_err=""
     if searxng_err=$(docker start "$SEARXNG_CONTAINER" 2>&1 >/dev/null) \
@@ -1896,6 +2009,9 @@ fi
 # Fresh container: sync skills first.
 sync_skills
 seed_agent_skills
+# Images built before the version record existed get one here (a no-op when
+# the record already matches the image).
+record_tool_versions
 
 wait_inference_probe
 

@@ -130,7 +130,7 @@ def test_sandbox_root_variable_present():
 def test_allowlist_mounted_ro():
     # The agent's docker run block must mount the allowlist read-only so the
     # container cannot rewrite which URLs are permitted.
-    agent_block = next((b for b in _BLOCKS if "IMAGE_TAG" in b), None)
+    agent_block = next((b for b in _BLOCKS if '--name "$CONTAINER_NAME"' in b), None)
     assert agent_block is not None, "claude-agent docker run block not found"
     assert ":ro" in agent_block, (
         "allowlist not mounted :ro in claude-agent docker run block"
@@ -222,7 +222,7 @@ def test_pi_config_injection_uses_correct_settings_keys():
 
 
 def test_pi_mounted_in_docker_run():
-    agent_block = next((b for b in _BLOCKS if "IMAGE_TAG" in b), None)
+    agent_block = next((b for b in _BLOCKS if '--name "$CONTAINER_NAME"' in b), None)
     assert agent_block is not None, "claude-agent docker run block not found"
     assert "/root/.pi" in agent_block, (
         "PI_CONFIG_DIR not mounted at /root/.pi in docker run block"
@@ -306,7 +306,7 @@ def test_agents_skills_dir_created_every_invocation():
 
 
 def test_agents_skills_mounted_in_docker_run():
-    agent_block = next((b for b in _BLOCKS if "IMAGE_TAG" in b), None)
+    agent_block = next((b for b in _BLOCKS if '--name "$CONTAINER_NAME"' in b), None)
     assert agent_block is not None, "claude-agent docker run block not found"
     assert "/root/.agents/skills" in agent_block, (
         "AGENTS_SKILLS_DIR not mounted at /root/.agents/skills in docker run block"
@@ -913,7 +913,7 @@ def test_agent_container_dns_blackholed():
     assert re.search(r'^DNS_BLACKHOLE="192\.0\.2\.1"', _SCRIPT_TEXT, re.MULTILINE), (
         "DNS_BLACKHOLE must be the RFC 5737 TEST-NET-1 address"
     )
-    agent_block = next((b for b in _BLOCKS if "IMAGE_TAG" in b), None)
+    agent_block = next((b for b in _BLOCKS if '--name "$CONTAINER_NAME"' in b), None)
     assert agent_block is not None, "claude-agent docker run block not found"
     assert '--dns "$DNS_BLACKHOLE"' in agent_block, (
         "agent container must use the blackhole resolver so external names do not resolve"
@@ -982,7 +982,7 @@ def _searxng_lifecycle() -> str:
 def test_agent_container_always_on_agent_net():
     # One topology whatever the search flag says: toggling --disable-search
     # against an existing container must not leave it on the wrong network.
-    agent_block = next((b for b in _BLOCKS if "IMAGE_TAG" in b), None)
+    agent_block = next((b for b in _BLOCKS if '--name "$CONTAINER_NAME"' in b), None)
     assert agent_block is not None, "claude-agent docker run block not found"
     assert '--network "$AGENT_NET_NAME"' in agent_block, (
         "agent container must always join claude-agent-net"
@@ -1299,7 +1299,7 @@ def test_single_colima_list_call():
 
 def test_agent_run_has_no_resource_limits():
     # Both equalled the whole VM (and the requested, not the running, size).
-    agent_block = next(b for b in _BLOCKS if "IMAGE_TAG" in b)
+    agent_block = next(b for b in _BLOCKS if '--name "$CONTAINER_NAME"' in b)
     assert "--memory" not in agent_block
     assert "--cpus" not in agent_block
 
