@@ -81,10 +81,6 @@ HELPER = REPO / "merge_global_settings.py"
 TEMPLATE = REPO / "templates" / "global-claude-settings.json"
 SCRIPTS = [REPO / "start-claude.sh", REPO / "start-agent.sh"]
 
-PENDING_PHASE_5 = pytest.mark.skip(
-    reason="pending Phase 5 (merge push/publish deny list); Phase 5 removes this marker"
-)
-
 EXPECTED_ATTRIBUTION_STRINGS = {"commit": "", "pr": ""}
 
 
@@ -416,9 +412,12 @@ def test_missing_file_gets_reduced_motion(helper, tmp_path):
 # ── Phase 5: push/publish deny list merged on every run ──────────────────────
 #
 # These tests pin behavior, not rule strings: Phase 5 picks the exact rules.
-# _rule_matches approximates Claude Code's Bash rule matching. "*" matches any
-# run of characters, a trailing " *" also matches nothing, and the legacy
-# ":*" suffix is a prefix match.
+# _rule_matches follows the documented Bash rule matching for one command
+# (https://code.claude.com/docs/en/permissions.md, "Wildcard patterns"): "*"
+# matches any text, spaces included; a trailing " *" also matches the bare
+# command, but only when it is the rule's only wildcard; and a trailing ":*" is
+# the same as a trailing " *". Compound-command splitting and wrapper stripping
+# happen before matching and are not modeled here.
 
 def _rule_matches(rule: str, command: str) -> bool:
     m = re.fullmatch(r"Bash\((.*)\)", rule)
@@ -426,8 +425,8 @@ def _rule_matches(rule: str, command: str) -> bool:
         return False
     pattern = m.group(1)
     if pattern.endswith(":*"):
-        pattern = pattern[:-2] + "*"
-    optional_tail = pattern.endswith(" *")
+        pattern = pattern[:-2] + " *"
+    optional_tail = pattern.endswith(" *") and pattern.count("*") == 1
     if optional_tail:
         pattern = pattern[:-2]
     regex = ".*".join(re.escape(part) for part in pattern.split("*"))
@@ -438,6 +437,35 @@ def _rule_matches(rule: str, command: str) -> bool:
 
 def _denied(deny: list, command: str) -> bool:
     return any(_rule_matches(rule, command) for rule in deny)
+
+
+# Rows from the docs' wildcard table, plus the ":*" equivalence they state.
+DOCUMENTED_MATCHES = [
+    ("Bash(npm run build)", "npm run build", True),
+    ("Bash(npm run build)", "npm run build --watch", False),
+    ("Bash(npm run *)", "npm run test --watch", True),
+    ("Bash(npm run *)", "npm run", True),
+    ("Bash(npm run *)", "npm install", False),
+    ("Bash(git log * main)", "git log --oneline main", True),
+    ("Bash(git log * main)", "git log main", False),
+    ("Bash(git * main)", "git -c core.fsmonitor=x diff main", True),
+    ("Bash(git * main)", "git log", False),
+    ("Bash(* --version)", "bash -c 'echo hi' --version", True),
+    ("Bash(* --version)", "node -v", False),
+    ("Bash(ls *)", "ls", True),
+    ("Bash(ls *)", "lsof", False),
+    ("Bash(ls*)", "lsof", True),
+    ("Bash(* --help *)", "npm --help x", True),
+    ("Bash(* --help *)", "npm --help", False),
+    ("Bash(ls:*)", "ls", True),
+    ("Bash(ls:*)", "lsof", False),
+    ("Bash(git push *)", "git -C . push origin main", False),
+]
+
+
+@pytest.mark.parametrize("rule,command,expected", DOCUMENTED_MATCHES)
+def test_rule_matcher_follows_documented_semantics(rule, command, expected):
+    assert _rule_matches(rule, command) is expected
 
 
 DENIED_COMMANDS = [
@@ -476,7 +504,6 @@ ALLOWED_COMMANDS = [
 ]
 
 
-@PENDING_PHASE_5
 @pytest.mark.parametrize("command", DENIED_COMMANDS)
 def test_template_deny_covers_push_and_publish(template, command):
     assert _denied(template["permissions"]["deny"], command), (
@@ -484,14 +511,12 @@ def test_template_deny_covers_push_and_publish(template, command):
     )
 
 
-@PENDING_PHASE_5
 @pytest.mark.parametrize("command", ALLOWED_COMMANDS)
 def test_template_deny_spares_ordinary_commands(template, command):
     hits = [r for r in template["permissions"]["deny"] if _rule_matches(r, command)]
     assert not hits, f"{command!r} should not be denied, matched by {hits}"
 
 
-@PENDING_PHASE_5
 def test_template_deny_entries_merged_into_existing_deny(helper, template):
     user = _user_permissions()
     deny = _merged(helper, {"permissions": user}, template)["permissions"]["deny"]
@@ -501,14 +526,12 @@ def test_template_deny_entries_merged_into_existing_deny(helper, template):
     assert len(deny) == len(set(deny)), f"deny list has duplicates: {deny}"
 
 
-@PENDING_PHASE_5
 def test_deny_created_when_permissions_lacks_it(helper, template):
     perms = _merged(helper, {"permissions": {"allow": ["Read"]}}, template)["permissions"]
     assert perms["allow"] == ["Read"]
     assert set(template["permissions"]["deny"]) <= set(perms.get("deny", []))
 
 
-@PENDING_PHASE_5
 def test_deny_merge_is_idempotent(helper, template):
     data = {"permissions": _user_permissions()}
     assert helper.apply_rules(data, template), "merging new deny entries must be reported"
@@ -517,7 +540,6 @@ def test_deny_merge_is_idempotent(helper, template):
     assert data == once
 
 
-@PENDING_PHASE_5
 @pytest.mark.parametrize("command", DENIED_COMMANDS)
 def test_merged_user_file_blocks_push_and_publish(helper, template, command):
     deny = _merged(helper, {"permissions": {"allow": ["Bash(git*)"], "deny": []}}, template)["permissions"]["deny"]

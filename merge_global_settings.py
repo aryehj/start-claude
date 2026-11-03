@@ -46,6 +46,11 @@ PROMOTED = {
     "theme": ((None, "auto"), "dark-ansi"),
 }
 
+# ── merged: template list entries added when missing, never removed ─────────
+# Files whose permissions predate a template deny rule still pick it up. The
+# user's own entries keep their order; allow and ask are never touched.
+MERGED_FROM_TEMPLATE = (("permissions", "deny"),)
+
 # ── seeded: copied from the template only when absent ────────────────────────
 SEEDED_FROM_TEMPLATE = ("permissions",)
 
@@ -78,8 +83,25 @@ def _apply_promoted(data):
 
 
 def _apply_merged(data, template):
-    # No merged keys yet; the push/publish deny-list union lands here.
-    return []
+    messages = []
+    for parent_key, list_key in MERGED_FROM_TEMPLATE:
+        template_parent = template.get(parent_key)
+        parent = data.get(parent_key)
+        if not isinstance(template_parent, dict) or not isinstance(parent, dict):
+            continue
+        current = parent.get(list_key, [])
+        if not isinstance(current, list):
+            continue  # malformed; leave it for the user rather than clobber it
+        merged = list(current)
+        for entry in template_parent.get(list_key, []):
+            if entry not in merged:
+                merged.append(copy.deepcopy(entry))
+        added = len(merged) - len(current)
+        if added:
+            parent[list_key] = merged
+            messages.append("Added {} template entr{} to {}.{}".format(
+                added, "y" if added == 1 else "ies", parent_key, list_key))
+    return messages
 
 
 def _apply_seeded(data, template):

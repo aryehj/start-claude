@@ -103,9 +103,22 @@
     ],
     "deny": [
       "Bash(git push*)",
+      "Bash(git -C * push*)",
+      "Bash(git -c * push*)",
+      "Bash(git config *alias.*)",
+      "Bash(git -C * config *alias.*)",
+      "Bash(git -c *alias.*)",
       "Bash(npm publish*)",
       "Bash(yarn publish*)",
-      "Bash(pnpm publish*)"
+      "Bash(pnpm publish*)",
+      "Bash(cargo publish*)",
+      "Bash(uv publish*)",
+      "Bash(docker push*)",
+      "Bash(gh pr create*)",
+      "Bash(gh pr merge*)",
+      "Bash(gh release*)",
+      "Bash(gh repo create*)",
+      "Bash(gh api*)"
     ]
   }
 }
