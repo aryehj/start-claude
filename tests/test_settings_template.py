@@ -19,7 +19,8 @@ def test_template_is_valid_json():
 def test_required_top_level_keys():
     data = _load()
     assert data.get("showThinkingSummaries") is True
-    assert data.get("coauthorTag") == "none"
+    assert "coauthorTag" not in data
+    assert data.get("attribution") == {"commit": "", "pr": ""}
     assert data.get("theme") == "dark-ansi"
 
 

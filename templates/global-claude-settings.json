@@ -1,6 +1,9 @@
 {
   "showThinkingSummaries": true,
-  "coauthorTag": "none",
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
   "theme": "dark-ansi",
   "permissions": {
     "allow": [

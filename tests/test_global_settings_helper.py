@@ -49,8 +49,9 @@ removed; seeded = written only if absent):
   value is kept
 - seeded   the template's whole ``permissions`` block, when ``permissions`` is
   absent
-- forced   ``attribution: {"commit": "", "pr": "", "sessionUrl": false}``, and
-  ``coauthorTag`` removed (Phase 3)
+- forced   ``attribution: {"commit": "", "pr": ""}``, and ``coauthorTag``
+  removed (Phase 3; ``sessionUrl`` dropped because CLIs up to at least 2.1.100
+  skip a settings file that sets it)
 - forced   ``prefersReducedMotion: true`` (Phase 4)
 - merged   the template's ``permissions.deny`` entries into an existing
   ``permissions.deny``, in a union that leaves the user's allow, ask and deny
@@ -80,9 +81,6 @@ HELPER = REPO / "merge_global_settings.py"
 TEMPLATE = REPO / "templates" / "global-claude-settings.json"
 SCRIPTS = [REPO / "start-claude.sh", REPO / "start-agent.sh"]
 
-PENDING_PHASE_3 = pytest.mark.skip(
-    reason="pending Phase 3 (attribution replaces coauthorTag); Phase 3 removes this marker"
-)
 PENDING_PHASE_4 = pytest.mark.skip(
     reason="pending Phase 4 (force prefersReducedMotion); Phase 4 removes this marker"
 )
@@ -381,7 +379,6 @@ def _assert_attribution_off(data: dict) -> None:
     assert attribution.get("sessionUrl", False) is False
 
 
-@PENDING_PHASE_3
 @pytest.mark.parametrize("initial", [
     {},
     {"attribution": False},
@@ -393,13 +390,11 @@ def test_attribution_forced_off(helper, template, initial):
     _assert_attribution_off(_merged(helper, initial, template))
 
 
-@PENDING_PHASE_3
 @pytest.mark.parametrize("value", ["none", "Claude", ""])
 def test_coauthor_tag_removed(helper, template, value):
     assert "coauthorTag" not in _merged(helper, {"coauthorTag": value}, template)
 
 
-@PENDING_PHASE_3
 def test_missing_file_gets_attribution_and_no_coauthor_tag(helper, tmp_path):
     settings = tmp_path / "settings.json"
     assert _run_cli(settings).returncode == 0

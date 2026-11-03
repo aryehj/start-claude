@@ -25,14 +25,19 @@ import os
 import sys
 
 # ── forced: overwritten every run ────────────────────────────────────────────
+# attribution uses the object form, not false: CLIs before 2.1.281 skip a
+# settings file holding false, and ~/.claude is shared across cached images.
+# sessionUrl is left out for the same reason (2.1.100 and earlier skip a file
+# that sets it); it only affects web and Remote Control sessions.
 FORCED = {
     "showThinkingSummaries": True,
-    "coauthorTag": "none",
+    "attribution": {"commit": "", "pr": ""},
 }
 
 # ── removed: deleted whenever present ────────────────────────────────────────
-# effortLevel is kept unpinned on purpose (ADR-017).
-REMOVED = ("effortLevel",)
+# effortLevel is kept unpinned on purpose (ADR-017). coauthorTag was never a
+# Claude Code setting; attribution replaced it.
+REMOVED = ("effortLevel", "coauthorTag")
 
 # ── promoted: replaced only when unset or set to a listed value ──────────────
 # theme "auto" misreads Ghostty's background (ADR-040); explicit choices stay.
