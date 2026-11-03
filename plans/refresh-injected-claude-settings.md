@@ -4,7 +4,7 @@
 
 - [x] Write failing tests for the shared settings helper (Opus recommended)
 - [x] Extract the global-settings merge into one shared helper and call it from both scripts
-- [ ] Replace `coauthorTag` with `attribution`, and remove the stale key from existing files
+- [x] Replace `coauthorTag` with `attribution`, and remove the stale key from existing files
 - [ ] Force `prefersReducedMotion: true`
 - [ ] Widen the push/publish deny list and merge it into existing files on every run (Opus recommended)
 - [ ] Update the template, its tests, README, CLAUDE.md, and add an ADR (Haiku ok)
@@ -60,6 +60,7 @@ Don't remove or narrow entries in the template's `allow` list. Deny takes preced
 ## Unknowns / To Verify
 
 - **Which CLI versions read the shared `~/.claude`.** The empty-string `attribution` form is chosen to be safe for older versions. Before relying on `sessionUrl`, verify that an older CLI doesn't reject it: run `claude --version` in a container started from a cached image and look for a settings-file error at startup. If it does reject it, drop `sessionUrl`, which only affects cloud and Remote Control sessions. Depends on: the attribution step.
+  - **Resolved (Phase 3):** older CLIs do reject it. With `CLAUDE_CONFIG_DIR` set to a scratch dir, and an `apiKeyHelper` marker showing whether the file loaded, 2.0.62 and 2.1.100 skip a settings file containing `attribution.sessionUrl`, but load `{"commit": "", "pr": ""}`. 2.1.182 and 2.1.317 accept both. The changelog dates `attribution` to 2.0.62 and `sessionUrl` to 2.1.183. `sessionUrl` was dropped. Separately, 2.0.62 also skips the template's `permissions` block, at HEAD as well: that version rejects the `Bash(x*)` rule form (`Bash(x:*)` loads), and 2.1.100 accepts both forms. This predates this plan and is left alone.
 - **Whether attribution actually changes.** After implementing, start a session with the new settings and check whether the system-reminder still tells Claude to add `Co-Authored-By`. Depends on: the attribution step.
 
 ## Notes
