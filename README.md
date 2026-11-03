@@ -110,11 +110,22 @@ common dev-loop operations (file reads/edits, git status/add/commit, build and
 test commands, standard shell utilities) and explicitly denies remote-affecting
 ops (`git push`, `npm publish`, etc.).
 
-On subsequent runs, the script merges `showThinkingSummaries`, `coauthorTag`,
-`theme`, and `permissions` non-destructively into the existing file — any key
-already present is left unchanged (except `theme: "auto"`, which is promoted to
-`dark-ansi` to avoid OSC 11 background-detection misreads). Your customizations
-survive `--rebuild`.
+On every run, the shared helper `merge_global_settings.py` updates the file
+(ADR-051):
+
+- **Forced** every run: `showThinkingSummaries: true`,
+  `attribution: {"commit": "", "pr": ""}` (no Co-Authored-By trailer or PR
+  footer), and `prefersReducedMotion: true`. `effortLevel` and the stale
+  `coauthorTag` key are removed.
+- **Merged** every run: the template's push/publish deny rules are added to
+  `permissions.deny` if missing. Your own allow, ask, and deny entries are left
+  alone.
+- **Seeded** only when absent: the whole `permissions` block. `theme` is set to
+  `dark-ansi` when unset or `auto` (OSC 11 background detection misreads
+  Ghostty); any other choice is kept.
+
+If the helper fails (for example, the file is not valid JSON), the script warns
+and launches with the file as-is. Your customizations survive `--rebuild`.
 
 ## Sandbox network allowlist
 
@@ -394,11 +405,12 @@ reads/edits, git status/add/commit, build and test commands, standard shell
 utilities) and explicitly denies remote-affecting ops (`git push`, `npm publish`,
 etc.).
 
-On each subsequent run, the always-run injection block merges `showThinkingSummaries`,
-`coauthorTag`, `theme`, and `permissions` non-destructively — any key already
-present is left unchanged (except `theme: "auto"`, which is promoted to
-`dark-ansi`). User customizations survive `--rebuild` and `--reset-container`
-because those flags do not touch existing files in `.sandbox_config/claude/`.
+On each subsequent run, `merge_global_settings.py` applies the same rules as
+`start-claude.sh` (see that section above, and ADR-051): attribution off,
+reduced motion and thinking summaries on, the push/publish deny rules merged
+into `permissions.deny`, and `permissions` seeded only when absent. User
+customizations survive `--rebuild` and `--reset-container` because those flags
+do not touch existing files in `.sandbox_config/claude/`.
 
 ## Egress allowlist
 
@@ -780,6 +792,8 @@ noted.
 | `test_dockerfile.py` | Static checks: pi and opencode CLI install lines in `claude-agent.Dockerfile` | `uv run --with pytest pytest tests/test_dockerfile.py` |
 | `test_research.py` | Unit tests for `research.py` pure helpers (`compose_denylist`, `denylist_to_squid_acl`, `_prune_subdomains`, etc.) | `uv run --with pytest pytest tests/test_research.py` |
 | `test_settings_template.py` | Validates `templates/global-claude-settings.json` is well-formed JSON, has required keys, and `git push` is absent from the allow list | `uv run --with pytest pytest tests/test_settings_template.py` |
+| `test_global_settings_helper.py` | Unit tests for `merge_global_settings.py`: CLI contract, forced/merged/seeded rules, and the push/publish deny rules matched against the commands they must and must not block | `uv run --with pytest pytest tests/test_global_settings_helper.py` |
+| `probe-deny-rules.py` | Runs the real `claude -p` CLI against a mock Messages API on 127.0.0.1, with PATH shims, to confirm the deny rules block what the unit tests expect. Needs no account. Log in `.verify/probe-deny-rules.log` | `tests/probe-deny-rules.py [--claude PATH]` |
 | `test_sandbox_allowlist.py` | Validates `templates/sandbox-allowlist.txt` is well-formed and that `start-claude.sh` injects `sandbox.network.allowedDomains` with correct `*.d` expansion | `uv run --with pytest pytest tests/test_sandbox_allowlist.py` |
 | `probe-denylist.sh` | End-to-end Squid denylist probe (allow and deny URLs) from inside `research-searxng` | `bash tests/probe-denylist.sh` |
 | `probe-vane-egress.sh` | Verifies `research-vane` has correct `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars and that a sidecar HTTPS round-trip through Squid succeeds | `bash tests/probe-vane-egress.sh` |
@@ -787,7 +801,7 @@ noted.
 The pytest suites can be run together:
 
 ```bash
-uv run --with pytest pytest tests/test_agent_sh.py tests/test_dockerfile.py tests/test_research.py tests/test_settings_template.py tests/test_sandbox_allowlist.py
+uv run --with pytest pytest tests/
 ```
 
 ## Environment variable reference (research.py)

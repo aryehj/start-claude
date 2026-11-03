@@ -2384,7 +2384,11 @@ the repo.
 ## ADR-039: Curated Claude Code permissions allowlist seeded from template
 
 **Date:** 2026-05-27
-**Status:** Accepted
+**Status:** Partially superseded — see ADR-051. `coauthorTag` (never a Claude
+Code setting) is replaced by `attribution`; the always-run Python blocks are
+replaced by the shared `merge_global_settings.py`; and the deny list is now
+merged into existing files on every run, not only seeded. Seeding the whole
+`permissions` block when absent, and the allow list, still stand.
 
 ### Context
 
@@ -3434,3 +3438,113 @@ stance above, and the IPv4 rules are already applied by then.
   of the iptables carve-out to the host, and the host inference-port RETURN rule
   listed in ADR-010's `CLAUDE_AGENT` chain. `research.py` keeps its own carve-out
   (ADR-018).
+
+## ADR-051: One shared helper for global `settings.json`; `attribution` replaces `coauthorTag`
+
+**Date:** 2026-11-03
+**Status:** Accepted (partially supersedes ADR-039)
+
+### Context
+
+Both scripts merged preferences into the global `~/.claude/settings.json`
+with two near-identical inline Python heredocs, plus hard-coded `echo '{...}'`
+fallbacks for a missing file. An audit against the Claude Code settings
+reference (CLI 2.1.317) found three problems:
+
+- **`coauthorTag` does not exist.** Commit and PR attribution are controlled
+  by `attribution` (sub-keys `commit`, `pr`, `sessionUrl`, or `false`), which
+  replaced `includeCoAuthoredBy` in 2.0.62. Nothing was suppressing the
+  Co-Authored-By trailer.
+- **`prefersReducedMotion` was never set globally.** The project blocks
+  delete it from `settings.local.json` on the grounds that it belongs in global
+  settings, but nothing put it there.
+- **The deny list never reached existing files.** `permissions` was seeded
+  only when the key was absent (ADR-039), so deny-list changes never reached an
+  existing file. The list also missed `git -C <dir> push`, `git -c k=v push`,
+  git aliases defined to run push under another name, and publish commands
+  the allow list approves (`Bash(cargo*)` covers `cargo publish`,
+  `Bash(uv*)` covers `uv publish`).
+
+### Decision
+
+1. **One shared helper, `merge_global_settings.py`, at the repo root.** Both
+   scripts run `python3 merge_global_settings.py SETTINGS TEMPLATE` on the
+   host. It is stdlib-only and stays parseable by Python 3.9 (macOS system
+   `python3`). A missing file starts from a copy of the template, then gets the
+   same rules as an existing file, so the inline fallbacks are gone. It
+   rewrites the file only when something changed, in place so a bind mount
+   keeps its inode, and prints one `==>` line per change. If the helper fails
+   (invalid JSON, missing template), the script warns and keeps launching with
+   the file as-is. `start-agent.sh --init-sandbox` still copies the template
+   directly. `tests/test_global_settings_helper.py` pins the CLI, the Python
+   API (`apply_rules`, `merge_file`, `main`) and every rule.
+
+2. **Each managed key gets exactly one treatment,** kept in its own section of
+   the helper:
+
+   | Treatment | Keys |
+   |---|---|
+   | forced (overwritten every run) | `showThinkingSummaries: true`, `attribution: {"commit": "", "pr": ""}`, `prefersReducedMotion: true` |
+   | removed | `effortLevel` (ADR-017), `coauthorTag` |
+   | promoted (only from unset or `auto`) | `theme` → `dark-ansi` (ADR-040) |
+   | seeded (only if absent) | the whole `permissions` block (ADR-039) |
+   | merged (entries added if missing, never removed) | `permissions.deny` from the template |
+
+   The merge appends missing template entries after the user's, keeps the
+   user's order, and never touches `allow` or `ask`. Removing a template deny
+   rule from a file therefore lasts only until the next run. Changing a
+   template rule leaves the old string behind in existing files.
+
+3. **`attribution` uses the object form, without `sessionUrl`.** The docs say
+   `attribution: false` needs 2.1.281 or later, and older CLIs skip the
+   whole settings file that holds it. `~/.claude` is shared across containers
+   whose cached images may run older CLIs, so one rejected key would lose every
+   setting at once. Testing with a scratch `CLAUDE_CONFIG_DIR` showed 2.0.62
+   and 2.1.100 also skip a file that sets `attribution.sessionUrl`, while
+   2.1.182 and 2.1.317 accept it. `sessionUrl` only affects web and Remote
+   Control sessions, so it was dropped.
+
+4. **The deny list covers push and publish paths the allow list would
+   otherwise open.**
+   - `git push*`, `git -C * push*`, `git -c * push*`
+   - Git alias definitions: `git config *alias.*`, `git -C * config *alias.*`,
+     `git -c *alias.*`
+   - `npm`, `yarn`, `pnpm`, `cargo` and `uv publish*`, plus `docker push*`
+   - `gh` write paths, in case `gh` is ever installed: `gh pr create*`,
+     `gh pr merge*`, `gh release*`, `gh repo create*`, and `gh api*` (which can
+     POST)
+
+   Rules use the `Bash(x*)` form, not the spaced `Bash(x *)` form. Per the
+   permissions docs, a trailing ` *` matches the bare command only when it is
+   the rule's only wildcard. So `Bash(git -C * push *)` would not match a
+   bare `git -C . push`. `Bash(git -C * push*)` does. A bare `git * push*` was
+   rejected because it would block ordinary commits whose message mentions
+   push. The accepted trade-off is that `git -C dir commit -m "push fix"` is
+   denied, which shows up as a visible refusal, not a silent failure. The
+   allow list is unchanged, because deny takes precedence over allow.
+
+### Consequences
+
+- Every run turns attribution off, turns reduced motion on, and adds any
+  missing push/publish deny rules, in fresh and existing files alike.
+- `coauthorTag` is removed from existing files.
+- The two scripts cannot drift: the rules live in one file with unit tests,
+  not in two heredocs.
+- A broken `settings.json` no longer stops a launch.
+- These deny rules are defense in depth, not a boundary. The permissions docs
+  say Bash rules are "not a security boundary", and quoting or other
+  rewrites can still get past them. Push is already mostly blocked at the
+  network level, because `github.com` is absent from both egress allowlists
+  (ADR-044, ADR-049).
+
+### Notes
+
+- `tests/probe-deny-rules.py` checks the deny rules against the real CLI with
+  no account. It runs `claude -p` against a mock Messages API on 127.0.0.1
+  that answers with one Bash `tool_use` per case, using PATH shims for git,
+  cargo, uv, docker, npm, yarn, pnpm and gh, and a scratch HOME. It reads the
+  permission verdict from the `tool_result`. It passed on 2.1.100, 2.1.182 and
+  2.1.317, and logs to the gitignored `.verify/`.
+- 2.0.62 skips the template's `permissions` block whatever this ADR decides:
+  that version rejects the `Bash(x*)` form (`Bash(x:*)` loads). This
+  predates this ADR and is left alone. 2.1.100 accepts both forms.

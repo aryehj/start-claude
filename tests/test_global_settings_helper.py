@@ -1,11 +1,11 @@
-"""Tests for the shared global-settings helper (plans/refresh-injected-claude-settings.md).
+"""Tests for the shared global-settings helper, merge_global_settings.py.
 
 The helper merges the repo's preferences into ``~/.claude/settings.json``.
 ``start-claude.sh`` and ``start-agent.sh`` both call it, in place of their
 former inline Python heredocs.
 
-Helper interface (Phase 2 implements against this)
---------------------------------------------------
+Helper interface
+----------------
 
 Path: ``merge_global_settings.py`` at the repo root, a sibling of
 ``templates/`` and ``research.py``. It must use only the standard library and
@@ -44,26 +44,19 @@ Rules (forced = overwritten every run; merged = entries added if missing, never
 removed; seeded = written only if absent):
 
 - forced   ``showThinkingSummaries: true``
-- removed  ``effortLevel``
+- forced   ``attribution: {"commit": "", "pr": ""}`` (``sessionUrl`` is left
+  out because CLIs up to at least 2.1.100 skip a settings file that sets it)
+- forced   ``prefersReducedMotion: true``
+- removed  ``effortLevel`` and ``coauthorTag``
 - promoted ``theme`` from unset or ``"auto"`` to ``"dark-ansi"``; any other
   value is kept
 - seeded   the template's whole ``permissions`` block, when ``permissions`` is
   absent
-- forced   ``attribution: {"commit": "", "pr": ""}``, and ``coauthorTag``
-  removed (Phase 3; ``sessionUrl`` dropped because CLIs up to at least 2.1.100
-  skip a settings file that sets it)
-- forced   ``prefersReducedMotion: true`` (Phase 4)
 - merged   the template's ``permissions.deny`` entries into an existing
   ``permissions.deny``, in a union that leaves the user's allow, ask and deny
-  entries untouched (Phase 5)
+  entries untouched
 
-Phase gating
-------------
-
-Tests whose behavior lands in a later phase carry a ``PENDING_PHASE_<N>``
-marker. The worker for phase N deletes that marker's definition below and
-every ``@PENDING_PHASE_<N>`` line. Every test also skips while the helper file
-is missing, so the suite stays green until Phase 2 creates it.
+See ADR-051.
 """
 import ast
 import copy
@@ -88,8 +81,7 @@ EXPECTED_ATTRIBUTION_STRINGS = {"commit": "", "pr": ""}
 
 @pytest.fixture(scope="module")
 def helper():
-    if not HELPER.exists():
-        pytest.skip(f"{HELPER.name} not written yet (Phase 2 creates it)")
+    assert HELPER.exists(), f"{HELPER.name} is missing"
     spec = importlib.util.spec_from_file_location("merge_global_settings", HELPER)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -130,7 +122,7 @@ def _user_permissions() -> dict:
     }
 
 
-# ── Phase 2: interface and parity with the old heredocs ──────────────────────
+# ── interface and parity with the old heredocs ───────────────────────────────
 
 def test_helper_is_stdlib_only(helper):
     tree = ast.parse(HELPER.read_text())
@@ -332,7 +324,7 @@ def test_missing_template_fails_without_writing(helper, tmp_path):
     assert settings.read_text() == before
 
 
-# ── Phase 2: both scripts call the helper ────────────────────────────────────
+# ── both scripts call the helper ─────────────────────────────────────────────
 
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
 def test_script_calls_helper_without_inline_merge(helper, script):
@@ -359,7 +351,7 @@ def test_script_calls_helper_without_inline_merge(helper, script):
     )
 
 
-# ── Phase 3: attribution replaces coauthorTag ────────────────────────────────
+# ── attribution replaces coauthorTag ─────────────────────────────────────────
 
 def _assert_attribution_off(data: dict) -> None:
     attribution = data.get("attribution")
@@ -368,7 +360,7 @@ def _assert_attribution_off(data: dict) -> None:
     )
     for key, value in EXPECTED_ATTRIBUTION_STRINGS.items():
         assert attribution.get(key) == value, f"attribution.{key} must be {value!r}"
-    # The plan's Unknowns may drop sessionUrl; if present it must be false.
+    # sessionUrl is left out (older CLIs reject it); if present it must be false.
     assert attribution.get("sessionUrl", False) is False
 
 
@@ -396,7 +388,7 @@ def test_missing_file_gets_attribution_and_no_coauthor_tag(helper, tmp_path):
     assert "coauthorTag" not in data
 
 
-# ── Phase 4: reduced motion ──────────────────────────────────────────────────
+# ── reduced motion ───────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("initial", [{}, {"prefersReducedMotion": False}, {"prefersReducedMotion": "yes"}])
 def test_prefers_reduced_motion_forced_true(helper, template, initial):
@@ -409,9 +401,9 @@ def test_missing_file_gets_reduced_motion(helper, tmp_path):
     assert json.loads(settings.read_text())["prefersReducedMotion"] is True
 
 
-# ── Phase 5: push/publish deny list merged on every run ──────────────────────
+# ── push/publish deny list merged on every run ───────────────────────────────
 #
-# These tests pin behavior, not rule strings: Phase 5 picks the exact rules.
+# These tests pin behavior, not rule strings: the template picks the exact rules.
 # _rule_matches follows the documented Bash rule matching for one command
 # (https://code.claude.com/docs/en/permissions.md, "Wildcard patterns"): "*"
 # matches any text, spaces included; a trailing " *" also matches the bare

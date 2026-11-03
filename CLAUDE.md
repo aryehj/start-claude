@@ -9,10 +9,11 @@ using Apple Containers. One script, one container per project.
 start-claude.sh              — Apple Containers path; per-project microVM with Claude Code
 start-agent.sh               — Colima path; shared VM + container with Claude Code + OpenCode + Pi + VM-level egress allowlist
 research.py                  — Python script; isolated Colima VM + Vane + SearXNG research environment
+merge_global_settings.py     — shared helper both scripts run on the host to merge the template into ~/.claude/settings.json (stdlib-only, Python 3.9-safe)
 dockerfiles/                 — Dockerfiles built by start-agent.sh (claude-agent.Dockerfile)
 templates/                   — seed templates copied to host state dirs on first run
   global-claude.md                    — seeded to ~/.claude-containers/shared/CLAUDE.md
-  global-claude-settings.json         — seeded to settings.json (showThinkingSummaries, coauthorTag, theme, permissions)
+  global-claude-settings.json         — source for settings.json (showThinkingSummaries, attribution, theme, prefersReducedMotion, permissions); applied by merge_global_settings.py
   sandbox-allowlist.txt               — shared egress allowlist: seeded to the sandbox's allowlist.txt by start-agent.sh and to sandbox.network.allowedDomains in .claude/settings.local.json by start-claude.sh
   research-denylist-sources.txt       — seeded to ~/.research/denylist-sources.txt by research.py
   research-denylist-additions.txt     — seeded to ~/.research/denylist-additions.txt by research.py
@@ -26,6 +27,8 @@ tests/                       — unit tests and infra smoke tests
   test_dockerfile.py                   — static checks: pi and opencode CLI install lines in claude-agent.Dockerfile
   test_research.py                     — unit tests for research.py pure helpers
   test_settings_template.py           — validates global-claude-settings.json is well-formed and git push is absent from allow list
+  test_global_settings_helper.py       — unit tests for merge_global_settings.py: CLI contract, forced/merged/seeded rules, deny rules vs. commands
+  probe-deny-rules.py                  — runs the real `claude -p` against a mock Messages API on 127.0.0.1 with PATH shims (no account) to check the deny rules; logs to .verify/
   test_sandbox_allowlist.py           — validates sandbox-allowlist.txt is well-formed and that start-claude.sh injects allowedDomains with *.d expansion
   probe-denylist.sh                    — host-driven Squid denylist end-to-end probe (allow + deny URLs)
   probe-vane-egress.sh                 — smoke test for research-vane egress env vars and sidecar HTTPS round-trip
@@ -37,6 +40,7 @@ experiments/                 — archived experiments (not part of CI)
 README.md                    — usage reference
 ADR.md                       — architecture decision records
 CLAUDE.md                    — this file
+.verify/                     — gitignored logs from probes and human-check scripts
 ```
 
 ## What the script does
@@ -68,8 +72,8 @@ If the named container already exists, it just starts and re-attaches it.
 - **Skills are synced from the upstream repo on every new-container build.** Per-skill-directory clobber; local-only skills left untouched; fetch failures warn but don't abort. See ADR-005.
 - **Global container CLAUDE.md is seeded from `templates/global-claude.md`.** Gives every session shared environment context; in `start-agent.sh`, also seeded to `AGENTS.md` for OpenCode (trailing start-claude section stripped). See ADR-015.
 - **Git identity is set via both `~/.gitconfig` and environment variables.** Env vars override gitconfig and work regardless of sandbox mount topology. See ADR-009.
-- **`showThinkingSummaries` is enabled in global user settings.** Merged into `~/.claude/settings.json` on startup; makes Claude Code's thinking visible in the transcript.
-- **A curated `permissions` allowlist is seeded into fresh settings.json files.** `templates/global-claude-settings.json` carries the full template (showThinkingSummaries, coauthorTag, theme, permissions.allow/deny). Both scripts copy the template when no settings.json exists yet, and add `permissions` non-destructively to existing files that lack it. User edits are never clobbered. See ADR-039.
+- **One shared helper merges global `~/.claude/settings.json`.** Both scripts run `merge_global_settings.py SETTINGS TEMPLATE` with the host's `python3` (stdlib-only, 3.9-safe). A missing file starts from `templates/global-claude-settings.json`, and the same rules then apply to every file. If the helper fails, the script warns and keeps launching. Each key gets one treatment: **forced** every run (`showThinkingSummaries: true`, `attribution: {"commit": "", "pr": ""}`, `prefersReducedMotion: true`), **removed** (`effortLevel`, the stale `coauthorTag`), **promoted** (`theme`, see below), **seeded** if absent (the whole `permissions` block), and **merged** (the template's push/publish `permissions.deny` entries are added if missing; the user's other allow/ask/deny entries are untouched). `attribution` uses the object form without `sessionUrl` because older CLIs sharing `~/.claude` skip a settings file that holds `false` or `sessionUrl`. See ADR-051.
+- **A curated `permissions` allowlist is seeded into fresh settings.json files.** The template's `allow` list pre-approves dev-loop commands; its `deny` list blocks push and publish paths (`git push` including `-C`/`-c` forms, git alias definitions, npm/yarn/pnpm/cargo/uv publish, `docker push`, `gh` write commands). Rules use the `Bash(x*)` form. They are defense in depth: `github.com` is already off both egress allowlists. See ADR-039, ADR-051.
 - **`effortLevel` is intentionally unpinned.** Use `/effort` or project-level `settings.local.json` for situational overrides. See ADR-017.
 - **Sandbox is configured in strict mode.** `sandbox.failIfUnavailable: true` and `sandbox.allowUnsandboxedCommands: false` in project `settings.local.json`; migration block adds these to existing files.
 - **A default-deny `sandbox.network` allowlist is seeded into every `settings.local.json`.** `templates/sandbox-allowlist.txt` (bare domains, comments) is the source of truth; `start-claude.sh` reads it and expands each domain `d` to `d` and `*.d` when building `sandbox.network.allowedDomains`. The same file seeds `start-agent.sh`'s allowlist (Anthropic, package registries, reference/research hosts; ADR-049) but omits write-capable hosts (`github.com`, container registries, `huggingface.co`). Migration: seed-if-absent — existing files with a `network` key are left untouched (user-pruned entries stay pruned); `--reseed-sandbox-allowlist` forces overwrite. This is a **guardrail, not a hard boundary**: `settings.local.json` is writable by the agent; the microVM itself retains full unrestricted egress at the VM level. See ADR-044.
