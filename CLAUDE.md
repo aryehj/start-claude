@@ -20,11 +20,14 @@ templates/                   — seed templates copied to host state dirs on fir
 skills/                      — reusable Claude Code skills (back up of ~/.claude/skills/)
 skills-agents/               — small-model ports of scope/build/wrap for Pi and OpenCode (seeded to ~/.agents/skills/)
 plans/                       — implementation plans written by /scope skill
+scripts/                     — host-side maintenance scripts
+  bump-searxng.sh                      — moves start-agent.sh's SEARXNG_IMAGE pin to the current upstream digest (pulled in the claude-agent VM); no commit
 tests/                       — unit tests and infra smoke tests
   test-agent-firewall.sh               — in-container firewall smoke tests for start-agent.sh (all README cases but hot-reload: egress, inference proxy allow/deny and no direct host path, real key absent, DNS blackhole, VM-local services)
   test-cross-vm-isolation.sh           — host-driven cross-VM isolation test: claude-agent ↔ research cannot reach each other; claude-agent reaches the inference proxy, research reaches the host inference port
   test_agent_sh.py                     — static checks: no host-port publish, pi integration invariants, sandbox trust-boundary
-  test_dockerfile.py                   — static checks: pi and opencode CLI install lines in claude-agent.Dockerfile
+  test_dockerfile.py                   — static checks: pi and opencode CLI install lines in claude-agent.Dockerfile, TOOLS_CACHE_BUST arg right before them
+  test_tool_refresh.py                 — --refresh-tools/--restore-previous-image exclusions and image lifecycle (fake docker), tool-version record, bump-searxng.sh offline
   test_research.py                     — unit tests for research.py pure helpers
   test_settings_template.py           — validates global-claude-settings.json is well-formed and git push is absent from allow list
   test_global_settings_helper.py       — unit tests for merge_global_settings.py: CLI contract, forced/merged/seeded rules, deny rules vs. commands
@@ -36,6 +39,7 @@ tests/                       — unit tests and infra smoke tests
   probe-tinyproxy-owner-rule.sh        — host-driven live check of CLAUDE_AGENT_OUT's owner-match rule (tinyproxy user refused, normal user as control)
   probe-vm-ipv6.sh                     — host-driven check of whether tinyproxy has an IPv6 path out of the VM or to the Mac (CLAUDE_AGENT_OUT is IPv4 only)
   verify-omlx-key-handling.sh          — host-driven live check that a keyless `--reload-allowlist` keeps the proxy's backend and omlx key, and that the startup probe's keyless curl reaches omlx; log in .verify/
+  verify-tool-refresh.sh               — live acceptance check after a SearXNG bump or --refresh-tools: SearXNG results from 2+ engines, opencode config + MCP, `opencode run` on omlx gemma-4-e4b-it-6bit calling the searxng tool, layer reuse, build-cache probe; runs on the host or in the container; log in .verify/
 experiments/                 — archived experiments (not part of CI)
   vane-eval/                           — OFAT eval harness (archived); see experiments/vane-eval/README.md
   model-experiment/                    — raw session transcripts from the model-comparison experiment
@@ -105,11 +109,12 @@ If the named container already exists, it just starts and re-attaches it.
 - **Small-model skill ports seeded on every fresh container.** `skills-agents/{scope,build,wrap}/` are copied into `$SANDBOX/.sandbox_config/agents/skills/` by `seed_agent_skills()`, called from the fresh-container path alongside `sync_skills()`. Both `--rebuild` and `--reset-container` trigger this path; bare reattach skips it. `--init-sandbox` creates the bind-mount target directory only; the first `start-agent.sh` run seeds the skills as a side effect. Local-only skill dirs are left untouched; copy failures warn but do not abort. See ADR-038.
 - **`--rebuild` semantics.** Removes image + container non-interactively; Colima VM deletion requires an extra `y` because it wipes the entire VM runtime.
 - **`--reset-container` semantics.** Removes the container (and SearXNG container) but keeps the image and VM intact; mutually exclusive with `--rebuild`. Use when only container state needs resetting — avoids network egress for a full image rebuild.
+- **`--refresh-tools` / `--restore-previous-image`.** OpenCode and Pi stay at `@latest`; refresh tags `claude-agent:latest` as `:previous`, rebuilds with a fresh `TOOLS_CACHE_BUST` build arg (declared right before the npm `RUN`, so only that layer onward reruns), recreates both containers after a successful build, and prints old → new versions. Restore retags `previous` → `latest` and recreates. Both exclude `--rebuild`, `--reset-container` and the allowlist flags. Versions are recorded per image ID in `.sandbox_config/tool-versions` by a `--network none` throwaway container, never on a warm reattach. See ADR-054.
 - **`NODE_USE_ENV_PROXY=1` makes Node honor the proxy natively.** Node 24 undici reads `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` when this flag is set — no shim packages needed. See ADR-013.
 - **webfetch allowed, websearch denied by default.** `opencode.json` generated with `permission.webfetch: "allow"` and `permission.websearch: "deny"`; webfetch egress bounded by the tinyproxy allowlist.
 - **One network topology.** The agent container always joins `claude-agent-net`, whatever the search flag says; `--disable-search` only controls SearXNG, the `8080` RETURN rule, and the MCP block. Older bridge-only containers are joined to the network on reattach via `docker network connect` (never `disconnect`). See ADR-048.
 - **Start failures: agent container reports, SearXNG self-heals.** `attach_existing` checks `docker start` and `.State.Running`; on failure it prints Docker's stderr and exits naming `--reset-container` (never auto-removes: the container may hold user-installed tools). A SearXNG container that fails to start is `docker rm -f`'d and recreated. Neither gets a restart policy: dockerd would start them at VM boot, before the firewall is installed. See ADR-048.
-- **SearXNG-backed websearch runs by default.** `searxng` container started alongside `claude-agent`; fans out through tinyproxy via `outgoing.proxies` (SearXNG silently ignores `HTTPS_PROXY`). See ADR-014. Pass `--disable-search` to skip. The image is pinned by digest in `SEARXNG_IMAGE`; bump it deliberately (ADR-048).
+- **SearXNG-backed websearch runs by default.** `searxng` container started alongside `claude-agent`; fans out through tinyproxy via `outgoing.proxies` (SearXNG silently ignores `HTTPS_PROXY`). See ADR-014. Pass `--disable-search` to skip. The image is pinned by digest in `SEARXNG_IMAGE`; bump it with `scripts/bump-searxng.sh`, verify with `tests/verify-tool-refresh.sh`, then commit. A searxng container on another image is recreated on any launch, so a bump or its revert takes effect without `--reset-container` (ADR-048, ADR-054).
 - **`host.docker.internal:host-gateway` set on `docker run`.** Belt-and-suspenders for Colima, where the mapping is not automatic.
 - **`docker build` runs with `--network=host`.** Bypasses the DOCKER-USER REJECT rule that blocks `apt-get update` in build-step containers. See ADR-011.
 - **Sandbox deps omitted from `claude-agent.Dockerfile`; sandbox force-disabled in project settings.** Bubblewrap inside an unprivileged Docker container requires `CAP_SYS_ADMIN`, which would weaken the Colima VM boundary. The VM-level firewall is the real isolation layer. See ADR-033.

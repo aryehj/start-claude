@@ -3661,3 +3661,116 @@ means omlx is reachable, and only no answer (`000`, exit 7) warns. A live check
 so `-f` would have reported a healthy server as unreachable. The key now
 appears on no argv, host or VM. `tests/test_agent_sh.py` enforces it and
 `tests/verify-omlx-key-handling.sh` is the live check.
+
+---
+
+## ADR-054: `start-agent.sh` tool updates: `--refresh-tools`, a build-arg cache bust, a scripted SearXNG bump
+
+**Date:** 2026-11-03
+**Status:** Accepted (extends ADR-048)
+
+### Context
+
+`claude-agent` carries two kinds of third-party version:
+
+- **OpenCode and Pi** are installed at `@latest` in one npm layer of
+  `claude-agent.Dockerfile`. The version is whatever npm served when that layer
+  was built, and the cached image keeps it indefinitely (OpenCode's own
+  `autoupdate` is forced off). The user chose to keep `@latest` rather than pin.
+  So updating means rerunning that layer on purpose.
+- **SearXNG** is pinned by digest (ADR-048), but bumping it was a manual recipe
+  in a comment, and an existing `searxng` container kept its old image until
+  `--reset-container`.
+
+`--rebuild` is the wrong tool for the first. It removes the image and rebuilds
+without `--no-cache`, so a builder whose cache outlives `docker image rm` hands
+back the same npm layer. It also offers to delete the VM and rebuilds the OS
+layers too. `--no-cache` would do the opposite: it upgrades every apt package
+along with the tools.
+
+A live check on 2026-11-03 showed why SearXNG needs a routine bump. The pinned
+image (SearXNG `2026.4.24`, recorded as "known good on 2026-10-05") returned no
+results at all: Brave answered "too many requests", DuckDuckGo a CAPTCHA, and
+Google nothing. The OpenCode MCP tool still worked end to end, but it handed the
+model an empty list, and the model answered from its own knowledge.
+
+### Decision
+
+**Build-arg cache bust.** `ARG TOOLS_CACHE_BUST=0` sits right before the npm
+`RUN`, which echoes it. A new value reruns that layer and every later one, and
+the apt, Node, uv and Claude Code layers above it stay cached. A plain build
+leaves it at `0`. A test keeps the arg immediately above the npm `RUN` with no
+layer between them.
+
+**`--refresh-tools`.** It tags `claude-agent:latest` as `claude-agent:previous`,
+replacing any older one, and builds with `TOOLS_CACHE_BUST=$(date +%s)`. Then it
+removes the agent and SearXNG containers, as `--reset-container` does, and
+prints the old and new OpenCode/Pi versions. Containers are removed only after
+the build succeeds, so a failed refresh leaves `latest` and the running setup
+as they were. **`--restore-previous-image`** retags `previous` → `latest` and
+recreates the containers. It fails with an error if there is no `previous`.
+Both flags exclude each other, `--rebuild`, `--reset-container` and the
+allowlist flags. The check sits with the existing exclusions, before sandbox
+detection. Only one generation is kept, and the image a restore replaces is
+left untagged (`docker image prune` reclaims it).
+
+**Per-image version record.** The source says `@latest`, so the image is the
+only place the versions are known. After every build, refresh and restore, and
+on a fresh container if the record is stale, `record_tool_versions` runs
+`opencode --version` and `pi --version` once in a `--rm --network none`
+throwaway container. It writes `image_id`, `opencode`, `pi` and `recorded` to
+`$SANDBOX_ROOT/.sandbox_config/tool-versions`. It is a no-op when the recorded
+`image_id` matches the image, so a warm reattach never starts a container for
+it. It never fails a launch. A host file was chosen over a file baked into the
+image because `docker image inspect` cannot read files, and a label cannot hold
+values only known after the `RUN`. The launch-time staleness check reads this
+record.
+
+**SearXNG follows its pin.** The SearXNG lifecycle compares the existing
+container's `.Config.Image` with `SEARXNG_IMAGE` and recreates it on a
+mismatch. SearXNG is stateless, so this is safe. As a result, a bump and its
+rollback (a `git checkout` or revert of one line) take effect on the next
+launch of any kind. This supersedes ADR-048's last consequence ("keeps the
+image it was created from until … `--reset-container`").
+
+**`scripts/bump-searxng.sh`.** It pulls `docker.io/searxng/searxng:latest` in
+the `claude-agent` VM, reads `RepoDigests`, and rewrites `SEARXNG_IMAGE` and the
+comment above it. The comment records the date and the image's
+`org.opencontainers.image.version`. The script does not commit; the commit
+follows a passing `tests/verify-tool-refresh.sh`. `--digest` skips the pull,
+which the unit tests use.
+
+**`tests/verify-tool-refresh.sh` is the acceptance check for both.** In the
+agent container it checks:
+
+- SearXNG JSON has results from at least two engines, and no engine fails for a
+  reason other than upstream throttling (CAPTCHA, too many requests).
+- `opencode debug config` succeeds. It exits 1 with `Configuration is invalid`
+  on a bad config, which answers the plan's Unknown 3.
+- `opencode mcp list` shows `searxng` connected.
+- `opencode run --format json` on omlx `gemma-4-e4b-it-6bit` completes a
+  `searxng_websearch` call that returns results, and gives a non-empty answer.
+- `pi --version` runs.
+
+On the host it checks:
+
+- After a refresh, `previous` and `latest` share exactly the layers above npm.
+- A two-line probe image built twice around a `docker image rm` shows whether
+  the build cache survives the rm. This uses the same client and context as
+  `start-agent.sh`.
+- The version record matches the image.
+
+### Consequences
+
+- Updating OpenCode/Pi is one opt-in command that touches nothing below the npm
+  layer, and one command undoes it. Both move together, since they share the
+  layer.
+- `--rebuild` passes no cache-bust value. Whether it refreshes the tools depends
+  on whether the builder's cache survives `docker image rm`. The verify script's
+  cache probe reports which, and the docs point to `--refresh-tools` for
+  updating either way.
+- `claude-agent:previous` costs one image's worth of extra disk in the VM.
+- `--refresh-tools` and `--restore-previous-image` remove the agent container,
+  which ends any session running inside it.
+- An engine that starts needing a host missing from the allowlist shows up as a
+  failed check, not as quietly worse search.

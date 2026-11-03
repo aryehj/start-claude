@@ -2,7 +2,9 @@
 
 ## Status
 
-- [ ] Phase 1: Refresh + rollback path for claude-agent, and a SearXNG bump
+- [ ] Phase 1: Refresh + rollback path for claude-agent, and a SearXNG bump (human gate: live run on the macOS host)
+  - [x] Steps 2-6: cache-bust ARG, tool-version record, `--refresh-tools` / `--restore-previous-image`, `scripts/bump-searxng.sh`, `tests/verify-tool-refresh.sh`; ADR-054, README, CLAUDE.md
+  - [ ] Steps 1 + 7 live: `.temp/phase1-live-run.sh` on the host (baseline verify, bump, verify, refresh, verify; its cache probe answers Unknown 1), then commit the bumped pin and record the cache finding in ADR-054
 - [ ] Phase 2: Bump sandbox-runtime 0.0.73 → current, re-tested under Apple Containers (Opus recommended)
 - [ ] Phase 3: Launch-time staleness warnings
 
@@ -103,12 +105,13 @@ The container runs as root under Apple Containers with `--cap-add SYS_ADMIN --ca
 
 1. **Does the build cache survive `docker image rm`?** This decides how to document `--rebuild`; the cache-bust arg is needed either way. Verify in Phase 1, step 1.
 2. **Is `CAP_SETFCAP` in the Apple Containers bounding set?** This decides whether Phase 2 needs a new `--cap-add`. Verify in Phase 2, step 1. If it is present and the sandbox still fails, the problem is somewhere else in the 0.0.74–0.0.81 changes. Bisect the versions one at a time before giving up.
-3. **Which OpenCode subcommand reports config errors?** `opencode --help` lists `debug`, but the subcommands under it were not checked. Run `opencode debug --help` in the container. If nothing validates config, the end-to-end `opencode run` is the config check. Affects Phase 1, step 6.
+3. **Which OpenCode subcommand reports config errors?** `opencode --help` lists `debug`, but the subcommands under it were not checked. Run `opencode debug --help` in the container. If nothing validates config, the end-to-end `opencode run` is the config check. Affects Phase 1, step 6. **Resolved 2026-11-03:** `opencode debug config` exits 1 with `Configuration is invalid at <path>` on a bad config (tested with a wrong-typed `model` and a malformed `mcp` entry) and 0 on the injected one. `opencode mcp list` also reports `searxng connected`; the verify script uses both.
 4. **Docker Hub API shape and the pinned digest's date.** The container cannot reach `hub.docker.com` (proxy, 000), so the tags-API fields (`digest`, `last_updated`) and whether that `digest` equals the manifest-list digest in `RepoDigests` were not checked. Verify from the host before writing the SearXNG half of the Phase 3 helper. If the digests do not match, compare by date only.
 5. **SearXNG settings compatibility with a newer image.** The seed uses `use_default_settings` with `keep_only` engines and `outgoing.proxies` (`start-agent.sh:830-856`), so it mostly inherits upstream defaults. Renamed keys or engines would show up as missing engines in the Phase 1 verify script. The changelog was not reviewed.
 
 ## Notes
 
+- Baseline 2026-11-03 (`tests/verify-tool-refresh.sh` run inside the container): the pinned SearXNG is version `2026.4.24`, not an October build, and it returned 0 results (Brave "too many requests", DuckDuckGo CAPTCHA, Google silently empty). OpenCode config, MCP connect, the `searxng_websearch` tool call and `pi --version` all passed. gemma answered from its own knowledge despite the empty tool result, so the verify script also requires the tool to return results.
 - OpenCode and Pi are not actually stale today (1.19.5 and 1.5.0 are npm `latest`). Of the three, only sandbox-runtime is clearly behind. SearXNG is 4 weeks behind a rolling `latest`.
 - Pi shares the npm layer with OpenCode, so a refresh always moves both. The restore flag rolls back both.
 - `claude-agent:previous` keeps one image's worth of extra disk in the VM. Only one generation is kept.

@@ -316,6 +316,11 @@ start-agent.sh --rebuild
 # Reset container state only (keeps image + VM; no network egress)
 start-agent.sh --reset-container
 
+# Pull the current OpenCode + Pi into the image (saves the old image as
+# claude-agent:previous, recreates the containers) — and undo it
+start-agent.sh --refresh-tools
+start-agent.sh --restore-previous-image
+
 # Apply edits to the allowlist without touching the running container
 start-agent.sh --reload-allowlist
 
@@ -631,6 +636,41 @@ existing container.
 
 See `ADR.md` §ADR-014 for the threat model and design rationale.
 
+## Updating OpenCode, Pi and SearXNG
+
+**OpenCode and Pi** are installed at `@latest`, so the version is whatever npm
+served when the image was built. The cached image keeps it until you refresh:
+
+```bash
+start-agent.sh --refresh-tools          # tag claude-agent:previous, rebuild from the npm layer, recreate containers
+start-agent.sh --restore-previous-image # undo: latest → previous, recreate containers
+```
+
+`--refresh-tools` passes a fresh `TOOLS_CACHE_BUST` build arg, so only the npm
+layer and the layers after it rerun; OS packages, Node, uv and Claude Code stay
+cached. It prints the old and new versions and records them, keyed by image ID,
+in `$SANDBOX_ROOT/.sandbox_config/tool-versions`. It removes the agent container,
+so exit any session running in it first. Only one previous image is kept.
+`--rebuild` passes no cache-bust value, so it may reuse the cached npm layer.
+
+**SearXNG** is pinned by digest (`SEARXNG_IMAGE` in `start-agent.sh`). To move
+to the current upstream image:
+
+```bash
+scripts/bump-searxng.sh                 # pull latest in the VM, rewrite the pin and its date; no commit
+start-agent.sh                          # any launch replaces a searxng container on another pin
+tests/verify-tool-refresh.sh            # in a second terminal; commit start-agent.sh if it passes
+```
+
+To roll back, `git checkout start-agent.sh` (or revert the commit) and launch
+again.
+
+`tests/verify-tool-refresh.sh` is the acceptance check for both: SearXNG JSON
+results from at least two engines, `opencode debug config` and `opencode mcp
+list`, and an `opencode run` on omlx `gemma-4-e4b-it-6bit` that calls the
+SearXNG tool. After a refresh it also checks that the layers above npm were
+reused. See `ADR.md` §ADR-054.
+
 For a browser-accessible AI research UI (Vane), see the `research.py` section
 below — it runs in a separate VM with its own SearXNG instance and a denylist
 egress model suited to scraping arbitrary URLs.
@@ -789,7 +829,9 @@ noted.
 | `test-agent-firewall.sh` | Firewall smoke tests from inside `claude-agent` (default-deny, proxy allow/deny, inference proxy allowed and refused routes, no direct host path, real key absent, env wiring, inter-container port isolation, DNS blackhole, container-name DNS, VM-local services closed) | Run from inside the container: `bash tests/test-agent-firewall.sh` |
 | `test-cross-vm-isolation.sh` | Cross-VM isolation: `claude-agent` and `research` containers cannot reach each other by name, port, or via `host.docker.internal:3000`. Positive tests confirm `claude-agent` reaches the in-VM inference proxy and `research` reaches the host inference port. Skips if either VM is not running. | `./tests/test-cross-vm-isolation.sh` |
 | `test_agent_sh.py` | Static invariants for `start-agent.sh`: no host-port publish, sandbox trust boundary, Pi and skills wiring, warm-reattach batching, atomic firewall apply, secret handling, flag hygiene | `uv run --with pytest pytest tests/test_agent_sh.py` |
-| `test_dockerfile.py` | Static checks: pi and opencode CLI install lines in `claude-agent.Dockerfile` | `uv run --with pytest pytest tests/test_dockerfile.py` |
+| `test_dockerfile.py` | Static checks: pi and opencode CLI install lines in `claude-agent.Dockerfile`, and the `TOOLS_CACHE_BUST` arg right before them | `uv run --with pytest pytest tests/test_dockerfile.py` |
+| `test_tool_refresh.py` | `--refresh-tools` / `--restore-previous-image` (flag exclusions, and the image lifecycle run against a fake `docker`), the tool-version record, and `scripts/bump-searxng.sh` offline | `uv run --with pytest pytest tests/test_tool_refresh.py` |
+| `verify-tool-refresh.sh` | Live acceptance check after a SearXNG bump or `--refresh-tools`: SearXNG results, OpenCode config and MCP, `opencode run` on omlx calling the SearXNG tool, layer reuse, build-cache behaviour. Needs the container running. Log in `.verify/verify-tool-refresh-<time>.log` | `tests/verify-tool-refresh.sh` |
 | `test_research.py` | Unit tests for `research.py` pure helpers (`compose_denylist`, `denylist_to_squid_acl`, `_prune_subdomains`, etc.) | `uv run --with pytest pytest tests/test_research.py` |
 | `test_settings_template.py` | Validates `templates/global-claude-settings.json` is well-formed JSON, has required keys, and `git push` is absent from the allow list | `uv run --with pytest pytest tests/test_settings_template.py` |
 | `test_global_settings_helper.py` | Unit tests for `merge_global_settings.py`: CLI contract, forced/merged/seeded rules, and the push/publish deny rules matched against the commands they must and must not block | `uv run --with pytest pytest tests/test_global_settings_helper.py` |
