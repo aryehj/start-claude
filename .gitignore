@@ -30,3 +30,6 @@ refs
 
 # testing things temporarily
 .temp
+
+# probe and human-check logs
+.verify/
