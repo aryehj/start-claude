@@ -3,7 +3,7 @@
 ## Status
 
 - [x] Write failing tests for the shared settings helper (Opus recommended)
-- [ ] Extract the global-settings merge into one shared helper and call it from both scripts
+- [x] Extract the global-settings merge into one shared helper and call it from both scripts
 - [ ] Replace `coauthorTag` with `attribution`, and remove the stale key from existing files
 - [ ] Force `prefersReducedMotion: true`
 - [ ] Widen the push/publish deny list and merge it into existing files on every run (Opus recommended)
