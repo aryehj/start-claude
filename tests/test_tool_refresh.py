@@ -330,3 +330,62 @@ def test_existing_image_no_flags_is_untouched(tmp_path):
     proc, latest, _, calls = _lifecycle(tmp_path, [], latest="sha256:img3")
     assert "END" in proc.stdout and latest == "sha256:img3"
     assert not [l for l in calls.splitlines() if l.startswith(("build", "run", "tag"))]
+
+
+# ── scripts/bump-searxng.sh (offline: --digest skips the VM pull) ─────────────
+
+BUMP = REPO / "scripts" / "bump-searxng.sh"
+NEW = "sha256:" + "ab" * 32
+
+
+def _bump(tmp_path, *args):
+    target = tmp_path / "start-agent.sh"
+    if not target.exists():
+        target.write_text(_TEXT)
+    proc = subprocess.run(["bash", str(BUMP), *args], capture_output=True, text=True, timeout=20,
+                          env={**os.environ, "START_AGENT": str(target)})
+    return proc, target.read_text()
+
+
+def test_bump_rewrites_pin_and_date(tmp_path):
+    proc, text = _bump(tmp_path, "--digest", NEW, "--version", "2026.11.2+deadbeef")
+    assert proc.returncode == 0, proc.stderr
+    assert re.search(r'^SEARXNG_IMAGE="docker\.io/searxng/searxng@' + NEW + '"$', text, re.MULTILINE)
+    assert re.search(r"known good on \d{4}-\d\d-\d\d", text)
+    assert "2026.11.2+deadbeef" in text
+    # Only the comment block and the pin line changed.
+    old_lines, new_lines = _TEXT.splitlines(), text.splitlines()
+    i = next(n for n, l in enumerate(old_lines) if l.startswith("SEARXNG_IMAGE="))
+    j = next(n for n, l in enumerate(new_lines) if l.startswith("SEARXNG_IMAGE="))
+    assert old_lines[i + 1:] == new_lines[j + 1:]
+    start = i
+    while old_lines[start - 1].startswith("#"):
+        start -= 1
+    assert old_lines[:start] == new_lines[:start]
+
+
+def test_bump_output_keeps_pin_test_format(tmp_path):
+    _, text = _bump(tmp_path, "--digest", NEW)
+    refs = [l for l in text.splitlines() if "searxng/searxng" in l and not l.lstrip().startswith("#")]
+    assert len(refs) == 1
+
+
+def test_bump_is_idempotent(tmp_path):
+    _bump(tmp_path, "--digest", NEW)
+    proc, text = _bump(tmp_path, "--digest", NEW)
+    assert proc.returncode == 0 and "already" in proc.stdout
+
+
+@pytest.mark.parametrize("bad", ["sha256:xyz", "deadbeef", "sha256:" + "a" * 63])
+def test_bump_rejects_bad_digest(tmp_path, bad):
+    proc, text = _bump(tmp_path, "--digest", bad)
+    assert proc.returncode != 0 and text == _TEXT
+
+
+def test_bump_does_not_commit():
+    assert "git commit" not in BUMP.read_text()
+
+
+def test_bump_pulls_in_the_claude_agent_vm():
+    src = BUMP.read_text()
+    assert "colima ssh -p" in src and "searxng/searxng:latest" in src and "RepoDigests" in src

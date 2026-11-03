@@ -416,9 +416,9 @@ ALLOWLIST_FILE="$SANDBOX_ROOT/.sandbox_config/allowlist.txt"
 ALLOWLIST_TEMPLATE="$SCRIPT_DIR/templates/sandbox-allowlist.txt"
 TINYPROXY_PORT=8888
 SEARXNG_CONTAINER="searxng"
-# Pinned by digest (the image running and known good on 2026-10-05). Bump it
-# deliberately when engines stop returning results: pull the new tag in the VM,
-# take `docker image inspect -f '{{index .RepoDigests 0}}'`, and --reset-container.
+# Pinned by digest (SearXNG 2026.4.24+a7ac696b4, running and known good on 2026-10-05). Bump it
+# with scripts/bump-searxng.sh, verify with tests/verify-tool-refresh.sh, then
+# commit. Any launch replaces a searxng container on another pin (ADR-054).
 SEARXNG_IMAGE="docker.io/searxng/searxng@sha256:c9100c29c14a77d5289263a671580226c3b8a396a1a0130d2f500f57076a0119"
 SEARXNG_DIR="$SANDBOX_ROOT/.sandbox_config/searxng"
 SEARXNG_SETTINGS_FILE="$SEARXNG_DIR/settings.yml"
