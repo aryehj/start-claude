@@ -157,3 +157,35 @@ def test_script_strips_stale_seccomp_block():
     assert re.search(r"del sb\[['\"]seccomp['\"]\]", text), (
         "start-claude.sh must remove the stale sandbox.seccomp block"
     )
+
+
+def _container_run_block():
+    """The `container run` invocation that creates the project container."""
+    text = _script_text()
+    start = text.index('container run \\\n  --name "$CONTAINER_NAME"')
+    return text[start:text.index('\n  bash', start)]
+
+
+def test_container_run_grants_sandbox_caps():
+    """bwrap needs SYS_ADMIN and NET_ADMIN (ADR-043). sandbox-runtime >= 0.0.77
+    also refuses to sandbox as uid 0 without CAP_SETFCAP in the bounding set,
+    because mapping uid 0 into a user namespace needs it (Linux >= 5.12).
+    Apple Containers' default set has it; the flag keeps that from being an
+    unstated dependency."""
+    block = _container_run_block()
+    for cap in ("SYS_ADMIN", "NET_ADMIN", "SETFCAP"):
+        assert "--cap-add {}".format(cap) in block, (
+            "start-claude.sh's container run must pass --cap-add {}".format(cap)
+        )
+
+
+def test_live_check_reads_the_pin_from_start_claude():
+    """tests/verify-sandbox-runtime.sh is the re-test ADR-047 asks for on every
+    bump. It must take the expected version from start-claude.sh, so a bump
+    cannot leave it checking the old one."""
+    verify = (REPO / "tests" / "verify-sandbox-runtime.sh").read_text()
+    pin = re.search(r'@anthropic-ai/sandbox-runtime@(\d+\.\d+\.\d+)', _script_text()).group(1)
+    assert "start-claude.sh" in verify
+    assert pin not in verify, (
+        "verify-sandbox-runtime.sh hard-codes {}; read the pin from start-claude.sh".format(pin)
+    )

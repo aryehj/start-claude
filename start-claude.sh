@@ -284,9 +284,18 @@ else
     # bwrap invocation changes between releases, and an unpinned `latest` silently
     # imported a breaking change once already: 0.0.66 (2026-07-17) added
     # `--unshare-user --cap-drop ALL` to the secure path, which cannot start in a
-    # container with a masked /proc. Treat bumps as a deliberate, tested step.
-    # See ADR-047.
-    npm install -g npm@latest @anthropic-ai/sandbox-runtime@0.0.73
+    # container with a masked /proc. Treat bumps as a deliberate, tested step:
+    # bump, `--rebuild`, then run tests/verify-sandbox-runtime.sh. See ADR-047.
+    # 0.0.73 -> 0.0.81: from 0.0.76 weaker mode drops all caps too
+    # (`--cap-drop ALL`, plus `--cap-add CAP_SETFCAP` for a uid-0 caller using
+    # the seccomp helper), and from 0.0.77 the runtime refuses to sandbox as
+    # uid 0 without CAP_SETFCAP in its bounding set, hence `--cap-add SETFCAP`
+    # on `container run` below. Weaker
+    # mode still bind-mounts /proc (no fresh procfs mount) and never passes
+    # --disable-userns. Claude Code bundles its own copy of the runtime JS;
+    # this install supplies `srt` and the apply-seccomp helper it finds through
+    # `npm root -g`.
+    npm install -g npm@latest @anthropic-ai/sandbox-runtime@0.0.81
 
     # ── uv ───────────────────────────────────────────────────────────────────
     # UV_INSTALL_DIR puts the binaries directly into /usr/local/bin, so no
@@ -435,6 +444,10 @@ rm -rf "$SKILLS_TMP"
 # its dedicated VM, not against the macOS host. See ADR-043.
 # --cap-add NET_ADMIN lets bwrap configure the loopback interface in the new
 # network namespace it creates per command (RTM_NEWADDR on lo fails without it).
+# --cap-add SETFCAP: sandbox-runtime >= 0.0.77 refuses to sandbox as uid 0
+# without CAP_SETFCAP in the bounding set, since mapping uid 0 into a user
+# namespace needs it. Apple Containers' default set already includes it; the
+# flag keeps that from being an unstated dependency. See ADR-047.
 container run \
   --name "$CONTAINER_NAME" \
   -it \
@@ -442,6 +455,7 @@ container run \
   -c "$CONTAINER_CPUS" \
   --cap-add SYS_ADMIN \
   --cap-add NET_ADMIN \
+  --cap-add SETFCAP \
   -v "$PROJECT_DIR:$PROJECT_DIR" \
   -v "$CLAUDE_CONFIG_DIR:/root/.claude" \
   -v "$CLAUDE_JSON_FILE:/root/.claude.json" \

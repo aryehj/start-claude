@@ -17,6 +17,7 @@ EXECUTABLES = [
     "research.py",
     "scripts/bump-searxng.sh",
     "tests/verify-tool-refresh.sh",
+    "tests/verify-sandbox-runtime.sh",
     "tests/probe-deny-rules.py",
     "tests/probe-tinyproxy-owner-rule.sh",
     "tests/probe-vane-egress.sh",
