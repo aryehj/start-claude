@@ -293,15 +293,34 @@ rm -f "$PROBE_DIR/claude-results.txt" "$PROBE_DIR/claude-debug.txt" "$PROBE_DIR/
 clean_probe_files
 PROMPT="Use the Bash tool to run exactly this command, once, unchanged, and run nothing else: bash $PROBE_DIR/sandbox-checks.sh $PROBE_DIR/claude-results.txt
 Then reply with the single word DONE."
-with_timeout 300 container exec -w "$PROBE_DIR" "$NAME" \
-  claude -p --model haiku --max-turns 4 --allowedTools Bash \
-  --debug-file "$PROBE_DIR/claude-debug.txt" "$PROMPT" \
-  </dev/null > "$PROBE_DIR/claude-output.txt" 2>&1
-say "    claude exit $?; reply: $(head -c 200 "$PROBE_DIR/claude-output.txt" | tr '\n' ' ')"
-if grep -qiE 'not logged in|/login|invalid api key' "$PROBE_DIR/claude-output.txt" 2>/dev/null; then
-  fail "Claude Code is not logged in" "run start-claude.sh in any project once and log in, then rerun"
+run_claude() {
+  rm -f "$PROBE_DIR/claude-results.txt" "$PROBE_DIR/claude-debug.txt" "$PROBE_DIR/claude-output.txt"
+  with_timeout 300 container exec -w "$PROBE_DIR" "$NAME" \
+    claude -p --model haiku --max-turns 4 --allowedTools Bash \
+    --debug-file "$PROBE_DIR/claude-debug.txt" "$PROMPT" \
+    </dev/null > "$PROBE_DIR/claude-output.txt" 2>&1
+  say "    claude exit $?; reply: $(head -c 200 "$PROBE_DIR/claude-output.txt" | tr '\n' ' ')"
+}
+auth_failed() {
+  grep -qiE 'not logged in|/login|auth login|failed to authenticate|invalid api key' "$PROBE_DIR/claude-output.txt" 2>/dev/null
+}
+run_claude
+if auth_failed && [[ -t 0 ]]; then
+  # The shared login (~/.claude-containers/shared) has expired. Log in inside
+  # the probe container, which renews it for every start-claude.sh container,
+  # then retry once.
+  say "    the shared Claude login has expired: running 'claude auth login' in $NAME"
+  echo "    Finish the login in your browser; the check retries afterwards."
+  container exec -it -w "$PROBE_DIR" "$NAME" claude auth login
+  say "    claude auth login exit $?"
+  clean_probe_files
+  run_claude
 fi
-judge claude "$PROBE_DIR/claude-results.txt" "$PROBE_DIR/claude-debug.txt" "$PROBE_DIR/claude-output.txt"
+if auth_failed; then
+  fail "Claude Code is not logged in" "the sandbox was not exercised; log in (claude auth login in any start-claude.sh container), then rerun"
+else
+  judge claude "$PROBE_DIR/claude-results.txt" "$PROBE_DIR/claude-debug.txt" "$PROBE_DIR/claude-output.txt"
+fi
 left_behind claude
 
 container stop "$NAME" >/dev/null 2>&1 || true
