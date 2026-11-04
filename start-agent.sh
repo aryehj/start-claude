@@ -864,8 +864,28 @@ WARN
 fi
 
 # ── SearXNG settings.yml seed (first run only, local-search path) ────────────
+# keep_only keeps an engine but does not enable it: upstream ships bing (and
+# now google and qwant) disabled, which left duckduckgo and brave as the only
+# web engines, and both rate-limit. The engines: entry turns bing on.
+SEARXNG_SETTINGS_CHANGED=false
+SEARXNG_BING_BLOCK='engines:
+  - name: bing
+    disabled: false'
 if $LOCAL_SEARCH_ENABLED; then
   mkdir -p "$SEARXNG_DIR"
+  if ! $RELOAD_ALLOWLIST && [[ -f "$SEARXNG_SETTINGS_FILE" ]] \
+      && ! grep -q '^engines:' "$SEARXNG_SETTINGS_FILE"; then
+    # Migration for files seeded before the engines: entry. Only when bing is
+    # still in keep_only: an engines: entry for a filtered-out engine has no
+    # engine module and breaks SearXNG's startup. Append (>>) keeps the inode
+    # the container's bind mount points at. Not under --reload-allowlist: it
+    # exits before the lifecycle below, which restarts SearXNG on the change.
+    if grep -qE '^[[:space:]]+- bing[[:space:]]*$' "$SEARXNG_SETTINGS_FILE"; then
+      printf '\n%s\n' "$SEARXNG_BING_BLOCK" >> "$SEARXNG_SETTINGS_FILE"
+      SEARXNG_SETTINGS_CHANGED=true
+      echo "==> $SEARXNG_SETTINGS_FILE: enabled the bing engine"
+    fi
+  fi
   if [[ ! -f "$SEARXNG_SETTINGS_FILE" ]]; then
     SECRET_KEY="$(openssl rand -hex 32)"
     cat > "$SEARXNG_SETTINGS_FILE" <<SXNG
@@ -895,6 +915,8 @@ search:
 outgoing:
   proxies:
     all://: "http://$BRIDGE_IP:$TINYPROXY_PORT"
+
+$SEARXNG_BING_BLOCK
 SXNG
     echo "==> Seeded $SEARXNG_SETTINGS_FILE (secret_key generated, proxy=$BRIDGE_IP:$TINYPROXY_PORT)"
   fi
@@ -1374,6 +1396,10 @@ if $LOCAL_SEARCH_ENABLED; then
   searxng_running_image=$(docker container inspect -f '{{.Config.Image}}' "$SEARXNG_CONTAINER" 2>/dev/null || true)
   if [[ -n "$searxng_running_image" && "$searxng_running_image" != "$SEARXNG_IMAGE" ]]; then
     echo "    searxng: pinned image changed; recreating the container"
+    docker rm -f "$SEARXNG_CONTAINER" >/dev/null 2>&1 || true
+  elif [[ -n "$searxng_running_image" ]] && $SEARXNG_SETTINGS_CHANGED; then
+    # SearXNG reads settings.yml only at startup.
+    echo "    searxng: settings.yml changed; recreating the container"
     docker rm -f "$SEARXNG_CONTAINER" >/dev/null 2>&1 || true
   fi
   if docker container inspect "$SEARXNG_CONTAINER" &>/dev/null; then

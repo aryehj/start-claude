@@ -625,9 +625,15 @@ The SearXNG config (including a generated `secret_key`) is seeded on first run a
 `$SANDBOX_ROOT/.sandbox_config/searxng/settings.yml` and survives `--rebuild`.
 To reset it, delete that directory and re-run.
 
-Enabled engines by default: Google, Bing, DuckDuckGo, Brave, Qwant, Wikipedia,
-arXiv, GitHub code search, Stack Exchange. Add an engine by editing
-`settings.yml` **and** `allowlist.txt` — both files must change, by design.
+Engines kept by default: Google, Bing, DuckDuckGo, Brave, Qwant, Wikipedia,
+arXiv, GitHub code search, Stack Exchange. `keep_only` does not enable an
+engine, and upstream ships Google, Bing and Qwant disabled, so the seed also
+turns Bing on with a top-level `engines:` entry. A launch adds that entry to an
+older `settings.yml` that has no `engines:` key and still lists `bing`, then
+recreates the searxng container (ADR-054). The general web engines that run are
+Bing, DuckDuckGo and Brave, with Wikipedia for info boxes. Add an engine by
+editing `settings.yml` **and** `allowlist.txt` — both files must change, by
+design.
 
 Pass `--disable-search` (or set `CLAUDE_AGENT_DISABLE_SEARCH=1`) to skip
 SearXNG entirely. This also disables OpenCode websearch. The agent container

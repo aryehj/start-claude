@@ -2469,3 +2469,96 @@ def test_omlx_probe_counts_any_http_response_as_reachable():
     assert not re.search(r"(?:^|\s)-[a-zA-Z]*f", flags), (
         f"omlx probe uses curl -f, so a 401 would read as unreachable: {flags}"
     )
+
+
+
+# ── SearXNG bing engine (seed + migration) ───────────────────────────────────
+# keep_only keeps an engine without enabling it, and upstream ships bing
+# disabled, so the seed carries an engines: entry and older files get one.
+
+_OLD_SEARXNG_SETTINGS = """use_default_settings:
+  engines:
+    keep_only:
+      - google
+      - bing
+      - duckduckgo
+
+server:
+  limiter: false
+"""
+
+
+def _searxng_seed_section() -> str:
+    start = _SCRIPT_TEXT.find("# ── SearXNG settings.yml seed")
+    end = _SCRIPT_TEXT.find("# ── tinyproxy install in VM", start)
+    assert start != -1 and end != -1, "SearXNG settings.yml seed section not found"
+    return _SCRIPT_TEXT[start:end]
+
+
+def _run_searxng_seed(settings: Path, reload_allowlist: bool = False) -> tuple[str, bool]:
+    """Run the seed section against SETTINGS; return (file text, SEARXNG_SETTINGS_CHANGED)."""
+    script = (
+        "set -euo pipefail\nLOCAL_SEARCH_ENABLED=true\n"
+        f"RELOAD_ALLOWLIST={'true' if reload_allowlist else 'false'}\n"
+        f"SEARXNG_DIR='{settings.parent}'\nSEARXNG_SETTINGS_FILE='{settings}'\n"
+        "BRIDGE_IP=192.168.5.1\nTINYPROXY_PORT=8888\n"
+        + _searxng_seed_section()
+        + '\necho "CHANGED=$SEARXNG_SETTINGS_CHANGED"\n'
+    )
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    assert proc.returncode == 0, proc.stderr
+    return settings.read_text(), "CHANGED=true" in proc.stdout
+
+
+def _settings_file(tmp_path: Path, existing: str) -> Path:
+    settings = tmp_path / "searxng" / "settings.yml"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(existing)
+    return settings
+
+
+def _enables_bing(text: str) -> bool:
+    return bool(re.search(r"^engines:\n  - name: bing\n    disabled: false$", text, re.M))
+
+
+def test_searxng_seed_enables_bing(tmp_path):
+    settings = tmp_path / "searxng" / "settings.yml"
+    text, changed = _run_searxng_seed(settings)
+    assert _enables_bing(text), text
+    assert re.search(r"^      - bing$", text, re.M), "bing must stay in keep_only"
+    assert not changed, "a fresh seed has no running container to recreate"
+    # The next launch finds a current file and leaves it alone.
+    assert _run_searxng_seed(settings) == (text, False)
+
+
+def test_searxng_migration_appends_bing_once(tmp_path):
+    settings = _settings_file(tmp_path, _OLD_SEARXNG_SETTINGS)
+    inode = settings.stat().st_ino
+    text, changed = _run_searxng_seed(settings)
+    assert changed and _enables_bing(text), text
+    assert text.startswith(_OLD_SEARXNG_SETTINGS), "migration must only append"
+    assert settings.stat().st_ino == inode, "the container's bind mount needs the same inode"
+    assert _run_searxng_seed(settings) == (text, False)
+
+
+def test_searxng_migration_leaves_custom_files_alone(tmp_path):
+    no_bing = _OLD_SEARXNG_SETTINGS.replace("      - bing\n", "")
+    own_engines = _OLD_SEARXNG_SETTINGS + "\nengines:\n  - name: google\n    disabled: false\n"
+    for i, existing in enumerate([no_bing, own_engines]):
+        settings = _settings_file(tmp_path / str(i), existing)
+        assert _run_searxng_seed(settings) == (existing, False)
+
+
+def test_searxng_migration_skipped_on_reload_allowlist(tmp_path):
+    # --reload-allowlist exits before the lifecycle that restarts SearXNG.
+    settings = _settings_file(tmp_path, _OLD_SEARXNG_SETTINGS)
+    assert _run_searxng_seed(settings, reload_allowlist=True) == (_OLD_SEARXNG_SETTINGS, False)
+
+
+def test_searxng_recreated_when_settings_change():
+    section = _searxng_lifecycle()
+    branch = section.find("$SEARXNG_SETTINGS_CHANGED")
+    assert branch != -1, "lifecycle must react to a settings.yml migration"
+    assert section.find('docker rm -f "$SEARXNG_CONTAINER"', branch) < section.find(
+        'if docker container inspect "$SEARXNG_CONTAINER" &>/dev/null; then', branch
+    ), "a changed settings.yml must remove the container before the start/create step"

@@ -3774,3 +3774,24 @@ On the host it checks:
   which ends any session running inside it.
 - An engine that starts needing a host missing from the allowlist shows up as a
   failed check, not as quietly worse search.
+
+### Amendment (2026-11-04): bing turned on in the seeded `settings.yml`
+
+The first live verify run found no web engine returning results.
+`use_default_settings.engines.keep_only` keeps an engine but leaves upstream's
+`disabled` flag alone, and upstream ships bing and qwant disabled. As of
+2026.11.2 it ships google disabled too. Google was also returning only its
+JavaScript-required page. That left duckduckgo and brave, and both rate-limit
+a single home IP (CAPTCHA, `Suspended: too many requests`).
+
+The seed now ends with a top-level `engines:` entry that sets bing to
+`disabled: false`. bing is reachable through the allowlist (`bing.com`).
+SearXNG merges that entry into the default engine by name. Existing files get
+the entry appended on the next launch, but only when they have no top-level
+`engines:` key of their own and bing is still in `keep_only`. An entry for an
+engine that `keep_only` filters out has no `engine:` module and breaks SearXNG
+at startup. The append keeps the file's inode, so the bind mount keeps working,
+and the searxng container is recreated, because SearXNG reads `settings.yml`
+only at startup. `--reload-allowlist` skips the migration, since it exits
+before the container lifecycle. google and qwant stay disabled: qwant answered
+403 through the proxy, and google needs JavaScript.
