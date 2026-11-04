@@ -92,6 +92,27 @@ start-claude.sh --rebuild
 This removes the existing container for the project (if any) and the
 `claude-dev:latest` image, then rebuilds from scratch.
 
+## Update warnings
+
+On launch, `start-claude.sh` prints one line when npm has had a
+`@anthropic-ai/sandbox-runtime` release more than 30 days newer than the
+version pinned in the setup script, for example:
+
+```
+warning: sandbox-runtime 0.0.81 is 41 days behind npm latest 0.0.90 (released 2026-11-30). Update: bump the pin in start-claude.sh, run start-claude.sh --rebuild, then tests/verify-sandbox-runtime.sh
+```
+
+The pin is a security dependency (ADR-047), so the update stays a deliberate
+step: bump the pin, `--rebuild`, re-test. The check runs on the host through
+the shared helper `check_versions.py`. A detached background fetch asks npm
+at most once a day and caches the answer in
+`~/.claude-containers/version-check.json`; the line itself comes from that
+cache just before attaching, so it never delays a launch and appears on the
+launch after the fetch that saw the release. Any error prints nothing. Set
+`CLAUDE_CONTAINER_VERSION_LAG_DAYS` to change the threshold, or
+`CLAUDE_CONTAINER_DISABLE_VERSION_CHECK=1` to turn it off. See `ADR.md`
+§ADR-055.
+
 ## Global container CLAUDE.md
 
 On first run, the script copies `templates/global-claude.md` from the repo
@@ -191,6 +212,8 @@ Invoke a synced skill inside any Claude Code session with its slash name, e.g.
 | `CLAUDE_CONTAINER_IMAGE` | `debian:bookworm-slim` | Override the base image |
 | `CLAUDE_CONTAINER_MEMORY` | `4G` | Per-container memory limit passed to `container run --memory` |
 | `CLAUDE_CONTAINER_CPUS` | `4` | Per-container CPU count passed to `container run --cpus` |
+| `CLAUDE_CONTAINER_VERSION_LAG_DAYS` | `30` | Warn at launch when npm has a sandbox-runtime release more than this many days newer than the pin |
+| `CLAUDE_CONTAINER_DISABLE_VERSION_CHECK` | *(unset)* | Set to `1` to turn the launch-time update check off |
 | `CLAUDE_SKILLS_ARCHIVE_URL` | upstream `main` tarball | Override the source archive for skills sync |
 | `GIT_USER_NAME` | `Dev` | Git author/committer name (overridden by `--git-name` flag) |
 | `GIT_USER_EMAIL` | `dev@localhost` | Git author/committer email (overridden by `--git-email` flag) |
@@ -681,6 +704,33 @@ list`, and an `opencode run` on omlx `gemma-4-e4b-it-6bit` that calls the
 SearXNG tool. After a refresh it also checks that the layers above npm were
 reused. See `ADR.md` §ADR-054.
 
+### Update warnings
+
+On launch, `start-agent.sh` prints one line per component whose newest
+upstream release is more than 30 days newer than the one in use, naming the
+command above that updates it:
+
+```
+warning: OpenCode 1.19.5 is 43 days behind npm latest 1.21.0 (released 2026-12-10). Update: start-agent.sh --refresh-tools
+warning: the SearXNG pin (current on 2026-11-03) is 35 days behind Docker Hub latest (pushed 2026-12-08). Update: scripts/bump-searxng.sh, then tests/verify-tool-refresh.sh
+```
+
+"In use" is the version recorded in `.sandbox_config/tool-versions` for
+OpenCode and Pi, and the "known good on" date in the `SEARXNG_IMAGE` comment
+for SearXNG (skipped under `--disable-search`). The comparison is by publish
+date, not "anything newer": SearXNG's `latest` is rebuilt several times a week
+and OpenCode ships every few days, so a plain "newer exists" check would fire
+on nearly every launch. The check runs on the host through the shared helper
+`check_versions.py`, never through the agent's proxy, so the allowlist is
+unchanged. A detached background fetch asks npm and Docker Hub at most once a
+day and caches the answers in `$SANDBOX_ROOT/.sandbox_config/version-check.json`;
+the lines come from that cache just before attaching, so the check never
+delays a launch and a release shows up on the launch after the fetch that saw
+it. Any error prints nothing. Set `CLAUDE_AGENT_VERSION_LAG_DAYS` to change
+the threshold, or `CLAUDE_AGENT_DISABLE_VERSION_CHECK=1` to turn it off.
+`tests/verify-version-check.sh` runs the helper against the real registries.
+See `ADR.md` §ADR-055.
+
 For a browser-accessible AI research UI (Vane), see the `research.py` section
 below — it runs in a separate VM with its own SearXNG instance and a denylist
 egress model suited to scraping arbitrary URLs.
@@ -841,6 +891,8 @@ noted.
 | `test_agent_sh.py` | Static invariants for `start-agent.sh`: no host-port publish, sandbox trust boundary, Pi and skills wiring, warm-reattach batching, atomic firewall apply, secret handling, flag hygiene | `uv run --with pytest pytest tests/test_agent_sh.py` |
 | `test_dockerfile.py` | Static checks: pi and opencode CLI install lines in `claude-agent.Dockerfile`, and the `TOOLS_CACHE_BUST` arg right before them | `uv run --with pytest pytest tests/test_dockerfile.py` |
 | `test_tool_refresh.py` | `--refresh-tools` / `--restore-previous-image` (flag exclusions, and the image lifecycle run against a fake `docker`), the tool-version record, and `scripts/bump-searxng.sh` offline | `uv run --with pytest pytest tests/test_tool_refresh.py` |
+| `test_check_versions.py` | Unit tests for `check_versions.py` (lag computation, once-a-day cache, malformed and missing registry responses, silence on errors and timeouts, against fixture JSON and a local HTTP server) and its wiring in both launchers | `uv run --with pytest pytest tests/test_check_versions.py` |
+| `verify-version-check.sh` | Live run of `check_versions.py` against npm and Docker Hub: the Docker Hub tags-API fields, the helper's real output, the once-a-day throttle, a forced-old report naming every update command. Log in `.verify/verify-version-check.log` | `tests/verify-version-check.sh` |
 | `verify-tool-refresh.sh` | Live acceptance check after a SearXNG bump or `--refresh-tools`: SearXNG results, OpenCode config and MCP, `opencode run` on omlx calling the SearXNG tool, layer reuse, build-cache behaviour. Needs the container running. Log in `.verify/verify-tool-refresh-<time>.log` | `tests/verify-tool-refresh.sh` |
 | `test_research.py` | Unit tests for `research.py` pure helpers (`compose_denylist`, `denylist_to_squid_acl`, `_prune_subdomains`, etc.) | `uv run --with pytest pytest tests/test_research.py` |
 | `test_settings_template.py` | Validates `templates/global-claude-settings.json` is well-formed JSON, has required keys, and `git push` is absent from the allow list | `uv run --with pytest pytest tests/test_settings_template.py` |
@@ -877,6 +929,8 @@ uv run --with pytest pytest tests/
 | `OMLX_API_KEY` | *(unset)* | API key for omlx with `--backend=omlx`. Held by the in-VM inference proxy; not passed into the container. A later run without it keeps the key the proxy already holds; a new value replaces it |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | *(unset)* | Forwarded into the container when set on the host (Pi cloud providers) |
 | `CLAUDE_AGENT_DISABLE_SEARCH` | *(unset)* | Set to `1` to disable SearXNG (also disables OpenCode websearch; overridden by `--disable-search`) |
+| `CLAUDE_AGENT_VERSION_LAG_DAYS` | `30` | Warn at launch when SearXNG, OpenCode or Pi has an upstream release more than this many days newer than the one in use |
+| `CLAUDE_AGENT_DISABLE_VERSION_CHECK` | *(unset)* | Set to `1` to turn the launch-time update check off |
 | `CLAUDE_AGENT_DEFAULT_MODEL` | *(unset)* | Default model for both OpenCode and Pi (env var only — no CLI flag). Written to `opencode.json` and `~/.pi/agent/settings.json` on each run |
 | `CLAUDE_AGENT_PLAN_MODEL` | *(unset)* | OpenCode model for plan-mode agent (overridden by `--plan-model`) |
 | `CLAUDE_AGENT_EXEC_MODEL` | *(unset)* | OpenCode model for execution/build agent (overridden by `--exec-model`) |

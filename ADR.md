@@ -3866,3 +3866,97 @@ limits on a single home IP, not from the config or the allowlist, and the "no
 engine fails for a non-throttling reason" check passed. The change was accepted
 with bing alone. The two-engine check stays as written, so a run made while
 the other engines are not throttling still shows whether they work.
+
+---
+
+## ADR-055: Launch-time update warnings: a publish-date lag threshold, checked once a day
+
+**Date:** 2026-11-04
+**Status:** Accepted (follows ADR-054 and ADR-047)
+
+### Context
+
+ADR-054 and the ADR-047 amendment made updates safe to perform, but nothing
+says when one is due. Each launcher owns version pins: `start-agent.sh` has
+the SearXNG digest and the OpenCode/Pi versions frozen in its image, and
+`start-claude.sh` has the `@anthropic-ai/sandbox-runtime` pin. The simplest
+check, "a newer release exists", is useless for two of them. SearXNG's
+`latest` is rebuilt from master several times a week, and OpenCode publishes
+every few days, so that check would fire on nearly every launch and be ignored.
+
+A launch is also the wrong place to wait for the network. Warm reattach is
+tuned to a couple of SSH round trips (ADR-045), and opencode-ai's npm document
+is about 25 MB (about 4 MB gzipped), because it lists some 12,000 snapshot
+versions.
+
+### Decision
+
+**Warn on a publish-date lag, not on "newer exists".** A component gets one
+line when its newest upstream release was published more than N days after
+the one in use. N defaults to **30**, which is long enough that the rolling
+SearXNG `latest` and OpenCode's frequent releases stay quiet between deliberate
+updates, and short enough that a pin is never more than about a month behind
+without a prompt. (SearXNG's pin was 4 weeks old when it returned no results
+at all; see ADR-054.) The lag counts calendar days and is exclusive: exactly
+N days is silent. Each line names the command that does the update:
+`scripts/bump-searxng.sh` (then `tests/verify-tool-refresh.sh`) for SearXNG,
+`start-agent.sh --refresh-tools` for OpenCode and Pi, and "bump the pin,
+`start-claude.sh --rebuild`, then `tests/verify-sandbox-runtime.sh`" for
+sandbox-runtime, which stays a deliberate step because it is a security
+dependency (ADR-047).
+
+**What counts as "in use".** OpenCode and Pi: the versions in
+`.sandbox_config/tool-versions` (ADR-054). The Dockerfile says `@latest`, so
+only the image knows them. Their publish dates come from the npm packument's
+`time` map. sandbox-runtime: the pin in `start-claude.sh`, which is what the
+next `--rebuild` installs. SearXNG: the "known good on" date that
+`bump-searxng.sh` writes above `SEARXNG_IMAGE`, compared with the
+`last_updated` of Docker Hub's `latest` tag. The comparison is by date only.
+Whether the tags API's `digest` equals the `RepoDigests` digest in the pin
+(plan Unknown 4) then does not affect the result. `tests/verify-version-check.sh`
+records the answer from the host. Anything the helper cannot date (a
+prerelease, a version missing from the cache, a missing record) is skipped.
+
+**One shared helper, `check_versions.py`.** It is stdlib-only and
+3.9-parseable, and runs on the host with its `python3`, like
+`merge_global_settings.py`. The macOS host has direct egress, so neither
+registry goes through the agent's proxy, and the allowlist does not change.
+Each launcher starts `--fetch-only` early, inside a subshell that exits at
+once. The fetch is therefore not the launcher's child: it never delays the
+launch, and it outlives the `exec` into the container without holding the
+terminal. Just before attaching, the launcher runs `--cached`, which reads
+only the state file (about 30 ms) and prints the lines on stderr. So a
+release is reported on the launch after the daily fetch that saw it. That is
+irrelevant against a 30-day threshold, and it means the slow 4 MB download
+never sits on the launch path.
+
+**Throttled, bounded, silent.** Each source is fetched at most once a day:
+the state file records a `checked` time per source. A failed or timed-out
+fetch keeps the old data and still counts as that day's attempt, so an
+offline host is not retried on every launch. A `checked` time in the future
+counts as stale. The fetches run in parallel with a 10 s socket timeout and a
+30 s overall deadline. Only release versions are stored, which keeps the state
+file around 40 KB. Any error, including a malformed response, a corrupt state
+file or a bad argument, prints nothing and exits 0. The state lives per
+launcher: `$SANDBOX_ROOT/.sandbox_config/version-check.json` beside the
+tool-version record, and `~/.claude-containers/version-check.json` beside
+`start-claude.sh`'s other host state. Neither is mounted into a container.
+
+**Knobs.** `CLAUDE_AGENT_VERSION_LAG_DAYS` and
+`CLAUDE_AGENT_DISABLE_VERSION_CHECK=1` (also `true`/`yes`, like
+`CLAUDE_AGENT_DISABLE_SEARCH`) for `start-agent.sh`. For `start-claude.sh`,
+`CLAUDE_CONTAINER_VERSION_LAG_DAYS` and `CLAUDE_CONTAINER_DISABLE_VERSION_CHECK=1`
+follow that script's `CLAUDE_CONTAINER_*` names. `start-agent.sh` skips
+SearXNG under `--disable-search`.
+
+### Consequences
+
+- A warm reattach gains one short foreground `python3` run (cache read only)
+  and one detached background process.
+- On the first launch, or the first after the state file is removed, nothing
+  is printed. The next launch has data.
+- The helper reports, and never updates. Every update still goes through its
+  own verified procedure (ADR-054, ADR-047).
+- `tests/test_check_versions.py` covers the helper offline, using fixture JSON
+  and a local HTTP server, and covers the launcher functions.
+  `tests/verify-version-check.sh` is the live check on the host.
