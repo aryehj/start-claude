@@ -1,8 +1,18 @@
-"""Static analysis: claude-agent.Dockerfile must install required CLIs correctly."""
+"""Static analysis: the claude-agent Dockerfiles must install required CLIs correctly.
+
+claude-agent.Dockerfile builds claude-agent:base (everything but OpenCode/Pi);
+claude-agent-tools.Dockerfile builds claude-agent:latest FROM that tag plus the
+npm layer (ADR-054)."""
+import re
 from pathlib import Path
 
-DOCKERFILE = Path(__file__).parent.parent / "dockerfiles" / "claude-agent.Dockerfile"
-_TEXT = DOCKERFILE.read_text()
+REPO = Path(__file__).parent.parent
+DOCKERFILE = REPO / "dockerfiles" / "claude-agent.Dockerfile"
+TOOLS_DOCKERFILE = REPO / "dockerfiles" / "claude-agent-tools.Dockerfile"
+_BASE = DOCKERFILE.read_text()
+_TOOLS = TOOLS_DOCKERFILE.read_text()
+# Both files: most checks only care that the package is installed somewhere.
+_TEXT = _BASE + "\n" + _TOOLS
 
 
 def test_pi_installed_via_npm():
@@ -83,8 +93,20 @@ def test_searxng_mcp_pinned_below_v2():
 
 
 # ── tools cache bust (--refresh-tools) ────────────────────────────────────────
-# start-agent.sh --refresh-tools passes a fresh TOOLS_CACHE_BUST so the npm
-# layer reruns while every layer above it stays cached; it must be the last one.
+# start-agent.sh --refresh-tools rebuilds only the tools image, with a fresh
+# TOOLS_CACHE_BUST, on top of the tagged base; the npm layer must be its only
+# layer, and the base must not install the tools.
+
+def _instructions(text):
+    """(index, line) of Dockerfile instruction lines, comments and continuations dropped."""
+    out, cont = [], False
+    for i, line in enumerate(text.splitlines()):
+        s = line.strip()
+        if not cont and s and not s.startswith("#"):
+            out.append((i, s))
+        cont = s.endswith("\\")
+    return out
+
 
 def _npm_install_line_index(lines):
     idx = [i for i, l in enumerate(lines)
@@ -93,11 +115,44 @@ def _npm_install_line_index(lines):
     return idx[0]
 
 
+def test_tools_image_builds_from_the_tagged_base():
+    froms = [s for _, s in _instructions(_TOOLS) if s.upper().startswith("FROM ")]
+    assert froms == ["FROM claude-agent:base"], (
+        "claude-agent-tools.Dockerfile must have one FROM, of the tagged base image "
+        f"(not a stage, which the legacy builder would rebuild): {froms}"
+    )
+
+
+def test_base_tag_matches_start_agent():
+    script = (REPO / "start-agent.sh").read_text()
+    assert 'BASE_IMAGE_TAG="claude-agent:base"' in script
+    assert 'TOOLS_DOCKERFILE_PATH="$SCRIPT_DIR/dockerfiles/claude-agent-tools.Dockerfile"' in script
+
+
+def test_base_does_not_install_the_tools():
+    for pkg in ("opencode-ai", "pi-coding-agent", "TOOLS_CACHE_BUST"):
+        assert pkg not in _BASE, f"{pkg} belongs in claude-agent-tools.Dockerfile, not the base"
+
+
+def test_base_has_one_stage():
+    froms = [s for _, s in _instructions(_BASE) if s.upper().startswith("FROM ")]
+    assert len(froms) == 1, f"the base Dockerfile must be a single stage: {froms}"
+
+
+def test_tools_image_has_only_the_npm_layer():
+    layers = [s for _, s in _instructions(_TOOLS) if s.startswith(("RUN", "COPY", "ADD"))]
+    assert len(layers) == 1 and "npm install -g" in _TOOLS, (
+        f"the tools image must add one layer, the npm install; found {layers}"
+    )
+    workdir = [s for _, s in _instructions(_TOOLS) if s.upper().startswith(("WORKDIR", "VOLUME"))]
+    assert not workdir, f"WORKDIR/VOLUME belong in the base (the legacy builder commits them): {workdir}"
+
+
 def test_tools_cache_bust_arg_declared_before_npm_install():
-    lines = _TEXT.splitlines()
+    lines = _TOOLS.splitlines()
     npm = _npm_install_line_index(lines)
     args = [i for i, l in enumerate(lines) if l.strip().startswith("ARG TOOLS_CACHE_BUST")]
-    assert len(args) == 1, "Dockerfile must declare exactly one ARG TOOLS_CACHE_BUST"
+    assert len(args) == 1, "the tools Dockerfile must declare exactly one ARG TOOLS_CACHE_BUST"
     assert args[0] < npm, "ARG TOOLS_CACHE_BUST must come before the npm install line"
     run = npm
     while not lines[run].lstrip().startswith("RUN"):
@@ -107,30 +162,31 @@ def test_tools_cache_bust_arg_declared_before_npm_install():
         "no layer may sit between ARG TOOLS_CACHE_BUST and the npm install, "
         f"or a refresh would rerun it too: {between}"
     )
+    from_line = next(i for i, s in _instructions(_TOOLS) if s.upper().startswith("FROM "))
+    assert from_line < args[0], "ARG TOOLS_CACHE_BUST must follow FROM to be in scope for the RUN"
 
 
 def test_tools_cache_bust_referenced_by_npm_run():
-    lines = _TEXT.splitlines()
+    lines = _TOOLS.splitlines()
     npm = _npm_install_line_index(lines)
     run = npm
     while not lines[run].lstrip().startswith("RUN"):
         run -= 1
     block = "\n".join(lines[run:npm + 1])
-    assert "TOOLS_CACHE_BUST" in block.split("ARG")[-1], (
+    assert re.search(r"\$\{?TOOLS_CACHE_BUST", block), (
         "the npm install RUN must reference $TOOLS_CACHE_BUST so a new value reruns it"
     )
 
 
 def test_tools_still_installed_at_latest():
     # The user chose to keep @latest (plans/safe-tool-version-updates.md).
-    assert "opencode-ai@latest" in _TEXT and "@earendil-works/pi-coding-agent@latest" in _TEXT
+    assert "opencode-ai@latest" in _TOOLS and "@earendil-works/pi-coding-agent@latest" in _TOOLS
 
 
 def test_npm_install_is_the_last_layer():
-    # A new TOOLS_CACHE_BUST reruns every RUN after the ARG, so any layer
-    # below the npm install (apt, uv venvs, config) would rerun on each
-    # --refresh-tools. Only metadata instructions may follow it.
-    lines = _TEXT.splitlines()
+    # Any layer below the npm install would rerun on each --refresh-tools.
+    # Only metadata instructions may follow it.
+    lines = _TOOLS.splitlines()
     npm = _npm_install_line_index(lines)
     after = [l for l in lines[npm + 1:] if l.strip().startswith(("RUN", "COPY", "ADD"))]
     assert not after, f"the opencode/pi npm install must be the last layer; found after it: {after}"

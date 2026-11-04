@@ -17,11 +17,15 @@
 #   3. `opencode run` on omlx/gemma-4-e4b-it-6bit calls the searxng tool, the
 #      tool returns results, and the answer is not empty. `pi --version` runs.
 # On the host (DOCKER_CONTEXT=colima-claude-agent, the client start-agent.sh uses):
-#   4. After --refresh-tools: claude-agent:previous and :latest share every
-#      layer above the npm install and differ from it onward.
+#   4. claude-agent:latest is claude-agent:base's layers plus the tools
+#      Dockerfile's (the npm install), so no base layer was rebuilt. After
+#      --refresh-tools, :previous shares all of the base's layers if it was
+#      built on the same base (INFO, not FAIL, if it was built on an older one)
+#      and differs from latest in the npm layer.
 #   5. Whether the build cache survives `docker image rm`, i.e. whether
 #      --rebuild alone reuses the npm layer: builds a two-line probe image
-#      twice with an image rm between. INFO only.
+#      twice with an image rm between. INFO only; tests/probe-build-cache.sh
+#      looks into the cause.
 #   6. The sandbox's .sandbox_config/tool-versions matches the image.
 #
 # Also runs inside the agent container itself: checks 1-3 run directly and the
@@ -103,34 +107,62 @@ fi
 
 latest_id=$(docker image inspect -f '{{.Id}}' claude-agent:latest 2>/dev/null)
 previous_id=$(docker image inspect -f '{{.Id}}' claude-agent:previous 2>/dev/null)
+base_id=$(docker image inspect -f '{{.Id}}' claude-agent:base 2>/dev/null)
 echo "INFO  claude-agent:latest   ${latest_id:-missing}"
 echo "INFO  claude-agent:previous ${previous_id:-missing}"
+echo "INFO  claude-agent:base     ${base_id:-missing}"
 
-# 4. The refresh rebuilt only from the npm layer onward.
-if [[ -z "$previous_id" ]]; then
-  skip "refresh kept the layers above npm" "no claude-agent:previous yet (run start-agent.sh --refresh-tools)"
-elif [[ "$previous_id" == "$latest_id" ]]; then
-  skip "refresh kept the layers above npm" "previous and latest are the same image (restored, or not refreshed since)"
+# 4. latest = base + the npm layer; previous shares the base if built on it.
+layers() { docker image inspect -f '{{json .RootFS.Layers}}' "$1" 2>/dev/null || echo null; }
+if [[ -z "$latest_id" ]]; then
+  fail "latest is the base plus the npm layer" "no claude-agent:latest"
+elif [[ -z "$base_id" ]]; then
+  skip "latest is the base plus the npm layer" "no claude-agent:base yet (start-agent.sh --refresh-tools or --rebuild builds it)"
 else
-  # Layers above the npm RUN: the base image's, plus one per RUN/COPY/ADD before
-  # it. Both read from the Dockerfile, so the count follows its layout (the npm
-  # RUN is the last layer; tests/test_dockerfile.py enforces that).
-  above=$(awk '/^(RUN|COPY|ADD) /{n++} /opencode-ai@latest/{print n-1; exit}' dockerfiles/claude-agent.Dockerfile)
-  base_image=$(awk '/^FROM /{print $2; exit}' dockerfiles/claude-agent.Dockerfile)
-  base=$(docker image inspect -f '{{len .RootFS.Layers}}' "$base_image" 2>/dev/null || echo 1)
-  tally "$(python3 - "$((above + base))" \
-    "$(docker image inspect -f '{{json .RootFS.Layers}}' claude-agent:previous)" \
-    "$(docker image inspect -f '{{json .RootFS.Layers}}' claude-agent:latest)" <<'PYEOF'
+  # Layers the tools Dockerfile adds on top of the base: one per RUN/COPY/ADD.
+  # Read from the file, so the count follows its layout (test_dockerfile.py
+  # keeps it at one, the npm install).
+  tools_layers=$(awk '/^(RUN|COPY|ADD) /{n++} END{print n+0}' dockerfiles/claude-agent-tools.Dockerfile)
+  same_image=no; [[ -n "$previous_id" && "$previous_id" == "$latest_id" ]] && same_image=yes
+  tally "$(python3 - "$tools_layers" "$same_image" "$(layers claude-agent:base)" \
+    "$(layers claude-agent:latest)" "$(layers claude-agent:previous)" <<'PYEOF'
 import json, sys
-keep, a, b = int(sys.argv[1]), json.loads(sys.argv[2]), json.loads(sys.argv[3])
-shared = 0
-while shared < min(len(a), len(b)) and a[shared] == b[shared]:
-    shared += 1
-print(f"INFO  {shared} shared layers; {keep} expected above the npm install")
-print(f"PASS  refresh kept the {keep} layers above npm" if shared >= keep else
-      f"FAIL  refresh kept the layers above npm — only {shared} of {keep} shared (OS/Node/Claude Code were rebuilt)")
-print("PASS  refresh rebuilt the npm layer" if shared <= keep else
-      f"FAIL  refresh rebuilt the npm layer — {shared} layers shared, so the npm layer was reused")
+extra, same_image = int(sys.argv[1]), sys.argv[2] == "yes"
+base, latest, previous = (json.loads(a) for a in sys.argv[3:6])
+
+def shared(a, b):
+    n = 0
+    while n < min(len(a), len(b)) and a[n] == b[n]:
+        n += 1
+    return n
+
+nb = len(base)
+s = shared(base, latest)
+print(f"INFO  base {nb} layers; latest {len(latest)} layers, {s} shared with base; "
+      f"tools Dockerfile adds {extra}")
+if s == nb and len(latest) == nb + extra:
+    print(f"PASS  latest is the base's {nb} layers plus {extra} npm layer(s)")
+else:
+    print(f"FAIL  latest is the base's {nb} layers plus {extra} npm layer(s) — "
+          f"{s} of {nb} base layers shared, {len(latest)} layers in all")
+
+if previous is None:
+    print("SKIP  previous built on the same base — no claude-agent:previous yet "
+          "(run start-agent.sh --refresh-tools)")
+elif same_image:
+    print("SKIP  previous built on the same base — previous and latest are the same "
+          "image (restored, or not refreshed since)")
+else:
+    p = shared(base, previous)
+    if p < nb:
+        print(f"INFO  previous was built on an older base (shares {p} of the base's {nb} "
+              "layers): expected after the first refresh on the two-image layout, or after the base was rebuilt")
+    else:
+        print(f"PASS  previous was built on the same base (all {nb} base layers shared)")
+        if previous[nb:] != latest[nb:]:
+            print("PASS  refresh rebuilt the npm layer")
+        else:
+            print("FAIL  refresh rebuilt the npm layer — previous and latest have the same layers")
 PYEOF
 )"
 fi
@@ -147,9 +179,9 @@ second=$(probe_build); docker image rm "$probe_tag" >/dev/null 2>&1
 if [[ -z "$first" || -z "$second" ]]; then
   skip "build cache probe" "the probe image did not build"
 elif [[ "$first" == "$second" ]]; then
-  echo "INFO  build cache SURVIVES docker image rm: --rebuild alone reuses the cached npm layer"
+  echo "INFO  build cache SURVIVES docker image rm: --rebuild alone may reuse a cached npm layer"
 else
-  echo "INFO  build cache does NOT survive docker image rm: --rebuild reruns every layer, npm included"
+  echo "INFO  build cache does NOT survive docker image rm: --rebuild reruns every layer, npm included (cause unconfirmed; see tests/probe-build-cache.sh)"
 fi
 echo "INFO  docker client $(docker version -f '{{.Client.Version}}' 2>/dev/null), server $(docker version -f '{{.Server.Version}}' 2>/dev/null); buildx: $(docker buildx version 2>/dev/null | head -n 1 || echo none)${DOCKER_BUILDKIT:+; DOCKER_BUILDKIT=$DOCKER_BUILDKIT}"
 

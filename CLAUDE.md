@@ -11,7 +11,7 @@ start-agent.sh               — Colima path; shared VM + container with Claude 
 research.py                  — Python script; isolated Colima VM + Vane + SearXNG research environment
 merge_global_settings.py     — shared helper both scripts run on the host to merge the template into ~/.claude/settings.json (stdlib-only, Python 3.9-safe)
 check_versions.py            — shared helper both scripts run on the host for launch-time update warnings (npm + Docker Hub publish-date lag, once-a-day cache; stdlib-only, Python 3.9-safe)
-dockerfiles/                 — Dockerfiles built by start-agent.sh (claude-agent.Dockerfile)
+dockerfiles/                 — Dockerfiles built by start-agent.sh (claude-agent.Dockerfile → claude-agent:base; claude-agent-tools.Dockerfile → claude-agent:latest, OpenCode/Pi on the base)
 templates/                   — seed templates copied to host state dirs on first run
   global-claude.md                    — seeded to ~/.claude-containers/shared/CLAUDE.md
   global-claude-settings.json         — source for settings.json (showThinkingSummaries, attribution, theme, prefersReducedMotion, permissions); applied by merge_global_settings.py
@@ -27,7 +27,7 @@ tests/                       — unit tests and infra smoke tests
   test-agent-firewall.sh               — in-container firewall smoke tests for start-agent.sh (all README cases but hot-reload: egress, inference proxy allow/deny and no direct host path, real key absent, DNS blackhole, VM-local services)
   test-cross-vm-isolation.sh           — host-driven cross-VM isolation test: claude-agent ↔ research cannot reach each other; claude-agent reaches the inference proxy, research reaches the host inference port
   test_agent_sh.py                     — static checks: no host-port publish, pi integration invariants, sandbox trust-boundary
-  test_dockerfile.py                   — static checks: pi and opencode CLI install lines in claude-agent.Dockerfile, TOOLS_CACHE_BUST arg right before them, npm layer last
+  test_dockerfile.py                   — static checks: pi and opencode CLI install lines in claude-agent-tools.Dockerfile, which is FROM the tagged claude-agent:base with TOOLS_CACHE_BUST right before the npm RUN and that RUN last; the base Dockerfile installs neither
   test_tool_refresh.py                 — --refresh-tools/--restore-previous-image exclusions and image lifecycle (fake docker), tool-version record, bump-searxng.sh offline
   test_research.py                     — unit tests for research.py pure helpers
   test_settings_template.py           — validates global-claude-settings.json is well-formed and git push is absent from allow list
@@ -38,12 +38,13 @@ tests/                       — unit tests and infra smoke tests
   test_sandbox_allowlist.py           — validates sandbox-allowlist.txt is well-formed and that start-claude.sh injects allowedDomains with *.d expansion
   probe-denylist.sh                    — host-driven Squid denylist end-to-end probe (allow + deny URLs)
   probe-vane-egress.sh                 — smoke test for research-vane egress env vars and sidecar HTTPS round-trip
+  probe-build-cache.sh                 — host-driven probe of the legacy builder's cache: image store/driver, client/server versions, buildx; whether a layer stays cached after the image that first built it is removed while another image still uses it; log in .verify/probe-build-cache.log
   probe-tinyproxy-owner-rule.sh        — host-driven live check of CLAUDE_AGENT_OUT's owner-match rule (tinyproxy user refused, normal user as control)
   probe-vm-ipv6.sh                     — host-driven check of whether tinyproxy has an IPv6 path out of the VM or to the Mac (CLAUDE_AGENT_OUT is IPv4 only)
   verify-omlx-key-handling.sh          — host-driven live check that a keyless `--reload-allowlist` keeps the proxy's backend and omlx key, and that the startup probe's keyless curl reaches omlx; log in .verify/
   verify-sandbox-runtime.sh            — host-driven live re-test after a sandbox-runtime pin bump: rebuilds a throwaway `sandbox-probe` start-claude.sh container if needed, checks CapBnd (CAP_SETFCAP, plus Apple's default set), then runs the same in-sandbox checks under `srt` and `claude -p` (write/remount/environ denied, domain allow/deny, no proxy bypass); log in .verify/
   verify-version-check.sh              — host-driven live run of check_versions.py against npm and Docker Hub: tags-API fields (plan Unknown 4), real output, once-a-day throttle, forced-old report; log in .verify/
-  verify-tool-refresh.sh               — live acceptance check after a SearXNG bump or --refresh-tools: SearXNG results from 2+ engines, opencode config + MCP, `opencode run` on omlx gemma-4-e4b-it-6bit calling the searxng tool, layer reuse, build-cache probe; runs on the host or in the container; log in .verify/
+  verify-tool-refresh.sh               — live acceptance check after a SearXNG bump or --refresh-tools: SearXNG results from 2+ engines, opencode config + MCP, `opencode run` on omlx gemma-4-e4b-it-6bit calling the searxng tool, latest = base + npm layer (previous shares the base if built on it), build-cache probe; runs on the host or in the container; log in .verify/
 experiments/                 — archived experiments (not part of CI)
   vane-eval/                           — OFAT eval harness (archived); see experiments/vane-eval/README.md
   model-experiment/                    — raw session transcripts from the model-comparison experiment
@@ -97,7 +98,7 @@ If the named container already exists, it just starts and re-attaches it.
 `start-agent.sh` is a sibling to `start-claude.sh`, not a replacement. It runs Claude Code, OpenCode, and Pi on top of a single shared Colima VM and a single shared docker container, with a VM-level egress allowlist the in-container LLM cannot modify, and routes local inference to Ollama or omlx on the macOS host through a default-deny proxy in the VM.
 
 - **Colima, one shared VM + one sandbox active at a time.** Single `claude-agent` Colima profile; VM launched with `--mount $SANDBOX_ROOT:w` so only the active sandbox is visible inside the VM. Switching sandboxes stops and restarts the VM with the new mount (~10s). Default 8 GiB / 6 CPUs (overridable via `CLAUDE_AGENT_MEMORY` / `CLAUDE_AGENT_CPUS`). See ADR-034.
-- **Dockerfile, not an inline heredoc.** Image built from `dockerfiles/claude-agent.Dockerfile` via `docker build` — more readable and cacheable than the `start-claude.sh` inline approach.
+- **Dockerfile, not an inline heredoc; two images.** `dockerfiles/claude-agent.Dockerfile` builds `claude-agent:base` (OS packages, Node, uv, Claude Code, office tools, Python venvs); `dockerfiles/claude-agent-tools.Dockerfile` builds `claude-agent:latest` `FROM claude-agent:base` (the tag, not a stage) plus the OpenCode/Pi npm layer. More readable than the `start-claude.sh` inline approach, and a refresh can rebuild the npm layer without depending on the build cache. New layers go in the base file. See ADR-054.
 - **Egress allowlist via in-VM tinyproxy + CLAUDE_AGENT / CLAUDE_AGENT_IN / CLAUDE_AGENT_OUT iptables chains.** tinyproxy runs inside the Colima VM; CLAUDE_AGENT (from DOCKER-USER, FORWARD) REJECTs all unmatched container egress, CLAUDE_AGENT_IN (from INPUT) REJECTs container traffic to VM-local services other than tinyproxy and the inference proxy (sshd, dnsmasq), and CLAUDE_AGENT_OUT (from OUTPUT) REJECTs new TCP connections from the `tinyproxy` user to `$HOST_IP` and the private ranges, since tinyproxy's traffic crosses neither container chain. Its first rule RETURNs ESTABLISHED,RELATED, because tinyproxy's replies to containers also leave through OUTPUT and container subnets sit inside `172.16.0.0/12`. All are replaced in one `iptables-restore --noflush` commit, so none is empty mid-apply. CLAUDE_AGENT_OUT6 does the same job for IPv6, refusing tinyproxy everything but loopback, in its own `ip6tables-restore` commit at the end of the firewall script (the VM shares a private IPv6 prefix with the Mac; see ADR-050). The agent container is created with `--dns 192.0.2.1` (blackhole), so external names do not resolve; reattach warns if an older container lacks it. See ADR-010.
 - **Allowlist in `.sandbox_config/`, bind-mounted `:ro` in the container.** `$SANDBOX_ROOT/.sandbox_config/allowlist.txt` seeded on first run from `templates/sandbox-allowlist.txt` (shared with `start-claude.sh`), written in place so the bind mount keeps its inode; mounted read-only at `/etc/claude-agent/allowlist.txt` so the agent can read but not rewrite it. `--reload-allowlist` applies host-side edits in ~2s without touching the container. Lines that are not bare domains (URLs, paths, ports, single labels) are skipped with a warning. See ADR-034, ADR-049.
 - **Warm reattach issues one SSH handshake (batch probe) plus one for firewall.** All read-only VM facts (bridge network, host IP, agent-net CIDR, tinyproxy install/active status, stored config hash) are gathered in a single `colima ssh` call via `vm-probe.sh`. Tinyproxy config is pushed only when its SHA-256 hash changed or the service is inactive; unchanged warm paths skip the push and reload entirely. The inference probe runs as a background job so its 3-second timeout overlaps later work. See ADR-045.
@@ -112,9 +113,9 @@ If the named container already exists, it just starts and re-attaches it.
 - **Per-sandbox auth and memory state; no cross-script sharing.** Each sandbox's `.sandbox_config/claude/` and `.sandbox_config/claude.json` hold its own Claude Code auth and memory. There is no shared state with `start-claude.sh`; `claude login` must be run once per sandbox. See ADR-034.
 - **`--init-sandbox PATH` creates a sandbox directory tree.** Creates `.sandbox_config/`, `projects/`, and all required subdirs at `PATH`; refuses if `.sandbox_config/` already exists. Running `start-agent.sh` outside any sandbox root is a hard error with a remediation message pointing at `--init-sandbox`. See ADR-034.
 - **Small-model skill ports seeded on every fresh container.** `skills-agents/{scope,build,wrap}/` are copied into `$SANDBOX/.sandbox_config/agents/skills/` by `seed_agent_skills()`, called from the fresh-container path alongside `sync_skills()`. Both `--rebuild` and `--reset-container` trigger this path; bare reattach skips it. `--init-sandbox` creates the bind-mount target directory only; the first `start-agent.sh` run seeds the skills as a side effect. Local-only skill dirs are left untouched; copy failures warn but do not abort. See ADR-038.
-- **`--rebuild` semantics.** Removes image (`latest` and `previous`, whose layers the legacy builder would otherwise reuse as cache) + container non-interactively; Colima VM deletion requires an extra `y` because it wipes the entire VM runtime.
+- **`--rebuild` semantics.** Removes the images (`latest`, `previous`, whose layers the legacy builder would otherwise reuse as cache, and `base`) + container non-interactively, then builds `base` and `latest` again; it is the only way to update OS packages, Node, uv or Claude Code in the image. Colima VM deletion requires an extra `y` because it wipes the entire VM runtime. A plain launch with no `latest` builds `base` only if it is missing.
 - **`--reset-container` semantics.** Removes the container (and SearXNG container) but keeps the image and VM intact; mutually exclusive with `--rebuild`. Use when only container state needs resetting — avoids network egress for a full image rebuild.
-- **`--refresh-tools` / `--restore-previous-image`.** OpenCode and Pi stay at `@latest`; refresh rebuilds with a fresh `TOOLS_CACHE_BUST` build arg (declared right before the npm `RUN`, the image's last layer, so only it reruns), then tags the replaced image as `:previous`, recreates both containers, and prints old → new versions; a failed build changes nothing. Restore retags `previous` → `latest` and recreates. The image a refresh or restore drops is removed once untagged (no `-f`). Both exclude `--rebuild`, `--reset-container` and the allowlist flags. Versions are recorded per image ID in `.sandbox_config/tool-versions` by a `--network none` throwaway container, never on a warm reattach. See ADR-054.
+- **`--refresh-tools` / `--restore-previous-image`.** OpenCode and Pi stay at `@latest`; refresh rebuilds only `claude-agent:latest` from `claude-agent-tools.Dockerfile` with a fresh `TOOLS_CACHE_BUST` build arg, on the existing tagged `claude-agent:base` (built first only if missing), so no base layer reruns whatever the build cache keeps; then it tags the replaced image as `:previous`, recreates both containers, and prints old → new versions; a failed build changes nothing. Restore retags `previous` → `latest` and recreates. The image a refresh or restore drops is removed once untagged (no `-f`). Both exclude `--rebuild`, `--reset-container` and the allowlist flags. Versions are recorded per image ID in `.sandbox_config/tool-versions` by a `--network none` throwaway container, never on a warm reattach. See ADR-054.
 - **Launch-time update warnings.** One line per component whose newest upstream release is more than `CLAUDE_AGENT_VERSION_LAG_DAYS` (default 30) days newer than the one in use, compared by publish date, not "newer exists" (SearXNG `latest` and OpenCode move every few days). In use: `.sandbox_config/tool-versions` for OpenCode/Pi (npm `time` map) and the pin comment's "known good on" date for SearXNG (Docker Hub `last_updated` of `latest`; skipped under `--disable-search`). Each line names `--refresh-tools` or `scripts/bump-searxng.sh`. Same `check_versions.py` flow as `start-claude.sh`, with state in `.sandbox_config/version-check.json`; fetched on the host, never through tinyproxy. `CLAUDE_AGENT_DISABLE_VERSION_CHECK=1` turns it off. See ADR-055.
 - **`NODE_USE_ENV_PROXY=1` makes Node honor the proxy natively.** Node 24 undici reads `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` when this flag is set — no shim packages needed. See ADR-013.
 - **webfetch allowed, websearch denied by default.** `opencode.json` generated with `permission.webfetch: "allow"` and `permission.websearch: "deny"`; webfetch egress bounded by the tinyproxy allowlist.
@@ -162,15 +163,19 @@ This removes the existing project container (if any) and the `claude-dev:latest`
 image, then rebuilds from scratch.
 
 For `start-agent.sh`, the image is built from
-`dockerfiles/claude-agent.Dockerfile`. Edit the Dockerfile for image-level
-changes; edit `start-agent.sh` for host-side orchestration, firewall, or
-allowlist-handling changes. After either, run:
+`dockerfiles/claude-agent.Dockerfile` (as `claude-agent:base`) and
+`dockerfiles/claude-agent-tools.Dockerfile` (OpenCode/Pi, as
+`claude-agent:latest`). Edit `claude-agent.Dockerfile` for image-level
+changes; keep the tools file to the npm install. Edit `start-agent.sh` for
+host-side orchestration, firewall, or allowlist-handling changes. After
+either, run:
 
 ```bash
 start-agent.sh --rebuild
 ```
 
-which removes `claude-agent:latest` and the container, then rebuilds. An
+which removes `claude-agent:latest`, `:previous`, `:base` and the container,
+then rebuilds. `--refresh-tools` does not pick up base changes. An
 additional confirmation prompt offers to delete the Colima VM too — only
 say yes if you want to start over from a clean VM (loses everything else
 inside the VM's docker runtime).

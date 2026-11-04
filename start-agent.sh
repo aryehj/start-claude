@@ -66,20 +66,24 @@ OPTIONS:
   --init-sandbox PATH    Create a new sandbox at PATH with the required
                          directory layout. One-shot; exits immediately after
                          creation.
-  --rebuild              Remove the image (claude-agent:previous too) and the
-                         containers, and recreate. With confirmation, also
-                         delete and recreate the Colima VM.
+  --rebuild              Remove the images (claude-agent:latest, :previous
+                         and :base) and the containers, and rebuild both
+                         images. The only way to update the OS packages,
+                         Node, uv or Claude Code in the image. With
+                         confirmation, also delete and recreate the Colima VM.
   --reset-container      Remove the project container (and SearXNG container)
                          but keep the image and VM. Cheaper than --rebuild
                          when you only need to reset container state.
                          Mutually exclusive with --rebuild.
   --refresh-tools        Pull the current OpenCode and Pi (@latest) into the
-                         image: rebuild only the npm layer (OS packages, Node,
-                         uv, Claude Code and the Python venvs stay cached),
-                         keep the replaced image as claude-agent:previous,
-                         and recreate the containers like --reset-container.
-                         Prints the old and new versions. --rebuild alone may
-                         reuse the cached npm layer.
+                         image: rebuild only claude-agent:latest's npm layer,
+                         on top of the existing claude-agent:base (OS
+                         packages, Node, uv, Claude Code and the Python venvs
+                         are not rebuilt; :base is built first only if it is
+                         missing). Keeps the replaced image as
+                         claude-agent:previous and recreates the containers
+                         like --reset-container. Prints the old and new
+                         versions.
   --restore-previous-image  Point claude-agent:latest back at the image saved
                          by the last --refresh-tools and recreate the
                          containers. --refresh-tools and
@@ -405,7 +409,12 @@ IMAGE_TAG="claude-agent:latest"
 # --refresh-tools keeps the image it replaces here; --restore-previous-image
 # moves latest back to it. One generation only.
 PREVIOUS_IMAGE_TAG="claude-agent:previous"
+# Everything but OpenCode/Pi, built from DOCKERFILE_PATH. latest is built FROM
+# this tag (TOOLS_DOCKERFILE_PATH), so a refresh never rebuilds it and does
+# not depend on the build cache (ADR-054). Only --rebuild replaces it.
+BASE_IMAGE_TAG="claude-agent:base"
 DOCKERFILE_PATH="$SCRIPT_DIR/dockerfiles/claude-agent.Dockerfile"
+TOOLS_DOCKERFILE_PATH="$SCRIPT_DIR/dockerfiles/claude-agent-tools.Dockerfile"
 DOCKERFILE_DIR="$(dirname "$DOCKERFILE_PATH")"
 CLAUDE_CONFIG_DIR="$SANDBOX_ROOT/.sandbox_config/claude"
 CLAUDE_JSON_FILE="$SANDBOX_ROOT/.sandbox_config/claude.json"
@@ -453,10 +462,12 @@ if [[ ! -d "$PROJECT_DIR" ]]; then
   echo "error: project dir '$PROJECT_DIR' does not exist." >&2
   exit 1
 fi
-if [[ ! -f "$DOCKERFILE_PATH" ]]; then
-  echo "error: Dockerfile not found at $DOCKERFILE_PATH" >&2
-  exit 1
-fi
+for dockerfile in "$DOCKERFILE_PATH" "$TOOLS_DOCKERFILE_PATH"; do
+  if [[ ! -f "$dockerfile" ]]; then
+    echo "error: Dockerfile not found at $dockerfile" >&2
+    exit 1
+  fi
+done
 if [[ ! -f "$ALLOWLIST_TEMPLATE" ]]; then
   echo "error: allowlist template not found at $ALLOWLIST_TEMPLATE" >&2
   exit 1
@@ -683,8 +694,9 @@ if $REBUILD; then
   remove_containers "--rebuild"
   # previous goes too: with the legacy builder its layer chain is build cache,
   # so a plain rebuild after a --refresh-tools could reproduce the older image
-  # and quietly downgrade OpenCode/Pi (ADR-054).
-  for tag in "$IMAGE_TAG" "$PREVIOUS_IMAGE_TAG"; do
+  # and quietly downgrade OpenCode/Pi. base goes last, after the images built
+  # on it; the image lifecycle below then rebuilds it, then latest (ADR-054).
+  for tag in "$IMAGE_TAG" "$PREVIOUS_IMAGE_TAG" "$BASE_IMAGE_TAG"; do
     if docker image inspect "$tag" &>/dev/null; then
       echo "==> --rebuild: removing image '$tag'"
       docker image rm "$tag" >/dev/null
@@ -1377,9 +1389,24 @@ fi
 # legacy-builder build ARGs don't reliably forward HTTP_PROXY to every tool
 # (apt, for one, only consults lowercase http_proxy). Runtime containers
 # still attach to the bridge and are firewalled normally.
+#
+# Two images (ADR-054): claude-agent:base from DOCKERFILE_PATH (OS packages,
+# Node, uv, Claude Code, the Python venvs), and claude-agent:latest from
+# TOOLS_DOCKERFILE_PATH, which is FROM the base tag plus the OpenCode/Pi npm
+# layer. A refresh rebuilds only latest, so it cannot rerun a base layer
+# whatever the build cache keeps.
 build_image() {
   docker build --network=host "$@" \
-    -t "$IMAGE_TAG" -f "$DOCKERFILE_PATH" "$DOCKERFILE_DIR"
+    -t "$IMAGE_TAG" -f "$TOOLS_DOCKERFILE_PATH" "$DOCKERFILE_DIR"
+}
+
+# Build claude-agent:base unless it exists. Called only on the paths that
+# build latest, so a warm reattach never inspects it.
+ensure_base_image() {
+  docker image inspect "$BASE_IMAGE_TAG" &>/dev/null && return 0
+  echo "==> Building $BASE_IMAGE_TAG from $DOCKERFILE_PATH"
+  docker build --network=host \
+    -t "$BASE_IMAGE_TAG" -f "$DOCKERFILE_PATH" "$DOCKERFILE_DIR"
 }
 
 # Write the image's OpenCode/Pi versions to $TOOL_VERSIONS_FILE, keyed by
@@ -1453,11 +1480,14 @@ if $REFRESH_TOOLS; then
     record_tool_versions
     old_opencode=$(tool_version opencode); old_pi=$(tool_version pi)
   fi
-  echo "==> --refresh-tools: rebuilding $IMAGE_TAG from the OpenCode/Pi npm layer onward"
-  # A fresh value reruns the npm RUN, the last layer; the layers above the ARG
-  # stay cached. A failed build exits here (set -e), leaving latest, previous
-  # and the containers as they were. The replaced image keeps its ID while
-  # untagged, so it can still be tagged as previous afterwards.
+  # Only when base is missing (first refresh after the two-image split, or
+  # after a manual rm); otherwise the refresh never touches base.
+  ensure_base_image
+  echo "==> --refresh-tools: rebuilding $IMAGE_TAG's OpenCode/Pi npm layer on $BASE_IMAGE_TAG"
+  # A fresh value reruns the npm RUN on top of the tagged base. A failed build
+  # exits here (set -e), leaving latest, previous and the containers as they
+  # were. The replaced image keeps its ID while untagged, so it can still be
+  # tagged as previous afterwards.
   build_image --build-arg TOOLS_CACHE_BUST="$(date +%s)"
   load_image_id
   if [[ -n "$replaced_id" ]]; then
@@ -1486,7 +1516,8 @@ elif $RESTORE_PREVIOUS; then
   record_tool_versions
   print_tool_versions_change "--restore-previous-image" "$old_opencode" "$old_pi"
 elif [[ -z "$IMAGE_ID" ]]; then
-  echo "==> Building $IMAGE_TAG from $DOCKERFILE_PATH"
+  ensure_base_image
+  echo "==> Building $IMAGE_TAG from $TOOLS_DOCKERFILE_PATH"
   build_image
   load_image_id
   record_tool_versions

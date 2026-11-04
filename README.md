@@ -333,7 +333,8 @@ export OMLX_API_KEY=your-secret-key
 start-agent.sh --backend=omlx
 # Later runs stay on omlx and keep the key, even from a shell without OMLX_API_KEY
 
-# Rebuild image + container (prompts before deleting the Colima VM)
+# Rebuild both images + container (prompts before deleting the Colima VM);
+# the only way to update OS packages, Node, uv or Claude Code in the image
 start-agent.sh --rebuild
 
 # Reset container state only (keeps image + VM; no network egress)
@@ -369,7 +370,9 @@ start-agent.sh --reseed-global-claudemd
 
 First run brings up the Colima VM (`claude-agent` profile) with
 `--mount $SANDBOX_ROOT:w`, installs `tinyproxy` inside it, builds
-`claude-agent:latest` from `dockerfiles/claude-agent.Dockerfile`, seeds
+`claude-agent:base` from `dockerfiles/claude-agent.Dockerfile` and
+`claude-agent:latest` (OpenCode and Pi on top of it) from
+`dockerfiles/claude-agent-tools.Dockerfile`, seeds
 the allowlist at `$SANDBOX_ROOT/.sandbox_config/allowlist.txt` from
 `templates/sandbox-allowlist.txt`, applies
 iptables rules, and drops you into a bash shell inside the container.
@@ -675,25 +678,39 @@ start-agent.sh --refresh-tools          # rebuild the npm layer, keep the old im
 start-agent.sh --restore-previous-image # undo: latest → previous, recreate containers
 ```
 
-`--refresh-tools` passes a fresh `TOOLS_CACHE_BUST` build arg, so only the npm
-layer reruns: it is the last layer of the image, and OS packages, LibreOffice,
-Node, uv, Claude Code and the Python venvs stay cached. The replaced image
+The image is built in two parts. `claude-agent:base`
+(`dockerfiles/claude-agent.Dockerfile`) holds the OS packages, LibreOffice,
+Node, uv, Claude Code and the Python venvs. `claude-agent:latest`
+(`dockerfiles/claude-agent-tools.Dockerfile`) is `FROM claude-agent:base` plus
+one npm layer with OpenCode and Pi. `--refresh-tools` rebuilds only
+`claude-agent:latest`, with a fresh `TOOLS_CACHE_BUST` build arg so the npm
+layer reruns, on top of the existing `claude-agent:base`. It never rebuilds the
+base and does not depend on docker's build cache (a single-Dockerfile version
+that relied on the cache rebuilt nearly every layer on the host; see
+`ADR.md` §ADR-054). It builds the base first only when it is missing, as on the
+first refresh after updating from the single-Dockerfile layout. So updating
+the OS packages, Node, uv or Claude Code takes `--rebuild`, which removes
+`claude-agent:base` along with `latest` and `previous` and builds both again.
+The replaced image
 becomes `claude-agent:previous` only after the build succeeds, so a failed
 refresh leaves both tags as they were. It prints the old and new versions and
 records them, keyed by image ID, in `$SANDBOX_ROOT/.sandbox_config/tool-versions`.
 It removes the agent container, so exit any session running in it first. Only
 one previous image is kept: the image that drops out (the older `previous`
 after a refresh, the replaced `latest` after a restore) is removed once it has
-no tag, unless something still uses it.
-`--rebuild` passes no cache-bust value, and removes `claude-agent:previous`
-along with `latest`. With the legacy builder (no buildx plugin on the host, the
-case as of 2026-11-04) the build cache is the local images' own layers, so once
-both tags are gone `--rebuild` reruns every layer and also picks up new tool
-versions. Keeping `previous` would keep its layers as cache, and a rebuild could
-then reproduce the older image, tools included. Under BuildKit the cache can
-outlive the images and `--rebuild` may reuse the npm layer;
-`tests/verify-tool-refresh.sh` reports which applies. Use `--refresh-tools` to
-update the tools either way.
+no tag, unless something still uses it. After the first refresh on the
+two-image layout, `previous` is the old single-Dockerfile image, on no
+`claude-agent:base` at all; it is still a complete image, so restoring it works.
+`--rebuild` passes no cache-bust value. With the legacy builder (no buildx
+plugin on the host, the case as of 2026-11-04) the build cache is the local
+images' own layers, so once all three tags are gone `--rebuild` reruns every
+layer and also picks up new tool versions. Keeping `previous` would keep its
+layers as cache, and a rebuild could then reproduce the older image, tools
+included. The probe in `tests/verify-tool-refresh.sh` observed that the cache
+did not survive `docker image rm` (cause unconfirmed; `tests/probe-build-cache.sh`
+tests the suspected one). Under BuildKit the cache can outlive the images and
+`--rebuild` may reuse the npm layer. Use `--refresh-tools` to update the tools
+either way.
 
 **SearXNG** is pinned by digest (`SEARXNG_IMAGE` in `start-agent.sh`). To move
 to the current upstream image:
@@ -710,8 +727,9 @@ again.
 `tests/verify-tool-refresh.sh` is the acceptance check for both: SearXNG JSON
 results from at least two engines, `opencode debug config` and `opencode mcp
 list`, and an `opencode run` on omlx `gemma-4-e4b-it-6bit` that calls the
-SearXNG tool. After a refresh it also checks that the layers above npm were
-reused. See `ADR.md` §ADR-054.
+SearXNG tool. After a refresh it also checks that `claude-agent:latest` is
+`claude-agent:base` plus the npm layer, and that `previous` shares the base when
+it was built on the same one. See `ADR.md` §ADR-054.
 
 ### Update warnings
 
@@ -898,11 +916,12 @@ noted.
 | `test-agent-firewall.sh` | Firewall smoke tests from inside `claude-agent` (default-deny, proxy allow/deny, inference proxy allowed and refused routes, no direct host path, real key absent, env wiring, inter-container port isolation, DNS blackhole, container-name DNS, VM-local services closed) | Run from inside the container: `bash tests/test-agent-firewall.sh` |
 | `test-cross-vm-isolation.sh` | Cross-VM isolation: `claude-agent` and `research` containers cannot reach each other by name, port, or via `host.docker.internal:3000`. Positive tests confirm `claude-agent` reaches the in-VM inference proxy and `research` reaches the host inference port. Skips if either VM is not running. | `./tests/test-cross-vm-isolation.sh` |
 | `test_agent_sh.py` | Static invariants for `start-agent.sh`: no host-port publish, sandbox trust boundary, Pi and skills wiring, warm-reattach batching, atomic firewall apply, secret handling, flag hygiene | `uv run --with pytest pytest tests/test_agent_sh.py` |
-| `test_dockerfile.py` | Static checks: pi and opencode CLI install lines in `claude-agent.Dockerfile`, the `TOOLS_CACHE_BUST` arg right before them, and that npm layer last | `uv run --with pytest pytest tests/test_dockerfile.py` |
+| `test_dockerfile.py` | Static checks: pi and opencode CLI install lines in `claude-agent-tools.Dockerfile`, built `FROM claude-agent:base` with the `TOOLS_CACHE_BUST` arg right before them and the npm layer last; `claude-agent.Dockerfile` (the base) installs neither | `uv run --with pytest pytest tests/test_dockerfile.py` |
 | `test_tool_refresh.py` | `--refresh-tools` / `--restore-previous-image` (flag exclusions, and the image lifecycle run against a fake `docker`), the tool-version record, and `scripts/bump-searxng.sh` offline | `uv run --with pytest pytest tests/test_tool_refresh.py` |
 | `test_check_versions.py` | Unit tests for `check_versions.py` (lag computation, once-a-day cache, malformed and missing registry responses, silence on errors and timeouts, against fixture JSON and a local HTTP server) and its wiring in both launchers | `uv run --with pytest pytest tests/test_check_versions.py` |
 | `verify-version-check.sh` | Live run of `check_versions.py` against npm and Docker Hub: the Docker Hub tags-API fields, the helper's real output, the once-a-day throttle, a forced-old report naming every update command. Log in `.verify/verify-version-check.log` | `tests/verify-version-check.sh` |
-| `verify-tool-refresh.sh` | Live acceptance check after a SearXNG bump or `--refresh-tools`: SearXNG results, OpenCode config and MCP, `opencode run` on omlx calling the SearXNG tool, layer reuse, build-cache behaviour. Needs the container running. Log in `.verify/verify-tool-refresh-<time>.log` | `tests/verify-tool-refresh.sh` |
+| `verify-tool-refresh.sh` | Live acceptance check after a SearXNG bump or `--refresh-tools`: SearXNG results, OpenCode config and MCP, `opencode run` on omlx calling the SearXNG tool, `latest` = `base` + npm layer, build-cache behaviour. Needs the container running. Log in `.verify/verify-tool-refresh-<time>.log` | `tests/verify-tool-refresh.sh` |
+| `probe-build-cache.sh` | Host-driven probe of the legacy builder's cache: records the image store and builder, then checks whether a layer stays cached after the image that first built it is removed while another image still uses it. Log in `.verify/probe-build-cache.log` | `tests/probe-build-cache.sh` |
 | `test_research.py` | Unit tests for `research.py` pure helpers (`compose_denylist`, `denylist_to_squid_acl`, `_prune_subdomains`, etc.) | `uv run --with pytest pytest tests/test_research.py` |
 | `test_settings_template.py` | Validates `templates/global-claude-settings.json` is well-formed JSON, has required keys, and `git push` is absent from the allow list | `uv run --with pytest pytest tests/test_settings_template.py` |
 | `test_global_settings_helper.py` | Unit tests for `merge_global_settings.py`: CLI contract, forced/merged/seeded rules, and the push/publish deny rules matched against the commands they must and must not block | `uv run --with pytest pytest tests/test_global_settings_helper.py` |

@@ -92,7 +92,7 @@ def test_components_name_their_update_command(cv):
 
 
 def test_npm_packages_match_the_installs():
-    dockerfile = (REPO / "dockerfiles" / "claude-agent.Dockerfile").read_text()
+    dockerfile = (REPO / "dockerfiles" / "claude-agent-tools.Dockerfile").read_text()
     spec = importlib.util.spec_from_file_location("cv_static", HELPER)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

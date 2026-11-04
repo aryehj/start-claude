@@ -3823,14 +3823,16 @@ On the host it checks:
 - `--rebuild` passes no cache-bust value. Whether it refreshes the tools depends
   on whether the builder's cache survives `docker image rm`. The verify script's
   cache probe reports which, and the docs point to `--refresh-tools` for
-  updating either way. On 2026-11-04 the probe found that it does **not**
+  updating either way. On 2026-11-04 the probe observed that it does **not**
   survive (docker client 29.9.2, server 29.5.2, no buildx plugin on the host,
-  so `docker build` uses the legacy builder, whose cache is the image's own
-  layers). So `--rebuild` today reruns every layer, npm included, and picks up
-  new OpenCode/Pi versions along with new apt packages. That holds only because
-  no other tag shares the layer chain: a kept `claude-agent:previous` would
-  serve as cache, so `--rebuild` now removes it too (see the third amendment).
-  Installing buildx would
+  so `docker build` uses the legacy builder, whose cache is assumed to be the
+  local images' own layers). That is an observation from one two-build probe;
+  the cause is unconfirmed (see the fourth amendment and
+  `tests/probe-build-cache.sh`). So `--rebuild` today appears to rerun every
+  layer, npm included, and picks up new OpenCode/Pi versions along with new apt
+  packages. That holds only because no other tag shares the layer chain: a kept
+  `claude-agent:previous` would serve as cache, so `--rebuild` now removes it
+  too (see the third amendment). Installing buildx would
   switch the client to BuildKit, whose cache can outlive the image. Rerun the
   probe after any change to the host's docker client.
 - `claude-agent:previous` costs one image's worth of extra disk in the VM.
@@ -3903,6 +3905,78 @@ Also, the version record is used only when its `image_id` matches the current
 to make the previous image's versions show up as the current ones, both in the
 refresh summary and in the launch-time update check (ADR-055). Now those
 versions read as unknown: `?` in the summary, and no warning from the check.
+
+### Amendment (2026-11-04): two images, so a refresh does not depend on the build cache
+
+**Live result.** After the npm layer moved last, `tests/verify-tool-refresh.sh`
+compared `claude-agent:latest` with `:previous` across host refreshes:
+
+- before the move: 5 of 5 layers above npm shared, as intended;
+- first refresh after the move: 5 of 13 shared, expected, since the layer chain
+  had changed;
+- second refresh: **1 of 13 shared**. Everything from the first `RUN` on was
+  rebuilt: apt, NodeSource, uv, Claude Code, LibreOffice and the venvs.
+
+Host: docker client 29.9.2 without buildx (so the legacy builder), server
+29.5.2 in the Colima VM.
+
+**Suspected cause (unconfirmed).** The previous amendment added
+`drop_untagged_image`, which after each refresh removes the old `previous`. The
+working guess is that the legacy builder's cache lookup goes through the image
+that first built a layer (its parent/child image records), so removing that
+image loses the cache hit for every later image that only reused the layer,
+even while they still hold it. Which image store the daemon uses (a graph
+driver such as overlay2, or the containerd snapshotter) may matter too.
+The earlier "the cache does not survive `docker image rm`" was likewise one
+probe's observation, with the cause unconfirmed. `tests/probe-build-cache.sh`
+tests the guess: it records the image store and builder, builds two images
+that share a first `RUN`, removes the one that built it first, and checks
+whether a third build still hits the cache.
+
+**Decision: don't depend on the build cache.** The Dockerfile is split in two:
+
+- `dockerfiles/claude-agent.Dockerfile` builds `claude-agent:base`: everything
+  that was above `ARG TOOLS_CACHE_BUST` (apt, NodeSource, uv, Claude Code,
+  LibreOffice, the SearXNG MCP shim, both Python venvs, the config layers).
+- `dockerfiles/claude-agent-tools.Dockerfile` builds `claude-agent:latest`:
+  `FROM claude-agent:base`, the ARG and the npm `RUN`. `WORKDIR`/`CMD` moved
+  to the end of the base, since the legacy builder commits a `WORKDIR` step
+  and the tools image should add exactly one layer.
+
+The final image names the **tag**, not a stage. One multi-stage file was
+rejected: the legacy builder builds every stage up to `--target`, so a final
+stage `FROM base` (the stage) rebuilds the base stage on every build and is
+back to depending on the cache. Two files need nothing beyond `FROM` of a
+local tag, which the legacy builder resolves locally without a pull.
+
+`start-agent.sh`:
+
+- A launch with no `latest` builds `base` only if it is missing, then
+  `latest`.
+- `--refresh-tools` builds only `latest`, on the existing `base`. It builds
+  `base` first only when it is missing (the first refresh after this change,
+  or after a manual `docker image rm`). The rest of the previous amendment
+  holds: `previous` is tagged only after a successful build, untagged images
+  are dropped with `drop_untagged_image`, and the version record is checked
+  against the image ID. Dropping the old `previous` is now harmless to later
+  refreshes, since `base` stays tagged and nothing is rebuilt from cache.
+- `--restore-previous-image` is unchanged. A `previous` built on an older base
+  (the single-Dockerfile image saved by the first refresh after this change,
+  or one from before a manual removal of `base`) is a complete image, so
+  restoring it works. `--rebuild` removes `previous`, so it never leaves one
+  on an older base.
+- `--rebuild` removes `latest`, `previous` and `base`, then builds both.
+
+**Consequences.** Updating the OS packages, Node, uv or Claude Code takes
+`--rebuild`, as before; `--refresh-tools` can no longer pick them up even by
+accident. Disk: refreshed images share the base's layers; `drop_untagged_image`
+removes the one that drops out, and only `--rebuild` replaces the base, removing
+the old one. The verify script's layer check now expects `latest` to be
+`base`'s layers plus the tools file's layer count, and `previous` to share all
+of `base`'s layers when it was built on the same base; a `previous` on an older
+base is reported as INFO, not a failure. `tests/test_dockerfile.py` checks that
+the tools file is `FROM claude-agent:base` with the npm `RUN` last and the ARG
+right before it, and that the base file installs neither tool.
 
 ---
 

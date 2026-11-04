@@ -259,10 +259,10 @@ case "$1" in
       *) exit 1 ;;
     esac ;;
   tag)   id=$(resolve "$2") || exit 1; echo "$id" > "$S/tags/$(san "$3")" ;;
-  build) [[ "${FAKE_BUILD_FAIL:-0}" == 1 ]] && exit 1
-         n=$(( $(cat "$S/builds" 2>/dev/null || echo 9) + 1 )); echo "$n" > "$S/builds"
-         out=""; prev=""
+  build) out=""; prev=""
          for a in "$@"; do [[ "$prev" == -t ]] && out="$a"; prev="$a"; done
+         [[ "${FAKE_BUILD_FAIL:-0}" == 1 || "${FAKE_BUILD_FAIL_TAG:-}" == "$out" ]] && exit 1
+         n=$(( $(cat "$S/builds" 2>/dev/null || echo 9) + 1 )); echo "$n" > "$S/builds"
          touch "$S/images/sha256_img$n"; echo "sha256:img$n" > "$S/tags/$(san "$out")" ;;
   run)   [[ "${FAKE_RUN_FAIL:-0}" == 1 ]] && exit 1
          id=$(cat "$S/tags/claude-agent_latest"); n="${id#sha256:img}"
@@ -272,11 +272,12 @@ esac
 """
 
 
-def _fake_state(tmp_path, latest=None, previous=None, extra_images=()):
+def _fake_state(tmp_path, latest=None, previous=None, extra_images=(), base=None):
     state = tmp_path / "state"
     (state / "tags").mkdir(parents=True)
     (state / "images").mkdir()
-    for name, img in (("claude-agent_latest", latest), ("claude-agent_previous", previous)):
+    for name, img in (("claude-agent_latest", latest), ("claude-agent_previous", previous),
+                      ("claude-agent_base", base)):
         if img:
             (state / "tags" / name).write_text(img + "\n")
             (state / "images" / img.replace(":", "_")).touch()
@@ -301,20 +302,31 @@ def _run_with_fake(tmp_path, state, bin_dir, script, **env):
 
     calls = (state / "calls").read_text() if (state / "calls").exists() else ""
     images = sorted(f.name.replace("_", ":", 1) for f in (state / "images").iterdir())
+    _run_with_fake.base = tag("claude-agent_base")
     return proc, tag("claude-agent_latest"), tag("claude-agent_previous"), calls, images
 
 
+# The tagged base every test starts with unless it passes base=None.
+BASE = "sha256:base0"
+_VARS = (
+    'IMAGE_TAG="claude-agent:latest"; PREVIOUS_IMAGE_TAG="claude-agent:previous"\n'
+    'BASE_IMAGE_TAG="claude-agent:base"\n'
+    'DOCKERFILE_PATH=/x/base.Dockerfile; TOOLS_DOCKERFILE_PATH=/x/tools.Dockerfile; DOCKERFILE_DIR=/x\n'
+    'remove_containers() { echo "REMOVED $1"; }\n'
+)
+
+
 def _lifecycle(tmp_path, flags, latest=None, previous=None, extra_images=(), with_images=False,
-               **env):
-    state, bin_dir = _fake_state(tmp_path, latest, previous, extra_images)
+               base=BASE, prefix="", **env):
+    state, bin_dir = _fake_state(tmp_path, latest, previous, extra_images, base)
     script = (
         "set -euo pipefail\n"
         f"REFRESH_TOOLS={'true' if '--refresh-tools' in flags else 'false'}\n"
         f"RESTORE_PREVIOUS={'true' if '--restore-previous-image' in flags else 'false'}\n"
-        'IMAGE_TAG="claude-agent:latest"; PREVIOUS_IMAGE_TAG="claude-agent:previous"\n'
-        f'TOOL_VERSIONS_FILE="{tmp_path}/tool-versions"\n'
-        'DOCKERFILE_PATH=/x/Dockerfile; DOCKERFILE_DIR=/x\n'
-        'remove_containers() { echo "REMOVED $1"; }\n'
+        f"REBUILD={'true' if '--rebuild' in flags else 'false'}; RESET_CONTAINER=false\n"
+        + _VARS
+        + f'TOOL_VERSIONS_FILE="{tmp_path}/tool-versions"\n'
+        + prefix
         + _image_section() + "\necho END\n"
     )
     proc, latest, previous, calls, images = _run_with_fake(tmp_path, state, bin_dir, script, **env)
@@ -335,7 +347,54 @@ def test_refresh_flow(tmp_path):
     assert "opencode 1.0.0 → 1.0.10, pi 2.0.0 → 2.0.10" in proc.stdout
     build = _lines(calls, "build ")
     assert len(build) == 1 and re.search(r"--build-arg TOOLS_CACHE_BUST=\d+", build[0])
+    assert "-f /x/tools.Dockerfile" in build[0] and "-t claude-agent:latest" in build[0]
     assert "image_id=sha256:img10" in (tmp_path / "tool-versions").read_text()
+
+
+def test_refresh_with_base_builds_only_the_tools_image(tmp_path):
+    proc, latest, previous, calls, images = _lifecycle(
+        tmp_path, ["--refresh-tools"], latest="sha256:img1", previous="sha256:img0", with_images=True)
+    assert "END" in proc.stdout, proc.stderr
+    build = _lines(calls, "build ")
+    assert len(build) == 1, build
+    assert "/x/base.Dockerfile" not in calls and "claude-agent:base" not in build[0].split("-t ")[1]
+    assert _run_with_fake.base == BASE, "a refresh must never replace the base"
+    assert BASE in images
+
+
+def test_refresh_without_base_builds_it_first(tmp_path):
+    # First refresh after the two-image split: latest exists, base does not.
+    proc, latest, previous, calls = _lifecycle(
+        tmp_path, ["--refresh-tools"], latest="sha256:img0", base=None)
+    assert "END" in proc.stdout, proc.stderr
+    build = _lines(calls, "build ")
+    assert len(build) == 2, build
+    assert "-t claude-agent:base -f /x/base.Dockerfile" in build[0]
+    assert "TOOLS_CACHE_BUST" not in build[0], "the base build takes no cache bust"
+    assert "-t claude-agent:latest -f /x/tools.Dockerfile" in build[1]
+    assert re.search(r"--build-arg TOOLS_CACHE_BUST=\d+", build[1])
+    assert _run_with_fake.base == "sha256:img10" and latest == "sha256:img11"
+    assert previous == "sha256:img0"
+
+
+def test_refresh_tools_build_failure_keeps_new_base_only(tmp_path):
+    proc, latest, previous, calls = _lifecycle(
+        tmp_path, ["--refresh-tools"], latest="sha256:img1", previous="sha256:img0", base=None,
+        FAKE_BUILD_FAIL_TAG="claude-agent:latest")
+    assert proc.returncode != 0 and "END" not in proc.stdout
+    assert latest == "sha256:img1" and previous == "sha256:img0"
+    assert _run_with_fake.base == "sha256:img10", "the base built fine and is kept for the next try"
+    assert "REMOVED" not in proc.stdout and not _lines(calls, "tag ", "image rm")
+
+
+def test_refresh_base_build_failure_touches_nothing(tmp_path):
+    proc, latest, previous, calls = _lifecycle(
+        tmp_path, ["--refresh-tools"], latest="sha256:img1", previous="sha256:img0", base=None,
+        FAKE_BUILD_FAIL_TAG="claude-agent:base")
+    assert proc.returncode != 0 and "END" not in proc.stdout
+    assert latest == "sha256:img1" and previous == "sha256:img0" and _run_with_fake.base is None
+    assert len(_lines(calls, "build ")) == 1, "latest must not be built when the base build fails"
+    assert "REMOVED" not in proc.stdout
 
 
 def test_refresh_tags_previous_only_after_the_build(tmp_path):
@@ -353,7 +412,7 @@ def test_refresh_build_failure_touches_nothing(tmp_path):
     assert "REMOVED" not in proc.stdout
     assert latest == "sha256:img1" and previous == "sha256:img0"
     assert not _lines(calls, "tag ", "image rm")
-    assert images == ["sha256:img0", "sha256:img1"]
+    assert images == [BASE, "sha256:img0", "sha256:img1"]
 
 
 def test_refresh_drops_the_old_previous(tmp_path):
@@ -362,7 +421,7 @@ def test_refresh_drops_the_old_previous(tmp_path):
     assert "END" in proc.stdout, proc.stderr
     assert latest == "sha256:img10" and previous == "sha256:img1"
     assert "image rm sha256:img0" in calls
-    assert images == ["sha256:img1", "sha256:img10"]
+    assert images == [BASE, "sha256:img1", "sha256:img10"]
     assert "removed the untagged image" in proc.stdout
     # Containers go before the image they might have used.
     assert proc.stdout.find("REMOVED --refresh-tools") < proc.stdout.find("removed the untagged image")
@@ -375,7 +434,7 @@ def test_refresh_after_restore_keeps_previous(tmp_path):
     assert "END" in proc.stdout, proc.stderr
     assert latest == "sha256:img10" and previous == "sha256:img4"
     assert not _lines(calls, "image rm")
-    assert images == ["sha256:img10", "sha256:img4"]
+    assert images == [BASE, "sha256:img10", "sha256:img4"]
 
 
 def test_drop_in_use_image_only_prints_a_note(tmp_path):
@@ -412,7 +471,7 @@ def test_restore_drops_the_replaced_latest(tmp_path):
         with_images=True)
     assert "END" in proc.stdout, proc.stderr
     assert latest == previous == "sha256:img4"
-    assert "image rm sha256:img5" in calls and images == ["sha256:img4"]
+    assert "image rm sha256:img5" in calls and images == [BASE, "sha256:img4"]
     assert proc.stdout.find("REMOVED --restore-previous-image") < proc.stdout.find("removed the untagged image")
 
 
@@ -422,7 +481,7 @@ def test_double_restore_removes_nothing(tmp_path):
         with_images=True)
     assert "END" in proc.stdout, proc.stderr
     assert latest == previous == "sha256:img4"
-    assert not _lines(calls, "image rm") and images == ["sha256:img4"]
+    assert not _lines(calls, "image rm") and images == [BASE, "sha256:img4"]
 
 
 def test_restore_without_previous_errors(tmp_path):
@@ -433,10 +492,26 @@ def test_restore_without_previous_errors(tmp_path):
 
 
 def test_missing_image_plain_build(tmp_path):
+    # base exists: reuse it, build only latest.
     proc, latest, previous, calls = _lifecycle(tmp_path, [])
     assert "END" in proc.stdout, proc.stderr
     assert latest == "sha256:img10" and previous is None
     assert "TOOLS_CACHE_BUST" not in calls and "REMOVED" not in proc.stdout
+    build = _lines(calls, "build ")
+    assert len(build) == 1 and "-f /x/tools.Dockerfile" in build[0]
+    assert _run_with_fake.base == BASE
+
+
+def test_first_build_builds_base_then_latest(tmp_path):
+    proc, latest, previous, calls = _lifecycle(tmp_path, [], base=None)
+    assert "END" in proc.stdout, proc.stderr
+    build = _lines(calls, "build ")
+    assert len(build) == 2, build
+    assert "-t claude-agent:base -f /x/base.Dockerfile" in build[0]
+    assert "-t claude-agent:latest -f /x/tools.Dockerfile" in build[1]
+    assert "TOOLS_CACHE_BUST" not in calls
+    assert _run_with_fake.base == "sha256:img10" and latest == "sha256:img11" and previous is None
+    assert "image_id=sha256:img11" in (tmp_path / "tool-versions").read_text()
 
 
 def test_existing_image_no_flags_is_untouched(tmp_path):
@@ -444,6 +519,15 @@ def test_existing_image_no_flags_is_untouched(tmp_path):
     assert "END" in proc.stdout and latest == "sha256:img3"
     assert not _lines(calls, "build", "run", "tag", "image rm")
     assert len(_lines(calls, "image inspect")) == 1, "a warm reattach inspects the image once"
+    assert "claude-agent:base" not in calls, "a warm reattach does not look at the base"
+
+
+def test_existing_latest_without_base_is_untouched(tmp_path):
+    # Images from before the two-image split keep working; only a refresh or
+    # --rebuild builds the base.
+    proc, latest, _, calls = _lifecycle(tmp_path, [], latest="sha256:img3", base=None)
+    assert "END" in proc.stdout and latest == "sha256:img3"
+    assert not _lines(calls, "build") and _run_with_fake.base is None
 
 
 # ── tool_version checks the record against the current image ──────────────────
@@ -499,17 +583,27 @@ def _rebuild_block() -> str:
 
 
 @pytest.mark.parametrize("previous", ["sha256:img4", "sha256:img5", None])
-def test_rebuild_removes_latest_and_previous(tmp_path, previous):
-    state, bin_dir = _fake_state(tmp_path, latest="sha256:img5", previous=previous)
-    script = (
-        "set -euo pipefail\nREBUILD=true\n"
-        'IMAGE_TAG="claude-agent:latest"; PREVIOUS_IMAGE_TAG="claude-agent:previous"\n'
-        'remove_containers() { echo "REMOVED $1"; }\n'
-        + _rebuild_block() + "echo END\n"
-    )
+@pytest.mark.parametrize("base", [BASE, None])
+def test_rebuild_removes_latest_previous_and_base(tmp_path, previous, base):
+    state, bin_dir = _fake_state(tmp_path, latest="sha256:img5", previous=previous, base=base)
+    script = "set -euo pipefail\nREBUILD=true\n" + _VARS + _rebuild_block() + "echo END\n"
     proc, latest, prev, _, images = _run_with_fake(tmp_path, state, bin_dir, script)
     assert "END" in proc.stdout, proc.stderr
-    assert latest is None and prev is None and images == []
+    assert latest is None and prev is None and _run_with_fake.base is None and images == []
+
+
+def test_rebuild_then_lifecycle_builds_base_and_latest(tmp_path):
+    proc, latest, previous, calls, images = _lifecycle(
+        tmp_path, ["--rebuild"], latest="sha256:img5", previous="sha256:img4", with_images=True,
+        prefix=_rebuild_block())
+    assert "END" in proc.stdout, proc.stderr
+    build = _lines(calls, "build ")
+    assert len(build) == 2, build
+    assert "-t claude-agent:base -f /x/base.Dockerfile" in build[0]
+    assert "-t claude-agent:latest -f /x/tools.Dockerfile" in build[1]
+    assert "TOOLS_CACHE_BUST" not in calls
+    assert _run_with_fake.base == "sha256:img10" and latest == "sha256:img11" and previous is None
+    assert images == ["sha256:img10", "sha256:img11"]
 
 
 # ── scripts/bump-searxng.sh (offline: --digest skips the VM pull) ─────────────
