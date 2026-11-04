@@ -565,6 +565,8 @@ def _agent_harness(tmp_path, extra=""):
         "start_version_check", "report_version_check", "tool_version"))
     return (f'SCRIPT_DIR="{REPO}"\nVERSION_CHECK_STATE="{tmp_path}/version-check.json"\n'
             f'TOOL_VERSIONS_FILE="{tmp_path}/tool-versions"\n'
+            # tool_version only trusts a record for the current image.
+            'IMAGE_ID="sha256:x"\n'
             f'LOCAL_SEARCH_ENABLED="${{LOCAL_SEARCH_ENABLED:-true}}"\n{funcs}\n{extra}')
 
 
