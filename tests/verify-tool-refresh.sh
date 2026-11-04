@@ -181,7 +181,7 @@ if [[ -z "$first" || -z "$second" ]]; then
 elif [[ "$first" == "$second" ]]; then
   echo "INFO  build cache SURVIVES docker image rm: --rebuild alone may reuse a cached npm layer"
 else
-  echo "INFO  build cache does NOT survive docker image rm: --rebuild reruns every layer, npm included (cause unconfirmed; see tests/probe-build-cache.sh)"
+  echo "INFO  build cache does NOT survive docker image rm: --rebuild reruns every layer, npm included (see tests/probe-build-cache.sh for why)"
 fi
 echo "INFO  docker client $(docker version -f '{{.Client.Version}}' 2>/dev/null), server $(docker version -f '{{.Server.Version}}' 2>/dev/null); buildx: $(docker buildx version 2>/dev/null | head -n 1 || echo none)${DOCKER_BUILDKIT:+; DOCKER_BUILDKIT=$DOCKER_BUILDKIT}"
 

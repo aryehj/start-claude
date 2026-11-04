@@ -3827,7 +3827,7 @@ On the host it checks:
   survive (docker client 29.9.2, server 29.5.2, no buildx plugin on the host,
   so `docker build` uses the legacy builder, whose cache is assumed to be the
   local images' own layers). That is an observation from one two-build probe;
-  the cause is unconfirmed (see the fourth amendment and
+  the cause was confirmed the same day (see the fourth amendment and
   `tests/probe-build-cache.sh`). So `--rebuild` today appears to rerun every
   layer, npm included, and picks up new OpenCode/Pi versions along with new apt
   packages. That holds only because no other tag shares the layer chain: a kept
@@ -3920,7 +3920,7 @@ compared `claude-agent:latest` with `:previous` across host refreshes:
 Host: docker client 29.9.2 without buildx (so the legacy builder), server
 29.5.2 in the Colima VM.
 
-**Suspected cause (unconfirmed).** The previous amendment added
+**Cause.** The previous amendment added
 `drop_untagged_image`, which after each refresh removes the old `previous`. The
 working guess is that the legacy builder's cache lookup goes through the image
 that first built a layer (its parent/child image records), so removing that
@@ -3932,6 +3932,19 @@ probe's observation, with the cause unconfirmed. `tests/probe-build-cache.sh`
 tests the guess: it records the image store and builder, builds two images
 that share a first `RUN`, removes the one that built it first, and checks
 whether a third build still hits the cache.
+
+**Confirmed (2026-11-04, `.verify/probe-build-cache.log`).** The daemon uses
+the containerd snapshotter, and the client has no buildx. With image A removed
+and image B (which reused A's first layer) still present, build C missed the
+cache for that layer. So with this image store, removing the image that first
+built a layer drops the cache for that layer, whatever else still holds it.
+That explains both the 1 of 13 result and the earlier "does not survive
+`docker image rm`" probe.
+
+**Live result of the split (2026-11-04).** Three `--refresh-tools` runs in a
+row kept `claude-agent:base` at the same ID. Each new `latest` was the base's
+12 layers plus one npm layer, `previous` shared all 12 base layers, and only
+the npm layer was rebuilt (`.verify/verify-tool-refresh-20261104-072217.log`).
 
 **Decision: don't depend on the build cache.** The Dockerfile is split in two:
 

@@ -707,8 +707,9 @@ images' own layers, so once all three tags are gone `--rebuild` reruns every
 layer and also picks up new tool versions. Keeping `previous` would keep its
 layers as cache, and a rebuild could then reproduce the older image, tools
 included. The probe in `tests/verify-tool-refresh.sh` observed that the cache
-did not survive `docker image rm` (cause unconfirmed; `tests/probe-build-cache.sh`
-tests the suspected one). Under BuildKit the cache can outlive the images and
+did not survive `docker image rm`. `tests/probe-build-cache.sh` confirmed why: with
+the containerd image store, removing the image that first built a layer drops its
+cache. Under BuildKit the cache can outlive the images and
 `--rebuild` may reuse the npm layer. Use `--refresh-tools` to update the tools
 either way.
 
