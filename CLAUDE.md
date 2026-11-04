@@ -29,6 +29,7 @@ tests/                       — unit tests and infra smoke tests
   test_agent_sh.py                     — static checks: no host-port publish, pi integration invariants, sandbox trust-boundary
   test_dockerfile.py                   — static checks: pi and opencode CLI install lines in claude-agent-tools.Dockerfile, which is FROM the tagged claude-agent:base with TOOLS_CACHE_BUST right before the npm RUN and that RUN last; the base Dockerfile installs neither
   test_tool_refresh.py                 — --refresh-tools/--restore-previous-image exclusions and image lifecycle (fake docker), tool-version record, bump-searxng.sh offline
+  test_bump_searxng.py                 — bump-searxng.sh against a fake colima/docker: picks the searxng/searxng RepoDigest, refuses a stopped VM, no SIGPIPE false negative
   test_research.py                     — unit tests for research.py pure helpers
   test_settings_template.py           — validates global-claude-settings.json is well-formed and git push is absent from allow list
   test_global_settings_helper.py       — unit tests for merge_global_settings.py: CLI contract, forced/merged/seeded rules, deny rules vs. commands
