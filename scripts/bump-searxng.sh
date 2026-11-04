@@ -49,11 +49,27 @@ done
 
 if [[ -z "$DIGEST" ]]; then
   command -v colima >/dev/null || { echo "error: colima not on PATH. Run this on the macOS host." >&2; exit 1; }
-  colima list -p "$PROFILE" --json 2>/dev/null | grep -q '"Running"' \
+  # Capture, then match: `colima list | grep -q` under pipefail can fail when
+  # grep exits on the first match and colima takes SIGPIPE.
+  vm_state=$(colima list -p "$PROFILE" --json 2>/dev/null || true)
+  [[ "$vm_state" == *'"Running"'* ]] \
     || { echo "error: Colima VM '$PROFILE' is not running. Start it with start-agent.sh first." >&2; exit 1; }
   echo "==> Pulling $UPSTREAM in the $PROFILE VM"
   vm docker pull -q "$UPSTREAM" >/dev/null
-  repo_digest=$(vm docker image inspect -f '{{index .RepoDigests 0}}' "$UPSTREAM" | tr -d '\r')
+  # The image may carry digests from other repos too (same image ID); take
+  # the searxng/searxng one, never just the first.
+  repo_digests=$(vm docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$UPSTREAM" | tr -d '\r')
+  repo_digest=""
+  while IFS= read -r line; do
+    case "$line" in
+      searxng/searxng@sha256:*|docker.io/searxng/searxng@sha256:*) repo_digest="$line"; break ;;
+    esac
+  done <<<"$repo_digests"
+  if [[ -z "$repo_digest" ]]; then
+    echo "error: no searxng/searxng entry in the image's RepoDigests:" >&2
+    printf '%s\n' "${repo_digests:-(none)}" >&2
+    exit 1
+  fi
   DIGEST="${repo_digest##*@}"
   if [[ -z "$VERSION" ]]; then
     VERSION=$(vm docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' \
