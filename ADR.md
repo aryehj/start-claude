@@ -3827,7 +3827,10 @@ On the host it checks:
   survive (docker client 29.9.2, server 29.5.2, no buildx plugin on the host,
   so `docker build` uses the legacy builder, whose cache is the image's own
   layers). So `--rebuild` today reruns every layer, npm included, and picks up
-  new OpenCode/Pi versions along with new apt packages. Installing buildx would
+  new OpenCode/Pi versions along with new apt packages. That holds only because
+  no other tag shares the layer chain: a kept `claude-agent:previous` would
+  serve as cache, so `--rebuild` now removes it too (see the third amendment).
+  Installing buildx would
   switch the client to BuildKit, whose cache can outlive the image. Rerun the
   probe after any change to the host's docker client.
 - `claude-agent:previous` costs one image's worth of extra disk in the VM.
@@ -3866,6 +3869,40 @@ limits on a single home IP, not from the config or the allowlist, and the "no
 engine fails for a non-throttling reason" check passed. The change was accepted
 with bing alone. The two-engine check stays as written, so a run made while
 the other engines are not throttling still shows whether they work.
+
+### Amendment (2026-11-04): npm layer last, safer `previous`, untagged images removed
+
+A code review of the refresh flow found four gaps, fixed as follows.
+
+- **The npm layer is the image's last layer.** The ARG and npm `RUN` sat above
+  the LibreOffice apt layer, the two Python venvs and the config layers, so
+  every refresh reran those too, despite the docs. They now come last, just
+  before `WORKDIR`/`CMD`, and a test fails if any `RUN`, `COPY` or `ADD`
+  follows the npm `RUN`. After a refresh, `previous` and `latest` share every
+  layer but the last. The verify script counts the expected layers from the
+  Dockerfile, its `FROM` image included.
+- **`previous` is tagged only after a successful build.** Refresh records the
+  current image ID, builds, and only then tags that ID as `previous`. A failed
+  build used to have already overwritten `previous`, the only rollback point;
+  now it changes no tag and removes nothing.
+- **Untagged images are removed.** The image that drops out (the older
+  `previous` after a refresh, the replaced `latest` after a restore) is
+  `docker image rm`'d once it has no tag, without `-f`, after the containers
+  are removed. If something still uses it, docker refuses and the script
+  prints a note. A second restore is a no-op, since `latest` and `previous`
+  are then the same tagged image. This supersedes "left untagged (`docker
+  image prune` reclaims it)" above.
+- **`--rebuild` removes `previous` too.** With the legacy builder, `previous`'s
+  layers are build cache. A plain `--rebuild` (`TOOLS_CACHE_BUST=0`) after a
+  refresh could match them and reproduce the older image, quietly downgrading
+  OpenCode/Pi. `--rebuild` is a full reset, so dropping the rollback point
+  there is acceptable.
+
+Also, the version record is used only when its `image_id` matches the current
+`latest`. When `record_tool_versions` fails it keeps the old file, which used
+to make the previous image's versions show up as the current ones, both in the
+refresh summary and in the launch-time update check (ADR-055). Now those
+versions read as unknown: `?` in the summary, and no warning from the check.
 
 ---
 

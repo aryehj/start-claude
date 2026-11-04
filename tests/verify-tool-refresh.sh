@@ -112,9 +112,12 @@ if [[ -z "$previous_id" ]]; then
 elif [[ "$previous_id" == "$latest_id" ]]; then
   skip "refresh kept the layers above npm" "previous and latest are the same image (restored, or not refreshed since)"
 else
-  # Layers above the npm RUN: the base image's, plus one per RUN/COPY/ADD before it.
+  # Layers above the npm RUN: the base image's, plus one per RUN/COPY/ADD before
+  # it. Both read from the Dockerfile, so the count follows its layout (the npm
+  # RUN is the last layer; tests/test_dockerfile.py enforces that).
   above=$(awk '/^(RUN|COPY|ADD) /{n++} /opencode-ai@latest/{print n-1; exit}' dockerfiles/claude-agent.Dockerfile)
-  base=$(docker image inspect -f '{{len .RootFS.Layers}}' debian:bookworm-slim 2>/dev/null || echo 1)
+  base_image=$(awk '/^FROM /{print $2; exit}' dockerfiles/claude-agent.Dockerfile)
+  base=$(docker image inspect -f '{{len .RootFS.Layers}}' "$base_image" 2>/dev/null || echo 1)
   tally "$(python3 - "$((above + base))" \
     "$(docker image inspect -f '{{json .RootFS.Layers}}' claude-agent:previous)" \
     "$(docker image inspect -f '{{json .RootFS.Layers}}' claude-agent:latest)" <<'PYEOF'

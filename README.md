@@ -671,20 +671,29 @@ See `ADR.md` §ADR-014 for the threat model and design rationale.
 served when the image was built. The cached image keeps it until you refresh:
 
 ```bash
-start-agent.sh --refresh-tools          # tag claude-agent:previous, rebuild from the npm layer, recreate containers
+start-agent.sh --refresh-tools          # rebuild the npm layer, keep the old image as claude-agent:previous, recreate containers
 start-agent.sh --restore-previous-image # undo: latest → previous, recreate containers
 ```
 
 `--refresh-tools` passes a fresh `TOOLS_CACHE_BUST` build arg, so only the npm
-layer and the layers after it rerun; OS packages, Node, uv and Claude Code stay
-cached. It prints the old and new versions and records them, keyed by image ID,
-in `$SANDBOX_ROOT/.sandbox_config/tool-versions`. It removes the agent container,
-so exit any session running in it first. Only one previous image is kept.
-`--rebuild` passes no cache-bust value. With the legacy builder (no buildx
-plugin on the host, the case as of 2026-11-04) the build cache goes with the
-image, so `--rebuild` reruns every layer and also picks up new tool versions.
-Under BuildKit it may reuse the cached npm layer; `tests/verify-tool-refresh.sh`
-reports which applies. Use `--refresh-tools` to update the tools either way.
+layer reruns: it is the last layer of the image, and OS packages, LibreOffice,
+Node, uv, Claude Code and the Python venvs stay cached. The replaced image
+becomes `claude-agent:previous` only after the build succeeds, so a failed
+refresh leaves both tags as they were. It prints the old and new versions and
+records them, keyed by image ID, in `$SANDBOX_ROOT/.sandbox_config/tool-versions`.
+It removes the agent container, so exit any session running in it first. Only
+one previous image is kept: the image that drops out (the older `previous`
+after a refresh, the replaced `latest` after a restore) is removed once it has
+no tag, unless something still uses it.
+`--rebuild` passes no cache-bust value, and removes `claude-agent:previous`
+along with `latest`. With the legacy builder (no buildx plugin on the host, the
+case as of 2026-11-04) the build cache is the local images' own layers, so once
+both tags are gone `--rebuild` reruns every layer and also picks up new tool
+versions. Keeping `previous` would keep its layers as cache, and a rebuild could
+then reproduce the older image, tools included. Under BuildKit the cache can
+outlive the images and `--rebuild` may reuse the npm layer;
+`tests/verify-tool-refresh.sh` reports which applies. Use `--refresh-tools` to
+update the tools either way.
 
 **SearXNG** is pinned by digest (`SEARXNG_IMAGE` in `start-agent.sh`). To move
 to the current upstream image:
@@ -889,7 +898,7 @@ noted.
 | `test-agent-firewall.sh` | Firewall smoke tests from inside `claude-agent` (default-deny, proxy allow/deny, inference proxy allowed and refused routes, no direct host path, real key absent, env wiring, inter-container port isolation, DNS blackhole, container-name DNS, VM-local services closed) | Run from inside the container: `bash tests/test-agent-firewall.sh` |
 | `test-cross-vm-isolation.sh` | Cross-VM isolation: `claude-agent` and `research` containers cannot reach each other by name, port, or via `host.docker.internal:3000`. Positive tests confirm `claude-agent` reaches the in-VM inference proxy and `research` reaches the host inference port. Skips if either VM is not running. | `./tests/test-cross-vm-isolation.sh` |
 | `test_agent_sh.py` | Static invariants for `start-agent.sh`: no host-port publish, sandbox trust boundary, Pi and skills wiring, warm-reattach batching, atomic firewall apply, secret handling, flag hygiene | `uv run --with pytest pytest tests/test_agent_sh.py` |
-| `test_dockerfile.py` | Static checks: pi and opencode CLI install lines in `claude-agent.Dockerfile`, and the `TOOLS_CACHE_BUST` arg right before them | `uv run --with pytest pytest tests/test_dockerfile.py` |
+| `test_dockerfile.py` | Static checks: pi and opencode CLI install lines in `claude-agent.Dockerfile`, the `TOOLS_CACHE_BUST` arg right before them, and that npm layer last | `uv run --with pytest pytest tests/test_dockerfile.py` |
 | `test_tool_refresh.py` | `--refresh-tools` / `--restore-previous-image` (flag exclusions, and the image lifecycle run against a fake `docker`), the tool-version record, and `scripts/bump-searxng.sh` offline | `uv run --with pytest pytest tests/test_tool_refresh.py` |
 | `test_check_versions.py` | Unit tests for `check_versions.py` (lag computation, once-a-day cache, malformed and missing registry responses, silence on errors and timeouts, against fixture JSON and a local HTTP server) and its wiring in both launchers | `uv run --with pytest pytest tests/test_check_versions.py` |
 | `verify-version-check.sh` | Live run of `check_versions.py` against npm and Docker Hub: the Docker Hub tags-API fields, the helper's real output, the once-a-day throttle, a forced-old report naming every update command. Log in `.verify/verify-version-check.log` | `tests/verify-version-check.sh` |

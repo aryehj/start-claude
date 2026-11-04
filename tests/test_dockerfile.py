@@ -84,7 +84,7 @@ def test_searxng_mcp_pinned_below_v2():
 
 # ── tools cache bust (--refresh-tools) ────────────────────────────────────────
 # start-agent.sh --refresh-tools passes a fresh TOOLS_CACHE_BUST so the npm
-# layer (and every later one) reruns while apt/Node/Claude Code/uv stay cached.
+# layer reruns while every layer above it stays cached; it must be the last one.
 
 def _npm_install_line_index(lines):
     idx = [i for i, l in enumerate(lines)
@@ -124,3 +124,13 @@ def test_tools_cache_bust_referenced_by_npm_run():
 def test_tools_still_installed_at_latest():
     # The user chose to keep @latest (plans/safe-tool-version-updates.md).
     assert "opencode-ai@latest" in _TEXT and "@earendil-works/pi-coding-agent@latest" in _TEXT
+
+
+def test_npm_install_is_the_last_layer():
+    # A new TOOLS_CACHE_BUST reruns every RUN after the ARG, so any layer
+    # below the npm install (apt, uv venvs, config) would rerun on each
+    # --refresh-tools. Only metadata instructions may follow it.
+    lines = _TEXT.splitlines()
+    npm = _npm_install_line_index(lines)
+    after = [l for l in lines[npm + 1:] if l.strip().startswith(("RUN", "COPY", "ADD"))]
+    assert not after, f"the opencode/pi npm install must be the last layer; found after it: {after}"

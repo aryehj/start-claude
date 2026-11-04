@@ -45,18 +45,6 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
  && ln -sf /root/.local/bin/claude /usr/local/bin/claude \
  && echo 'export PATH="$HOME/.local/bin:$PATH"' >> /root/.bashrc
 
-# ── OpenCode + Pi CLIs ───────────────────────────────────────────────────────
-# Both shipped as canonical npm packages: opencode-ai (binary `opencode`) and
-# @earendil-works/pi-coding-agent (binary `pi`, requires Node >=22.19.0 which
-# setup_lts.x satisfies). Installed in one layer so npm bootstraps once.
-# TOOLS_CACHE_BUST: `start-agent.sh --refresh-tools` passes a fresh value so
-# this layer and every later one rerun (pulling the current @latest), while
-# the apt, Node, uv and Claude Code layers above stay cached. A plain build
-# leaves it at 0, so the cached npm layer is reused.
-ARG TOOLS_CACHE_BUST=0
-RUN echo "tools cache bust: ${TOOLS_CACHE_BUST}" \
- && npm install -g --allow-scripts=opencode-ai,@google/genai,protobufjs opencode-ai@latest @earendil-works/pi-coding-agent@latest
-
 # ── Office document toolchain ────────────────────────────────────────────────
 # LibreOffice headless components for format conversion (soffice --headless --convert-to).
 # Office-metric fonts so LibreOffice pagination matches Word/Excel/PowerPoint:
@@ -130,6 +118,20 @@ RUN mkdir -p /etc/claude-agent
 # usage works outside any sandbox that might not expose the env vars.
 RUN git config --global user.name  "Dev" \
  && git config --global user.email "dev@localhost"
+
+# ── OpenCode + Pi CLIs ───────────────────────────────────────────────────────
+# Both shipped as canonical npm packages: opencode-ai (binary `opencode`) and
+# @earendil-works/pi-coding-agent (binary `pi`, requires Node >=22.19.0 which
+# setup_lts.x satisfies). Installed in one layer so npm bootstraps once.
+# TOOLS_CACHE_BUST: `start-agent.sh --refresh-tools` passes a fresh value so
+# this layer reruns (pulling the current @latest). It is the last layer on
+# purpose: an ARG change reruns every layer after it, so anything below here
+# would be rebuilt by each refresh. Every layer above (apt, LibreOffice,
+# Node, uv, Claude Code, the Python venvs) stays cached. A plain build leaves
+# it at 0, so the cached npm layer is reused. Keep new layers above this one.
+ARG TOOLS_CACHE_BUST=0
+RUN echo "tools cache bust: ${TOOLS_CACHE_BUST}" \
+ && npm install -g --allow-scripts=opencode-ai,@google/genai,protobufjs opencode-ai@latest @earendil-works/pi-coding-agent@latest
 
 WORKDIR /root
 CMD ["/bin/bash"]

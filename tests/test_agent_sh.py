@@ -85,9 +85,20 @@ def test_reset_container_skips_image_rm():
     # The reset-container branch must NOT contain docker image rm.
     # We verify by asserting the image-rm only appears inside the REBUILD-specific block,
     # not duplicated in a reset-container-only block.
-    # Simple invariant: any 'docker image rm' line must be inside a $REBUILD guard.
+    # Simple invariant: any 'docker image rm' line must be inside a $REBUILD guard,
+    # except drop_untagged_image(), which removes only untagged images and is
+    # called only from the --refresh-tools / --restore-previous-image branches.
     lines = _SCRIPT_TEXT.splitlines()
-    image_rm_lines = [i for i, l in enumerate(lines) if "docker image rm" in l and not l.strip().startswith("#")]
+    helper = next(i for i, l in enumerate(lines) if l.startswith("drop_untagged_image() {"))
+    helper_end = next(i for i in range(helper, len(lines)) if lines[i] == "}")
+    image_rm_lines = [i for i, l in enumerate(lines) if "docker image rm" in l and not l.strip().startswith("#")
+                      and not helper < i < helper_end]
+    callers = [i for i, l in enumerate(lines) if l.strip().startswith("drop_untagged_image ")]
+    for lineno in callers:
+        branch = next(lines[j] for j in range(lineno, 0, -1) if lines[j].startswith(("if ", "elif ")))
+        assert "REFRESH_TOOLS" in branch or "RESTORE_PREVIOUS" in branch, (
+            f"drop_untagged_image at line {lineno + 1} is outside the refresh/restore branches"
+        )
     for lineno in image_rm_lines:
         # Walk back to find the nearest enclosing if-condition
         context = "\n".join(lines[max(0, lineno - 20):lineno + 1])

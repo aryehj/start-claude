@@ -66,19 +66,20 @@ OPTIONS:
   --init-sandbox PATH    Create a new sandbox at PATH with the required
                          directory layout. One-shot; exits immediately after
                          creation.
-  --rebuild              Remove image + container and recreate. With
-                         confirmation, also delete and recreate the Colima VM.
+  --rebuild              Remove the image (claude-agent:previous too) and the
+                         containers, and recreate. With confirmation, also
+                         delete and recreate the Colima VM.
   --reset-container      Remove the project container (and SearXNG container)
                          but keep the image and VM. Cheaper than --rebuild
                          when you only need to reset container state.
                          Mutually exclusive with --rebuild.
   --refresh-tools        Pull the current OpenCode and Pi (@latest) into the
-                         image: tag it as claude-agent:previous, rebuild from
-                         the npm layer onward (OS packages, Node, uv and
-                         Claude Code stay cached), and recreate the
-                         containers like --reset-container. Prints the old
-                         and new versions. --rebuild alone may reuse the
-                         cached npm layer.
+                         image: rebuild only the npm layer (OS packages, Node,
+                         uv, Claude Code and the Python venvs stay cached),
+                         keep the replaced image as claude-agent:previous,
+                         and recreate the containers like --reset-container.
+                         Prints the old and new versions. --rebuild alone may
+                         reuse the cached npm layer.
   --restore-previous-image  Point claude-agent:latest back at the image saved
                          by the last --refresh-tools and recreate the
                          containers. --refresh-tools and
@@ -680,10 +681,15 @@ fi
 # The VM itself was handled earlier (--rebuild only).
 if $REBUILD; then
   remove_containers "--rebuild"
-  if docker image inspect "$IMAGE_TAG" &>/dev/null; then
-    echo "==> --rebuild: removing image '$IMAGE_TAG'"
-    docker image rm "$IMAGE_TAG" >/dev/null
-  fi
+  # previous goes too: with the legacy builder its layer chain is build cache,
+  # so a plain rebuild after a --refresh-tools could reproduce the older image
+  # and quietly downgrade OpenCode/Pi (ADR-054).
+  for tag in "$IMAGE_TAG" "$PREVIOUS_IMAGE_TAG"; do
+    if docker image inspect "$tag" &>/dev/null; then
+      echo "==> --rebuild: removing image '$tag'"
+      docker image rm "$tag" >/dev/null
+    fi
+  done
 elif $RESET_CONTAINER; then
   remove_containers "--reset-container"
   echo "==> --reset-container: image '$IMAGE_TAG' kept intact"
@@ -1399,29 +1405,67 @@ record_tool_versions() {
   return 0
 }
 
-# Always returns 0: under pipefail, a missing file would otherwise abort the
+# IMAGE_ID: the ID claude-agent:latest points at, empty if there is none. Set
+# here and again after each command that moves the tag, so tool_version can
+# check the record against it without another inspect (a warm reattach makes
+# this one inspect and no other for the image).
+load_image_id() {
+  IMAGE_ID=$(docker image inspect -f '{{.Id}}' "$IMAGE_TAG" 2>/dev/null) || IMAGE_ID=""
+}
+
+# A version from $TOOL_VERSIONS_FILE, or empty when the record describes
+# another image (record_tool_versions failed and kept the old file), so the
+# previous image's versions are never reported as the current ones. Always
+# returns 0: under pipefail, a missing file would otherwise abort the
 # assignment it sits in.
-tool_version() { sed -n "s/^$1=//p" "$TOOL_VERSIONS_FILE" 2>/dev/null | head -n 1 || true; }
+tool_version() {
+  [[ -n "${IMAGE_ID:-}" ]] && grep -qxF "image_id=$IMAGE_ID" "$TOOL_VERSIONS_FILE" 2>/dev/null || return 0
+  sed -n "s/^$1=//p" "$TOOL_VERSIONS_FILE" 2>/dev/null | head -n 1 || true
+}
 
 # $1: label; $2, $3: the opencode and pi versions read before the image moved.
 print_tool_versions_change() {
-  echo "==> $1: opencode ${2:-?} → $(tool_version opencode), pi ${3:-?} → $(tool_version pi)"
+  local new_opencode new_pi
+  new_opencode=$(tool_version opencode); new_pi=$(tool_version pi)
+  echo "==> $1: opencode ${2:-?} → ${new_opencode:-?}, pi ${3:-?} → ${new_pi:-?}"
 }
 
+# Remove an image that no longer has a tag. No -f: if anything still uses it
+# (a container you started yourself, another tag), docker refuses and the
+# image stays put. That's harmless, so it only prints a note.
+drop_untagged_image() {
+  local id=$1
+  [[ -n "$id" ]] || return 0
+  [[ -z "$(docker image inspect -f '{{join .RepoTags ""}}' "$id" 2>/dev/null)" ]] || return 0
+  docker image rm "$id" >/dev/null 2>&1 \
+    && echo "    removed the untagged image ${id:7:12}" \
+    || echo "    note: kept the untagged image ${id:7:12} (still in use)"
+}
+
+load_image_id
 if $REFRESH_TOOLS; then
+  # Read before the build moves latest. previous is retagged only after a
+  # successful build, so a failed one leaves the rollback point as it was.
+  replaced_id=$IMAGE_ID
+  old_previous_id=$(docker image inspect -f '{{.Id}}' "$PREVIOUS_IMAGE_TAG" 2>/dev/null) || old_previous_id=""
   old_opencode=""; old_pi=""
-  if docker image inspect "$IMAGE_TAG" &>/dev/null; then
+  if [[ -n "$replaced_id" ]]; then
     record_tool_versions
     old_opencode=$(tool_version opencode); old_pi=$(tool_version pi)
-    docker tag "$IMAGE_TAG" "$PREVIOUS_IMAGE_TAG"
-    echo "==> --refresh-tools: saved the current image as $PREVIOUS_IMAGE_TAG (undo with --restore-previous-image)"
   fi
   echo "==> --refresh-tools: rebuilding $IMAGE_TAG from the OpenCode/Pi npm layer onward"
-  # A fresh value reruns the npm RUN and every later layer; the layers above
-  # the ARG stay cached. A failed build exits here (set -e), leaving latest
-  # and the containers as they were.
+  # A fresh value reruns the npm RUN, the last layer; the layers above the ARG
+  # stay cached. A failed build exits here (set -e), leaving latest, previous
+  # and the containers as they were. The replaced image keeps its ID while
+  # untagged, so it can still be tagged as previous afterwards.
   build_image --build-arg TOOLS_CACHE_BUST="$(date +%s)"
+  load_image_id
+  if [[ -n "$replaced_id" ]]; then
+    docker tag "$replaced_id" "$PREVIOUS_IMAGE_TAG"
+    echo "==> --refresh-tools: saved the replaced image as $PREVIOUS_IMAGE_TAG (undo with --restore-previous-image)"
+  fi
   remove_containers "--refresh-tools"
+  drop_untagged_image "$old_previous_id"
   record_tool_versions
   print_tool_versions_change "--refresh-tools" "$old_opencode" "$old_pi"
 elif $RESTORE_PREVIOUS; then
@@ -1429,16 +1473,22 @@ elif $RESTORE_PREVIOUS; then
     echo "error: there is no $PREVIOUS_IMAGE_TAG image to restore; --refresh-tools saves one." >&2
     exit 1
   fi
+  replaced_id=$IMAGE_ID
   record_tool_versions
   old_opencode=$(tool_version opencode); old_pi=$(tool_version pi)
   remove_containers "--restore-previous-image"
   docker tag "$PREVIOUS_IMAGE_TAG" "$IMAGE_TAG"
+  load_image_id
   echo "==> --restore-previous-image: $IMAGE_TAG now points at $PREVIOUS_IMAGE_TAG"
+  # A no-op on a second restore: latest and previous are then the same image,
+  # still tagged.
+  drop_untagged_image "$replaced_id"
   record_tool_versions
   print_tool_versions_change "--restore-previous-image" "$old_opencode" "$old_pi"
-elif ! docker image inspect "$IMAGE_TAG" &>/dev/null; then
+elif [[ -z "$IMAGE_ID" ]]; then
   echo "==> Building $IMAGE_TAG from $DOCKERFILE_PATH"
   build_image
+  load_image_id
   record_tool_versions
 fi
 
