@@ -69,6 +69,44 @@ if [[ ! -d "$PROJECT_DIR" ]]; then
   exit 1
 fi
 
+# ── launch-time update check (ADR-055) ───────────────────────────────────────
+# One line when npm has had a sandbox-runtime release more than
+# CLAUDE_CONTAINER_VERSION_LAG_DAYS (default 30) newer than the pin below.
+# The fetch runs detached from this script, so it never delays a launch; the
+# report just before attaching reads only the cached state, so a release
+# shows up on the launch after the daily fetch that saw it. Silent on any
+# error. CLAUDE_CONTAINER_DISABLE_VERSION_CHECK=1 turns it off.
+VERSION_CHECK_STATE="$HOME/.claude-containers/version-check.json"
+
+version_check_enabled() {
+  [[ ! "${CLAUDE_CONTAINER_DISABLE_VERSION_CHECK:-}" =~ ^(1|true|yes)$ ]]
+}
+
+# The pinned version in the npm install line of the setup script.
+sandbox_runtime_pin() {
+  sed -n 's/.*@anthropic-ai\/sandbox-runtime@\([0-9][0-9.]*\).*/\1/p' "$1" 2>/dev/null | head -n 1 || true
+}
+
+# The subshell exits at once, so the fetch is not this script's child and
+# outlives the attach without holding the terminal.
+start_version_check() {
+  version_check_enabled || return 0
+  mkdir -p "$(dirname "$VERSION_CHECK_STATE")" 2>/dev/null || true
+  ( python3 "$SCRIPT_DIR/check_versions.py" --fetch-only --state "$VERSION_CHECK_STATE" \
+      sandbox-runtime </dev/null >/dev/null 2>&1 & )
+  return 0
+}
+
+report_version_check() {
+  version_check_enabled || return 0
+  python3 "$SCRIPT_DIR/check_versions.py" --cached --state "$VERSION_CHECK_STATE" \
+    --lag-days "${CLAUDE_CONTAINER_VERSION_LAG_DAYS:-30}" \
+    "sandbox-runtime=$(sandbox_runtime_pin "$SCRIPT_DIR/start-claude.sh")" </dev/null >&2 2>/dev/null || true
+  return 0
+}
+
+start_version_check
+
 # ── container existence check ─────────────────────────────────────────────────
 # `container inspect NAME` behaves differently across Apple Containers versions:
 #   - older: missing container → exit 0 with stdout "[]"
@@ -236,6 +274,7 @@ fi
 if container_exists "$CONTAINER_NAME"; then
   echo "Container '$CONTAINER_NAME' already exists — attaching."
   container start "$CONTAINER_NAME" 2>/dev/null || true
+  report_version_check
   container exec -it -w "$PROJECT_DIR" "${CONTAINER_ENV[@]}" "$CONTAINER_NAME" /bin/bash
   exit 0
 fi
@@ -435,6 +474,8 @@ else
   echo "    warning: failed to fetch skills from $SKILLS_ARCHIVE_URL (continuing)" >&2
 fi
 rm -rf "$SKILLS_TMP"
+
+report_version_check
 
 # --cap-add SYS_ADMIN lets Claude Code's bubblewrap sandbox create the nested
 # user+mount namespaces it wraps every Bash command in. Apple Containers'

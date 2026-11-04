@@ -156,6 +156,10 @@ ENVIRONMENT:
   CLAUDE_AGENT_EXEC_MODEL         OpenCode exec/build-agent model (overridden by --exec-model).
   CLAUDE_AGENT_SMALL_MODEL        OpenCode small model (overridden by --small-model).
   CLAUDE_AGENT_DISABLE_SEARCH=1  Disable SearXNG container, also disabling OpenCode websearch (overridden by --disable-search).
+  CLAUDE_AGENT_VERSION_LAG_DAYS  Warn at launch when SearXNG, OpenCode or Pi has an
+                         upstream release more than this many days newer than
+                         the one in use. Default: 30. Checked at most once a day.
+  CLAUDE_AGENT_DISABLE_VERSION_CHECK=1  Turn that launch-time check off.
 USAGE
 }
 
@@ -410,6 +414,9 @@ PI_CONFIG_DIR="$SANDBOX_ROOT/.sandbox_config/pi"
 # OpenCode/Pi versions in the current image, keyed by image ID. The Dockerfile
 # says @latest, so the build is the only place the real versions are known.
 TOOL_VERSIONS_FILE="$SANDBOX_ROOT/.sandbox_config/tool-versions"
+# Upstream release data for the launch-time update check (check_versions.py,
+# ADR-055): fetched at most once a day, host-side only.
+VERSION_CHECK_STATE="$SANDBOX_ROOT/.sandbox_config/version-check.json"
 AGENTS_SKILLS_DIR="$SANDBOX_ROOT/.sandbox_config/agents/skills"
 ALLOWLIST_FILE="$SANDBOX_ROOT/.sandbox_config/allowlist.txt"
 # Shared with start-claude.sh, which turns it into sandbox.network.allowedDomains.
@@ -453,6 +460,56 @@ if [[ ! -f "$ALLOWLIST_TEMPLATE" ]]; then
   echo "error: allowlist template not found at $ALLOWLIST_TEMPLATE" >&2
   exit 1
 fi
+
+# ── launch-time update check (ADR-055) ───────────────────────────────────────
+# One line per pinned component whose newest upstream release is more than
+# CLAUDE_AGENT_VERSION_LAG_DAYS (default 30) newer than the one in use. The
+# fetch runs detached from this script, so it never delays a launch; the
+# report just before attaching reads only the cached state, so a release
+# shows up on the launch after the daily fetch that saw it. Silent on any
+# error. CLAUDE_AGENT_DISABLE_VERSION_CHECK=1 turns it off.
+version_check_enabled() {
+  [[ ! "${CLAUDE_AGENT_DISABLE_VERSION_CHECK:-}" =~ ^(1|true|yes)$ ]]
+}
+
+version_check_components() {
+  $LOCAL_SEARCH_ENABLED && printf '%s\n' searxng
+  printf '%s\n' opencode pi
+}
+
+# The date in the "known good on YYYY-MM-DD" comment that bump-searxng.sh
+# writes above SEARXNG_IMAGE: the last day the pin was upstream latest.
+searxng_pinned_on() {
+  sed -n 's/^# Pinned by digest (.*known good on \([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\)).*/\1/p' "$1" 2>/dev/null | head -n 1 || true
+}
+
+# The subshell exits at once, so the fetch is not this script's child and
+# outlives the exec into the container without holding the terminal.
+start_version_check() {
+  version_check_enabled || return 0
+  local components
+  components=$(version_check_components)
+  # shellcheck disable=SC2086 # one component name per word
+  ( python3 "$SCRIPT_DIR/check_versions.py" --fetch-only --state "$VERSION_CHECK_STATE" \
+      $components </dev/null >/dev/null 2>&1 & )
+  return 0
+}
+
+report_version_check() {
+  version_check_enabled || return 0
+  local specs=() name
+  for name in $(version_check_components); do
+    case "$name" in
+      searxng) specs+=("searxng=$(searxng_pinned_on "$SCRIPT_DIR/start-agent.sh")") ;;
+      *)       specs+=("$name=$(tool_version "$name")") ;;
+    esac
+  done
+  python3 "$SCRIPT_DIR/check_versions.py" --cached --state "$VERSION_CHECK_STATE" \
+    --lag-days "${CLAUDE_AGENT_VERSION_LAG_DAYS:-30}" "${specs[@]}" </dev/null >&2 2>/dev/null || true
+  return 0
+}
+
+start_version_check
 
 # ── seed allowlist (first run only) ──────────────────────────────────────────
 mkdir -p "$(dirname "$ALLOWLIST_FILE")"
@@ -1992,6 +2049,7 @@ attach_existing() {
     exit 1
   fi
   wait_inference_probe
+  report_version_check
   rm -rf "$TMP_WORK"
   trap - EXIT
   exec docker exec -it -w "$PROJECT_DIR" "${DOCKER_ENV_ARGS[@]}" "$CONTAINER_NAME" /bin/bash
@@ -2048,6 +2106,7 @@ echo "    proxy    : http://$BRIDGE_IP:$TINYPROXY_PORT  (allowlist: $ALLOWLIST_F
 echo "    inference: $INFERENCE_LABEL via proxy at http://$BRIDGE_IP:$INFERENCE_PORT$INFERENCE_STATUS"
 echo "    network  : $AGENT_NET_NAME"
 $LOCAL_SEARCH_ENABLED && echo "    search   : SearXNG on $AGENT_NET_NAME"
+report_version_check
 
 rm -rf "$TMP_WORK"
 trap - EXIT
