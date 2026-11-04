@@ -4,7 +4,8 @@
 
 - [ ] Phase 1: Refresh + rollback path for claude-agent, and a SearXNG bump (human gate: live run on the macOS host)
   - [x] Steps 2-6: cache-bust ARG, tool-version record, `--refresh-tools` / `--restore-previous-image`, `scripts/bump-searxng.sh`, `tests/verify-tool-refresh.sh`; ADR-054, README, CLAUDE.md
-  - [ ] Steps 1 + 7 live: `.temp/phase1-live-run.sh` on the host (baseline verify, bump, verify, refresh, verify; its cache probe answers Unknown 1), then commit the bumped pin and record the cache finding in ADR-054
+  - [x] Step 7, SearXNG half: pin bumped to 2026.11.2 and committed (84228a8), bing turned on in the seed (9d0ea4a)
+  - [ ] Steps 1 + 7, refresh half: `.temp/phase1-refresh-run.sh` on the host (`--refresh-tools`, then a host-mode `tests/verify-tool-refresh.sh` whose cache probe answers Unknown 1; log `.verify/phase1-refresh-run.log`), then record the cache finding in ADR-054. Earlier host-mode verify runs stalled after "mode: host"; fixed in 9b6683a (no piped stdin into `docker exec`)
 - [ ] Phase 2: Bump sandbox-runtime 0.0.73 → current, re-tested under Apple Containers (Opus recommended)
 - [ ] Phase 3: Launch-time staleness warnings
 
