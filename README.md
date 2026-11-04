@@ -385,7 +385,7 @@ to a different sandbox restarts the VM with the new `--mount` (~10s).
 | Tool | Notes |
 |------|-------|
 | `claude` | Claude Code CLI |
-| `opencode` | [OpenCode](https://opencode.ai) CLI (installed via `opencode-ai` npm) |
+| `opencode` | [OpenCode](https://opencode.ai) 2.x CLI (installed via `@opencode/cli` npm) |
 | `pi` | [Pi](https://pi.dev) CLI (installed via `@earendil-works/pi-coding-agent` npm) |
 | `uv` / `uvx` | Python package manager |
 | `node` / `npm` | Node.js LTS |
@@ -647,6 +647,11 @@ Ollama case above.
 as a local `websearch` MCP tool. It fans out to search engines through the same
 tinyproxy allowlist, so all engine traffic is governed by
 `$SANDBOX_ROOT/.sandbox_config/allowlist.txt` — no third-party search gateway.
+OpenCode's own built-in `websearch` tool, which goes through Exa, Tavily and
+similar gateways, stays denied in `opencode.json`; the SearXNG tool
+(`searxng_websearch`) is separate from it. The SearXNG server is configured with
+`codemode: false`, so OpenCode 2.x offers it as a plain tool rather than through
+its JavaScript Code Mode, which small local models do not use reliably.
 The SearXNG config (including a generated `secret_key`) is seeded on first run at
 `$SANDBOX_ROOT/.sandbox_config/searxng/settings.yml` and survives `--rebuild`.
 To reset it, delete that directory and re-run.
@@ -671,7 +676,10 @@ See `ADR.md` §ADR-014 for the threat model and design rationale.
 ## Updating OpenCode, Pi and SearXNG
 
 **OpenCode and Pi** are installed at `@latest`, so the version is whatever npm
-served when the image was built. The cached image keeps it until you refresh:
+served when the image was built. The cached image keeps it until you refresh.
+OpenCode 2.x is the `@opencode/cli` package; `opencode-ai`, installed before
+ADR-056, stops at 1.x, so an image built from the older Dockerfile stays on 1.x
+however often it is refreshed.
 
 ```bash
 start-agent.sh --refresh-tools          # rebuild the npm layer, keep the old image as claude-agent:previous, recreate containers
@@ -739,7 +747,7 @@ upstream release is more than 30 days newer than the one in use, naming the
 command above that updates it:
 
 ```
-warning: OpenCode 1.19.5 is 43 days behind npm latest 1.21.0 (released 2026-12-10). Update: start-agent.sh --refresh-tools
+warning: OpenCode 2.2.5 is 43 days behind npm latest 2.4.0 (released 2026-12-13). Update: start-agent.sh --refresh-tools
 warning: the SearXNG pin (current on 2026-11-03) is 35 days behind Docker Hub latest (pushed 2026-12-08). Update: scripts/bump-searxng.sh, then tests/verify-tool-refresh.sh
 ```
 

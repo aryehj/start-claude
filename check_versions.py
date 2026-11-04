@@ -47,7 +47,7 @@ DEFAULT_LAG_DAYS = 30
 CHECK_INTERVAL = 86400        # seconds between fetches of one source
 REQUEST_TIMEOUT = 10.0        # per socket operation
 FETCH_DEADLINE = 30.0         # all sources together
-MAX_RESPONSE_BYTES = 64 << 20  # opencode-ai's packument is ~4 MB gzipped, ~25 MB raw
+MAX_RESPONSE_BYTES = 64 << 20  # opencode-ai's packument was ~25 MB raw; @opencode/cli's ~4 MB
 
 STATE_SCHEMA = 1
 
@@ -59,7 +59,7 @@ COMPONENTS = {
     },
     "opencode": {
         "label": "OpenCode",
-        "source": ("npm", "opencode-ai"),
+        "source": ("npm", "@opencode/cli"),  # 2.x; opencode-ai is the 1.x line (ADR-056)
         "update": "start-agent.sh --refresh-tools",
     },
     "pi": {
@@ -131,8 +131,8 @@ def is_fresh(entry, now):
 def parse_npm(doc):
     """Packument -> {'latest': version, 'times': {release version: timestamp}}.
 
-    Prereleases are dropped to keep the state file small (opencode-ai lists
-    ~12k snapshot versions); a prerelease in use is simply not checked.
+    Prereleases are dropped to keep the state file small (opencode packages
+    list thousands of snapshot versions); a prerelease in use is simply not checked.
     """
     if not isinstance(doc, dict):
         raise ValueError("packument is not an object")

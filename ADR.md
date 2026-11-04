@@ -4088,3 +4088,82 @@ SearXNG under `--disable-search`.
 - `tests/test_check_versions.py` covers the helper offline, using fixture JSON
   and a local HTTP server, and covers the launcher functions.
   `tests/verify-version-check.sh` is the live check on the host.
+
+---
+
+## ADR-056: OpenCode 2.x: install `@opencode/cli`, deny the built-in websearch, keep SearXNG out of Code Mode
+
+**Date:** 2026-11-04
+**Status:** Accepted (amends ADR-014, ADR-054)
+
+### Context
+
+`--refresh-tools` kept installing OpenCode 1.x after 2.0 shipped
+(2026-09-11). OpenCode 2.x is published as a new npm package, `@opencode/cli`;
+`opencode-ai`, which the tools Dockerfile installed, now carries only the 1.x
+line (its `latest` was 1.19.5 on 2026-10-28, with no 2.x version at all). So
+`opencode-ai@latest` could never reach 2.x, and `check_versions.py`, which
+watched the same package, never warned about it.
+
+The upstream migration guide says 2.x reads V1 `opencode.json` from the same
+paths and normalizes it in memory. That held for the injected file: provider,
+models (`modalities` become `capabilities.input`), `model`, `agent`,
+`small_model`, `permission`, `mcp`, `instructions`, `compaction` and
+`autoupdate` (read as `update: "disable"`) all load. Only the per-model
+`attachment` key is dropped, with a log warning. Tested in the agent container
+with 2.2.5, omlx `gemma-4-e4b-it-6bit`, and the live SearXNG. Three behaviours
+did change:
+
+- **Built-in websearch.** 2.x's `websearch` tool searches through Exa,
+  Firecrawl, Parallel, Tavily or TinyFish. With `permission.websearch: "allow"`,
+  which the injector set whenever SearXNG was on, the model is offered that
+  tool. Its gateways are not on the allowlist, so it only fails, and the small
+  model picked it before the SearXNG tool every time. Allowing it is also the
+  third-party-gateway egress path ADR-014 rejected.
+- **Code Mode.** 2.x exposes MCP tools through a JavaScript `execute` tool
+  ("Code Mode") unless a server sets `codemode: false`. The small model
+  called `tools.searxng.websearch` as if it were a tool and failed.
+- **MCP connects in the background.** A directory's MCP servers connect
+  after its first request. `opencode mcp list` reports what is connected so
+  far ("No MCP servers configured" at first), and the first model request of a
+  fresh server goes out without MCP tools. Interactive sessions use the
+  persistent background service, so only the first request after it starts is
+  affected.
+
+### Decision
+
+- `claude-agent-tools.Dockerfile` installs `@opencode/cli@latest` and passes
+  `--allow-scripts=@opencode/cli`. Its postinstall replaces a placeholder bin
+  with the platform binary; without it, `opencode` only prints that the
+  postinstall did not run. `check_versions.py` watches `npm:@opencode/cli`.
+- The injector always writes `permission.websearch: "deny"`. The rule names
+  the built-in tool only; the SearXNG tool is `searxng_websearch` and is
+  unaffected (checked: it is offered and runs with the rule in place).
+- The injector sets `codemode: false` on the `searxng` MCP entry
+  (`setdefault`, so existing sandboxes get it and a user's own value stays).
+- `opencode.json` stays in the V1 shape. 2.x accepts it, and 1.19.5 reads the
+  same file and ignores `codemode`, so `--restore-previous-image` back to a
+  1.x image keeps working. Converting to the native V2 shape can wait until
+  1.x is no longer a restore target.
+- `tests/verify-tool-refresh.sh` polls `opencode mcp list` for up to 30 s
+  before the end-to-end run, from the run's directory, and drops `run --dir`,
+  which 2.x does not have.
+
+### Consequences
+
+- The first `--refresh-tools` after this change moves OpenCode from 1.x to
+  2.x. `--restore-previous-image` returns to 1.x. Verified on copies of the
+  live state: 2.x upgrades the existing `opencode.db` in place and 1.19.5 still
+  lists its sessions afterwards. A data directory that 2.x created from
+  scratch is not readable by 1.x ("Database is not empty and has no session
+  table"), so a sandbox that never ran 1.x cannot be restored to it with its
+  data.
+- Until that first refresh, the launch-time check is silent about OpenCode:
+  the 1.x version in use is not in `@opencode/cli`'s release list.
+- The built-in websearch is denied even if a user adds a search gateway's host
+  to the allowlist; they must also edit `opencode.json` after each launch, as
+  with the old forced `allow`.
+- 2.x logs one "unsupported legacy setting" warning per model for
+  `attachment`, which stays for 1.x.
+- `tests/verify-tool-refresh.sh`'s in-container checks pass on both 2.2.5 and
+  1.19.5 against the same injected config.

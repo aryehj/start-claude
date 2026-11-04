@@ -15,15 +15,19 @@
 FROM claude-agent:base
 
 # ── OpenCode + Pi CLIs ───────────────────────────────────────────────────────
-# Both shipped as canonical npm packages: opencode-ai (binary `opencode`) and
+# Both shipped as canonical npm packages: @opencode/cli (binary `opencode`) and
 # @earendil-works/pi-coding-agent (binary `pi`, requires Node >=22.19.0 which
 # setup_lts.x satisfies). Installed in one layer so npm bootstraps once.
+# OpenCode 2.x is @opencode/cli; opencode-ai only carries the 1.x line, so
+# opencode-ai@latest never reaches 2.x (ADR-056). @opencode/cli's postinstall
+# swaps its placeholder bin for the platform binary, so it must be allowed:
+# without it `opencode` only prints "postinstall script was not run".
 # TOOLS_CACHE_BUST: `start-agent.sh --refresh-tools` passes a fresh value so
 # this layer reruns (pulling the current @latest). A plain build leaves it at
 # 0, so a cached npm layer, if the builder has one, is reused.
 ARG TOOLS_CACHE_BUST=0
 RUN echo "tools cache bust: ${TOOLS_CACHE_BUST}" \
- && npm install -g --allow-scripts=opencode-ai,@google/genai,protobufjs opencode-ai@latest @earendil-works/pi-coding-agent@latest
+ && npm install -g --allow-scripts=@opencode/cli,@google/genai,protobufjs @opencode/cli@latest @earendil-works/pi-coding-agent@latest
 
 # WORKDIR /root and CMD come from the base: nothing here may add a layer
 # besides the npm install (the legacy builder commits a WORKDIR step).

@@ -30,8 +30,25 @@ def test_pi_deprecated_package_not_used():
 
 
 def test_opencode_installed_via_npm():
-    assert "npm install -g" in _TEXT and "opencode-ai@latest" in _TEXT, (
+    assert "npm install -g" in _TEXT and "@opencode/cli@latest" in _TEXT, (
         "opencode CLI not installed in Dockerfile"
+    )
+
+
+def test_opencode_1x_package_not_used():
+    # opencode-ai only carries the 1.x line; @latest there never reaches 2.x (ADR-056).
+    code = [l for l in _TEXT.splitlines() if not l.strip().startswith("#")]
+    assert not any("opencode-ai" in l for l in code), (
+        "opencode-ai is OpenCode 1.x; install @opencode/cli"
+    )
+
+
+def test_opencode_postinstall_allowed():
+    # Without its postinstall, @opencode/cli's bin is a placeholder that only
+    # prints an error, and npm blocks the script unless allow-scripts names it.
+    m = re.search(r"--allow-scripts=(\S+)", _TOOLS)
+    assert m and "@opencode/cli" in m.group(1).split(","), (
+        "npm install must pass --allow-scripts naming @opencode/cli"
     )
 
 
@@ -110,7 +127,7 @@ def _instructions(text):
 
 def _npm_install_line_index(lines):
     idx = [i for i, l in enumerate(lines)
-           if "npm install -g" in l and "opencode-ai@latest" in l]
+           if "npm install -g" in l and "@opencode/cli@latest" in l]
     assert len(idx) == 1, f"expected one opencode/pi npm install line, found {len(idx)}"
     return idx[0]
 
@@ -130,7 +147,7 @@ def test_base_tag_matches_start_agent():
 
 
 def test_base_does_not_install_the_tools():
-    for pkg in ("opencode-ai", "pi-coding-agent", "TOOLS_CACHE_BUST"):
+    for pkg in ("@opencode/cli", "pi-coding-agent", "TOOLS_CACHE_BUST"):
         assert pkg not in _BASE, f"{pkg} belongs in claude-agent-tools.Dockerfile, not the base"
 
 
@@ -180,7 +197,7 @@ def test_tools_cache_bust_referenced_by_npm_run():
 
 def test_tools_still_installed_at_latest():
     # The user chose to keep @latest (plans/safe-tool-version-updates.md).
-    assert "opencode-ai@latest" in _TOOLS and "@earendil-works/pi-coding-agent@latest" in _TOOLS
+    assert "@opencode/cli@latest" in _TOOLS and "@earendil-works/pi-coding-agent@latest" in _TOOLS
 
 
 def test_npm_install_is_the_last_layer():

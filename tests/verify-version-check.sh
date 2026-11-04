@@ -119,7 +119,7 @@ for key in sorted(s):
     e = s[key]
     print("{}: latest={} updated={} digest={} times={}".format(
         key, e.get("latest"), e.get("updated"), (e.get("digest") or "")[:19], len(e.get("times") or {})))
-want = {"npm:opencode-ai", "npm:@earendil-works/pi-coding-agent",
+want = {"npm:@opencode/cli", "npm:@earendil-works/pi-coding-agent",
         "npm:@anthropic-ai/sandbox-runtime", "dockerhub:searxng/searxng:latest"}
 bad = [k for k in want if not (s.get(k, {}).get("latest") or s.get(k, {}).get("updated"))]
 sys.exit(1 if bad else 0)
@@ -143,7 +143,7 @@ def oldest(key):
     times = s.get(key, {}).get("times") or {}
     rel = sorted(times, key=lambda v: times[v])
     return rel[0] if rel else ""
-print("opencode=" + oldest("npm:opencode-ai"))
+print("opencode=" + oldest("npm:@opencode/cli"))
 print("pi=" + oldest("npm:@earendil-works/pi-coding-agent"))
 print("sandbox-runtime=" + oldest("npm:@anthropic-ai/sandbox-runtime"))
 PYEOF

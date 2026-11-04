@@ -13,7 +13,8 @@
 #      engine fails for a reason other than upstream throttling (an engine that
 #      needs a host missing from the allowlist shows up here).
 #   2. OpenCode loads the injected opencode.json (`opencode debug config`) and
-#      the searxng MCP server connects (`opencode mcp list`).
+#      the searxng MCP server connects (`opencode mcp list`, polled: 2.x
+#      connects MCP servers in the background).
 #   3. `opencode run` on omlx/gemma-4-e4b-it-6bit calls the searxng tool, the
 #      tool returns results, and the answer is not empty. `pi --version` runs.
 # On the host (DOCKER_CONTEXT=colima-claude-agent, the client start-agent.sh uses):
@@ -257,7 +258,16 @@ if out=$(timeout 90 opencode debug config 2>&1 >/dev/null); then
 else
   echo "FAIL  opencode debug config loads the injected opencode.json — $(printf '%s' "$out" | strip | head -n 3 | tr '\n' ' ')"
 fi
-mcp=$(timeout 90 opencode mcp list 2>&1 | strip)
+# OpenCode 2.x connects MCP servers in the background after a directory's first
+# request, and `mcp list` reports what is connected so far ("No MCP servers
+# configured" at first). Poll it. The run below starts in this directory, so
+# this also has searxng connected before its first model request; otherwise
+# that request goes out without the searxng tool.
+for _ in $(seq 1 15); do
+  mcp=$(timeout 90 opencode mcp list 2>&1 | strip)
+  grep -q 'searxng.*connected' <<<"$mcp" && break
+  sleep 2
+done
 if grep -q 'searxng.*connected' <<<"$mcp"; then
   echo "PASS  opencode mcp list: searxng connected"
 else
@@ -279,7 +289,8 @@ then
   echo "SKIP  opencode run end to end — opencode.json has no omlx provider with $MODEL (start with --backend=omlx while omlx serves it)"
 else
   echo "INFO  opencode run on omlx/$MODEL (may take minutes while the model loads)"
-  timeout 600 opencode run --format json -m "omlx/$MODEL" --dir "$work" \
+  # Runs in $work (the cwd); 2.x has no --dir.
+  timeout 600 opencode run --format json -m "omlx/$MODEL" \
     "Use the searxng websearch tool to search for 'Debian Linux distribution'. Then reply with one sentence about what you found." \
     > run.jsonl 2> run.err
   rc=$?

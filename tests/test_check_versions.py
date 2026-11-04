@@ -41,7 +41,7 @@ def packument(latest="1.20.0", times=None):
         "1.20.0": "2026-12-10T01:02:03.456Z",
     }
     return {
-        "name": "opencode-ai",
+        "name": "@opencode/cli",
         "dist-tags": {"latest": latest},
         "time": {"created": "2025-01-01T00:00:00.000Z",
                  "modified": "2026-12-10T01:02:04.000Z",
@@ -290,13 +290,13 @@ def test_sources_are_shared_and_deduplicated(cv, monkeypatch, tmp_path):
 def test_failed_fetch_keeps_old_data_and_waits_a_day(cv, monkeypatch, tmp_path):
     state = tmp_path / "state.json"
     old = state_with(cv, opencode=cv.parse_npm(packument()))
-    old["sources"]["npm:opencode-ai"]["checked"] = NOW - 2 * DAY
+    old["sources"]["npm:@opencode/cli"]["checked"] = NOW - 2 * DAY
     state.write_text(json.dumps(old))
     calls = _fake_fetch(cv, monkeypatch, OSError("offline"))
     lines = cv.run(["--state", str(state), "opencode=1.19.5"], now=NOW)
     assert len(calls) == 1
     assert lines and "1.20.0" in lines[0], "old data still reported"
-    saved = json.loads(state.read_text())["sources"]["npm:opencode-ai"]
+    saved = json.loads(state.read_text())["sources"]["npm:@opencode/cli"]
     assert saved["checked"] == NOW and saved["latest"] == "1.20.0"
     cv.run(["--state", str(state), "opencode=1.19.5"], now=NOW + 60)
     assert len(calls) == 1, "a failed fetch also counts as today's attempt"
@@ -307,13 +307,13 @@ def test_malformed_response_is_silent_and_keeps_old_data(cv, monkeypatch, tmp_pa
     calls = _fake_fetch(cv, monkeypatch, lambda s: cv.parse_npm({"dist-tags": {}}))
     assert cv.run(["--state", str(state), "opencode=1.19.5"], now=NOW) == []
     assert len(calls) == 1
-    assert json.loads(state.read_text())["sources"]["npm:opencode-ai"] == {"checked": NOW}
+    assert json.loads(state.read_text())["sources"]["npm:@opencode/cli"] == {"checked": NOW}
 
 
 def test_cached_mode_never_fetches(cv, monkeypatch, tmp_path):
     state = tmp_path / "state.json"
     stale = state_with(cv, opencode=cv.parse_npm(packument()))
-    stale["sources"]["npm:opencode-ai"]["checked"] = NOW - 30 * DAY
+    stale["sources"]["npm:@opencode/cli"]["checked"] = NOW - 30 * DAY
     state.write_text(json.dumps(stale))
     before = state.read_text()
     calls = _fake_fetch(cv, monkeypatch, cv.parse_npm(packument()))
@@ -327,7 +327,7 @@ def test_fetch_only_prints_nothing_and_writes_state(cv, monkeypatch, tmp_path):
     state = tmp_path / "state.json"
     _fake_fetch(cv, monkeypatch, cv.parse_npm(packument()))
     assert cv.run(["--fetch-only", "--state", str(state), "opencode=1.19.5"], now=NOW) == []
-    assert json.loads(state.read_text())["sources"]["npm:opencode-ai"]["latest"] == "1.20.0"
+    assert json.loads(state.read_text())["sources"]["npm:@opencode/cli"]["latest"] == "1.20.0"
 
 
 def test_deadline_bounds_a_hung_fetch(cv, monkeypatch, tmp_path):
@@ -340,7 +340,7 @@ def test_deadline_bounds_a_hung_fetch(cv, monkeypatch, tmp_path):
     finally:
         release.set()
     assert time.monotonic() - t0 < 2
-    saved = json.loads((tmp_path / "s.json").read_text())["sources"]["npm:opencode-ai"]
+    saved = json.loads((tmp_path / "s.json").read_text())["sources"]["npm:@opencode/cli"]
     assert saved == {"checked": NOW}
 
 
@@ -418,7 +418,7 @@ def server(cv, monkeypatch):
 
 def test_end_to_end_over_http(cv, server, tmp_path):
     srv = server({
-        "/opencode-ai": packument(),
+        "/@opencode%2Fcli": packument(),
         "/@earendil-works%2Fpi-coding-agent": packument(
             latest="1.5.0", times={"1.5.0": "2026-11-02T11:05:09.564Z"}),
         "/v2/repositories/searxng/searxng/tags/latest": dockerhub_tag(),
@@ -429,15 +429,15 @@ def test_end_to_end_over_http(cv, server, tmp_path):
     assert len(out) == 2
     assert out[0].startswith("warning: the SearXNG pin") and "OpenCode 1.19.5" in out[1]
     assert sorted(srv.paths) == sorted([
-        "/opencode-ai", "/@earendil-works%2Fpi-coding-agent",
+        "/@opencode%2Fcli", "/@earendil-works%2Fpi-coding-agent",
         "/v2/repositories/searxng/searxng/tags/latest"])
     saved = json.loads(state.read_text())
-    assert set(saved["sources"]) == {"npm:opencode-ai", "npm:@earendil-works/pi-coding-agent",
+    assert set(saved["sources"]) == {"npm:@opencode/cli", "npm:@earendil-works/pi-coding-agent",
                                      "dockerhub:searxng/searxng:latest"}
 
 
 def test_http_errors_are_silent(cv, server, tmp_path, capsys):
-    server({"/opencode-ai": b"<html>not json</html>"})
+    server({"/@opencode%2Fcli": b"<html>not json</html>"})
     state = tmp_path / "state.json"
     assert cv.main(["--state", str(state), "opencode=1.19.5", "pi=1.0.0", "searxng=2026-01-01"]) == 0
     assert capsys.readouterr() == ("", "")
@@ -447,7 +447,7 @@ def test_http_errors_are_silent(cv, server, tmp_path, capsys):
 def test_timeout_is_silent(cv, server, tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(cv, "REQUEST_TIMEOUT", 0.2)
     monkeypatch.setattr(cv, "FETCH_DEADLINE", 1.0)
-    server({"/opencode-ai": packument()}, delay=3.0)
+    server({"/@opencode%2Fcli": packument()}, delay=3.0)
     t0 = time.monotonic()
     assert cv.main(["--state", str(tmp_path / "s.json"), "opencode=1.19.5"]) == 0
     assert time.monotonic() - t0 < 2.5
@@ -455,12 +455,12 @@ def test_timeout_is_silent(cv, server, tmp_path, capsys, monkeypatch):
 
 
 def test_gzip_response_is_inflated_and_parsed(cv, server, tmp_path):
-    srv = server({"/opencode-ai": packument()})
+    srv = server({"/@opencode%2Fcli": packument()})
     state = tmp_path / "state.json"
     lines = cv.run(["--state", str(state), "opencode=1.19.5"], now=NOW)
-    assert srv.paths == ["/opencode-ai"]
+    assert srv.paths == ["/@opencode%2Fcli"]
     assert lines and "OpenCode 1.19.5" in lines[0]
-    assert json.loads(state.read_text())["sources"]["npm:opencode-ai"]["latest"] == "1.20.0"
+    assert json.loads(state.read_text())["sources"]["npm:@opencode/cli"]["latest"] == "1.20.0"
 
 
 def test_gzip_bomb_is_refused_silently_and_keeps_old_data(cv, server, tmp_path, capsys, monkeypatch):
@@ -469,15 +469,15 @@ def test_gzip_bomb_is_refused_silently_and_keeps_old_data(cv, server, tmp_path, 
     monkeypatch.setattr(cv, "MAX_RESPONSE_BYTES", 64 << 10)
     bomb = packument(latest="9.9.9", times={"9.9.9": "2026-12-30T00:00:00.000Z"})
     bomb["padding"] = "x" * (4 << 20)
-    srv = server({"/opencode-ai": bomb})
+    srv = server({"/@opencode%2Fcli": bomb})
     state = tmp_path / "state.json"
     old = state_with(cv, opencode=cv.parse_npm(packument()))
-    old["sources"]["npm:opencode-ai"]["checked"] = NOW - 2 * DAY
+    old["sources"]["npm:@opencode/cli"]["checked"] = NOW - 2 * DAY
     state.write_text(json.dumps(old))
     assert cv.main(["--fetch-only", "--state", str(state), "opencode=1.19.5"]) == 0
-    assert srv.paths == ["/opencode-ai"]
+    assert srv.paths == ["/@opencode%2Fcli"]
     assert capsys.readouterr() == ("", "")
-    saved = json.loads(state.read_text())["sources"]["npm:opencode-ai"]
+    saved = json.loads(state.read_text())["sources"]["npm:@opencode/cli"]
     assert saved["latest"] == "1.20.0", "the oversized response must not replace old data"
 
 

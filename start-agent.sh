@@ -1734,6 +1734,8 @@ if provider_key:
     # discovery can't tell (/v1/models doesn't say). Without this OpenCode drops
     # attachments before the request. An entry that declares its own is kept,
     # which only matters when discovery failed and the old list was preserved.
+    # 2.x maps `modalities` to `capabilities.input` and logs a warning that it
+    # ignores `attachment`; that key stays for 1.x (--restore-previous-image).
     for m in entry.get('models', {}).values():
         if isinstance(m, dict):
             m.setdefault('modalities', {"input": ["text", "image"], "output": ["text"]})
@@ -1750,8 +1752,10 @@ if provider_key:
     elif discovered and (not data.get('model') or data['model'].split('/')[0] != provider_key):
         data['model'] = qualify(next(iter(discovered)))
 
-    # The image pins what gets installed. OpenCode's own major upgrade swaps in a
-    # package whose postinstall npm blocks, leaving no working binary.
+    # The image pins what gets installed; --refresh-tools is the update path.
+    # A self-upgrade would reinstall the npm package with its postinstall
+    # blocked by npm's allow-scripts, leaving no working binary. 2.x reads this
+    # V1 key as `update: "disable"`.
     data['autoupdate'] = False
 
     if small_model:
@@ -1780,12 +1784,24 @@ perms = data.setdefault('permission', {})
 perms.setdefault('webfetch', 'allow')
 if local_search_enabled:
     mcps = data.setdefault('mcp', {})
-    mcps.setdefault('searxng', {
+    searxng = mcps.setdefault('searxng', {
         'type': 'local',
         'command': ['/opt/searxng-mcp/venv/bin/python', '/opt/searxng-mcp/server.py'],
         'environment': {'SEARXNG_URL': 'http://searxng:8080'},
     })
-    perms['websearch'] = 'allow'
+    # The file stays in OpenCode's V1 shape, which 2.x normalizes on load and
+    # 1.x (--restore-previous-image) still reads; 1.x ignores `codemode`.
+    # 2.x puts MCP tools behind Code Mode (a JavaScript `execute` tool) by
+    # default; small local models then call `tools.searxng.websearch` as if
+    # it were a tool and fail. false keeps `searxng_websearch` a native tool.
+    if isinstance(searxng, dict):
+        searxng.setdefault('codemode', False)
+    # `websearch` is OpenCode's built-in search, not the SearXNG tool
+    # (`searxng_websearch`, which this rule does not match). In 2.x, allowing
+    # it offers the model a search through Exa, Tavily and other third-party
+    # gateways, the egress path ADR-014 rules out; their hosts are not on the
+    # allowlist, so it only fails, and small models pick it over SearXNG.
+    perms['websearch'] = 'deny'
 else:
     perms.setdefault('websearch', 'deny')
     # Remove stale searxng MCP block if local search was previously enabled.
