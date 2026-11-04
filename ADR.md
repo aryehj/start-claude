@@ -3914,7 +3914,11 @@ next `--rebuild` installs. SearXNG: the "known good on" date that
 `last_updated` of Docker Hub's `latest` tag. The comparison is by date only.
 Whether the tags API's `digest` equals the `RepoDigests` digest in the pin
 (plan Unknown 4) then does not affect the result. `tests/verify-version-check.sh`
-records the answer from the host. Anything the helper cannot date (a
+records the answer from the host. On 2026-11-04 it was yes: the tags API's
+`digest` for both `latest` and `2026.11.2-cccbc9e15` is the manifest-list
+digest `bump-searxng.sh` pins, and the API also returns `last_updated` and
+`tag_last_pushed`. A digest comparison would work too, but the date one is
+kept, since it is what the lag threshold needs anyway. Anything the helper cannot date (a
 prerelease, a version missing from the cache, a missing record) is skipped.
 
 **One shared helper, `check_versions.py`.** It is stdlib-only and
