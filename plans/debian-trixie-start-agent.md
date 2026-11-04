@@ -4,9 +4,14 @@
 
 - [x] Switch `FROM` to `debian:trixie-slim` and refresh the bookworm comments in the Dockerfile (Haiku ok)
 - [x] Make `tests/verify-tool-refresh.sh` read the base image from the Dockerfile instead of hardcoding it (Haiku ok) — already satisfied: since 7334782 (the base/tools split, written after this plan) check 4 compares `latest` against the `claude-agent:base` tag and no longer names a Debian tag; an older-base `:previous` is INFO, not FAIL
-- [ ] Build on the host via `start-agent.sh --refresh-tools`, which keeps bookworm as `claude-agent:previous`
-- [ ] Live checks: `tests/verify-tool-refresh.sh`, plus a doc-toolchain and searxng-mcp smoke test
-- [ ] Docs: ADR-055, ADR-054 amendment, README note on rollback (Opus recommended)
+- [ ] Build on the host via `start-agent.sh --refresh-tools`, which keeps bookworm as `claude-agent:previous` (human gate: run `.temp/trixie-rollout.sh` on the macOS host; it covers this phase and the next)
+- [ ] Live checks: `tests/verify-tool-refresh.sh`, plus a doc-toolchain and searxng-mcp smoke test (covered by `.temp/trixie-rollout.sh`; read `.verify/trixie-rollout.log`)
+- [ ] Docs: ADR-057 (ADR-055 and ADR-056 were taken after this plan was written), ADR-054 amendment, README note on rollback (Opus recommended)
+
+## Decisions during /build (2026-11-04)
+
+- **Rollout method changed (user's choice).** The Approach below predates 7334782, which split the image into `claude-agent:base` (this Dockerfile) and `claude-agent:latest` (the OpenCode/Pi npm layer `FROM claude-agent:base`). `--refresh-tools` now rebuilds only `latest` on the existing base, so it would not pick up the new `FROM`; `--rebuild` deletes `:previous`. Chosen: a one-off host script, `.temp/trixie-rollout.sh`, that tags the bookworm base `claude-agent:base-bookworm`, builds a trixie `claude-agent:base` with the same `docker build` `ensure_base_image` runs (logged), then runs `start-agent.sh --refresh-tools`, which builds `latest` on it and saves the bookworm `latest` as `:previous`. No change to start-agent.sh. Rollback: `--restore-previous-image` (latest back to bookworm); a full rollback also retags `claude-agent:base-bookworm` as `claude-agent:base` so a later refresh builds on bookworm. `--rebuild` does not remove `claude-agent:base-bookworm`; the docs phase should say to `docker image rm` it once trixie has settled. The "rebuilding from the npm layer onward" message concern in the Approach no longer applies, and check 4's `:previous` mismatch is already INFO, not FAIL.
+- **`docpython` is broken on bookworm already (found by the dry run in the current container).** `/usr/local/bin/docpython` is a symlink to `/opt/doc-tools/venv/bin/python`; started through it, Python 3.11 does not find the venv (`sys.prefix` is `/usr`), so `docpython -c "from docx import Document"` (the command `templates/global-claude.md` documents) fails with `ModuleNotFoundError`. The venv's own interpreter works. The rollout script checks it separately; if it still fails on 3.13, the fix (e.g. a wrapper script instead of a symlink) is a follow-up, not part of this plan.
 
 ## Context
 
