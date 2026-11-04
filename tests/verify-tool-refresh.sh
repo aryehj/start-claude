@@ -42,9 +42,9 @@ PASS=0; FAIL=0; SKIP=0
 pass() { echo "PASS  $1"; PASS=$((PASS+1)); }
 fail() { echo "FAIL  $1${2:+ — $2}"; FAIL=$((FAIL+1)); }
 skip() { echo "SKIP  $1${2:+ — $2}"; SKIP=$((SKIP+1)); }
-# Print result lines produced elsewhere (a container, a python helper) and count them.
-tally() {
-  printf '%s\n' "$1"
+# Count result lines produced elsewhere (a container, a python helper); tally also prints them.
+tally() { printf '%s\n' "$1"; count "$1"; }
+count() {
   PASS=$((PASS + $(grep -c '^PASS ' <<<"$1")))
   FAIL=$((FAIL + $(grep -c '^FAIL ' <<<"$1")))
   SKIP=$((SKIP + $(grep -c '^SKIP ' <<<"$1")))
@@ -61,10 +61,12 @@ echo "==> tool refresh acceptance checks ($(date '+%Y-%m-%d %H:%M:%S'))"
 echo
 
 # The in-container checks live after the `exit` at the end of this file. They
-# are copied into a temp file and run with stdin closed, so nothing they start
-# (opencode, curl) can read the rest of the script.
-agent_script() { printf 'MODEL=%q\n' "$MODEL"; sed -n '/^#__AGENT_CHECKS__$/,$p' "$SELF"; }
-RUNNER='f=$(mktemp); cat > "$f"; bash "$f" </dev/null; rc=$?; rm -f "$f"; exit $rc'
+# are passed to `bash -c` as an argument and run with stdin closed, so nothing
+# they start (opencode, curl) can read the rest of the script, and nothing waits
+# for an EOF on a piped stdin. Host runs that piped the checks into
+# `docker exec -i` stalled with no output past "mode: host"; a stdin EOF lost
+# on the Colima socket forward is the likely cause.
+AGENT_SCRIPT="$(printf 'MODEL=%q\n' "$MODEL"; sed -n '/^#__AGENT_CHECKS__$/,$p' "$SELF")"
 
 if command -v colima >/dev/null 2>&1; then
   MODE=host
@@ -75,18 +77,21 @@ if command -v colima >/dev/null 2>&1; then
   fi
   [[ "$(docker container inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" == true ]] \
     || die "container '$CONTAINER' is not running" "Start it in another terminal with: start-agent.sh --backend=omlx"
-  in_agent() { docker exec -i "$CONTAINER" bash -c "$RUNNER"; }
+  in_agent() { docker exec "$CONTAINER" bash -c "$AGENT_SCRIPT" </dev/null; }
 elif [[ -f /etc/claude-agent/allowlist.txt ]]; then
   MODE=container
-  in_agent() { bash -c "$RUNNER"; }
+  in_agent() { bash -c "$AGENT_SCRIPT" </dev/null; }
 else
   die "neither colima nor the claude-agent container found" "Run this on the macOS host (or inside the claude-agent container)."
 fi
 echo "INFO  mode: $MODE"
 
 # ── 1-3: inside the agent container ──────────────────────────────────────────
-AGENT_OUT=$(agent_script | in_agent 2>&1)
-tally "$AGENT_OUT"
+# Stream the output as it comes (the end-to-end run can take minutes), then count it.
+agent_log=$(mktemp)
+in_agent 2>&1 | tee "$agent_log"
+AGENT_OUT=$(cat "$agent_log"); rm -f "$agent_log"
+count "$AGENT_OUT"
 grep -qE '^(PASS|FAIL|SKIP) ' <<<"$AGENT_OUT" || fail "in-container checks ran" "no result lines; see the output above"
 
 # ── 4-6: host-side image checks ──────────────────────────────────────────────
