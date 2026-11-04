@@ -3991,6 +3991,32 @@ base is reported as INFO, not a failure. `tests/test_dockerfile.py` checks that
 the tools file is `FROM claude-agent:base` with the npm `RUN` last and the ARG
 right before it, and that the base file installs neither tool.
 
+### Amendment (2026-11-04): changing the base image keeps a rollback only by hand
+
+The trixie move (ADR-057) was the first change to `claude-agent.Dockerfile`
+since the split. `--refresh-tools` cannot roll out such a change: it builds
+`latest` on the existing `base` and never rebuilds it. `--rebuild` does
+rebuild it, but it removes `previous` first, so it leaves no rollback. Until a
+flag covers this, a base change that should be undoable goes through a host
+script that:
+
+1. tags the current base under a second name (`claude-agent:base-<label>`),
+2. builds the new `claude-agent:base` with the same `docker build` that
+   `ensure_base_image` runs,
+3. runs `start-agent.sh --refresh-tools`, which builds `latest` on it and saves
+   the old `latest` as `previous`.
+
+`--restore-previous-image` then undoes `latest`. A full rollback also retags the
+saved base as `claude-agent:base`, so later refreshes build on it. `--rebuild`
+removes only `latest`, `previous` and `base`, so the saved tag stays until it
+is removed by hand. In the trixie rollout (`.verify/trixie-rollout.log`), check 4
+of `tests/verify-tool-refresh.sh` printed the INFO case for a `previous` on an
+older base (0 of the base's 12 layers shared), as designed.
+
+A second base change made the same way replaces `previous` again. After the
+`docpython` fix (ADR-057), `previous` was the trixie image without the fix,
+and the only route back to bookworm was the saved `base-bookworm` tag.
+
 ---
 
 ## ADR-055: Launch-time update warnings: a publish-date lag threshold, checked once a day
@@ -4167,3 +4193,103 @@ did change:
   `attachment`, which stays for 1.x.
 - `tests/verify-tool-refresh.sh`'s in-container checks pass on both 2.2.5 and
   1.19.5 against the same injected config.
+
+---
+
+## ADR-057: `start-agent.sh` image on Debian trixie; `docpython` as a wrapper
+
+**Date:** 2026-11-04
+**Status:** Accepted (amends ADR-054)
+
+### Context
+
+`dockerfiles/claude-agent.Dockerfile` was `FROM debian:bookworm-slim`, and
+bookworm is now oldstable. Only the agent image is in scope. `start-claude.sh`
+stays on bookworm, because its bwrap and sandbox-runtime setup (ADR-047) would
+have to be re-verified on its own. The Colima VM's own `apt-get` calls run on
+the VM's OS, not on this image.
+
+During planning, every apt package in the Dockerfile was found to have a
+trixie package page. Trixie's `python3` is 3.13. NodeSource's `setup_lts.x`
+installs from its distro-agnostic `nodistro` repo.
+
+The plan predated the base/tools split (ADR-054, fourth amendment). It meant
+to roll out through `--refresh-tools`, which then rebuilt the whole image. After
+the split, a refresh never rebuilds `claude-agent:base`, so it cannot pick up a
+new `FROM`. `--rebuild` would, but it deletes `previous` and leaves no
+rollback.
+
+A dry run in the bookworm container found that `docpython` was already broken.
+`/usr/local/bin/docpython` was a symlink to `/opt/doc-tools/venv/bin/python`.
+Started through that link, Python 3.11 looks for `pyvenv.cfg` next to the link,
+not in the venv, so `sys.prefix` was `/usr`. The command that
+`templates/global-claude.md` documents
+(`docpython -c "from docx import Document; …"`) failed with
+`ModuleNotFoundError`. The venv's own interpreter worked.
+
+### Decision
+
+**`FROM debian:trixie-slim`, a floating tag.** The user chose a tag over a
+digest pin. The existing `apt-get upgrade` in the first `RUN` keeps security
+fixes coming on each base build. Only the `FROM` line names the release; the
+Dockerfile's header comment was updated to match. The PEP 668 note above the
+venvs applies to trixie too.
+
+**Rolled out with a one-off host script, not a `start-agent.sh` change.**
+`.temp/trixie-rollout.sh` tagged the bookworm base `claude-agent:base-bookworm`,
+built the trixie `claude-agent:base` with the same `docker build` that
+`ensure_base_image` runs, then ran `start-agent.sh --refresh-tools`. That built
+`latest` on the new base and kept the bookworm `latest` as `previous`. The
+general form of this procedure is in ADR-054's fifth amendment.
+
+**`docpython` is a wrapper script.** The doc-tools layer writes
+`/usr/local/bin/docpython` with `printf` as a `#!/bin/sh` script,
+`exec /opt/doc-tools/venv/bin/python "$@"`, mode 755. Python then starts from
+the venv's own path and finds `pyvenv.cfg`. Two checks in
+`tests/test_dockerfile.py` fail if `docpython` is made with `ln -s`, or if the
+wrapper or its `chmod` goes missing. The fix was rolled out with
+`.temp/docpython-fix-rollout.sh` in the same way: rebuild `base`, then
+`--refresh-tools`. Only the doc-tools layer and the layers after it reran.
+
+### Verification (2026-11-04)
+
+From `.verify/trixie-rollout.log` and `.verify/docpython-fix-rollout.log`:
+
+- **Python.** System `python3` is 3.13.5. `uv venv` (uv 0.13.7) built both
+  venvs on `/usr/bin/python3.13`, not a uv-managed Python. All the venvs'
+  packages import: mcp 1.30.0, httpx 0.28.1, python-docx 1.2.0, openpyxl
+  3.1.5, python-pptx 1.0.2.
+- **CLIs.** Claude Code 2.1.318, OpenCode 2.2.5, Pi 1.5.0, Node 26.13.0,
+  ripgrep 14.1.1, fdfind 10.2.0, jq 1.7, pandoc 3.1.11.1, LibreOffice 25.2.3.2,
+  pdfinfo 25.03.0.
+- **Doc toolchain.** A docx written by the venv converts to PDF with
+  `soffice --headless` (LibreOffice prints a harmless `javaldx` warning), and
+  `pdfinfo` reads the result. `pandoc` converts Markdown to docx, and
+  python-docx reads it back.
+- **`docpython`.** It still failed on 3.13 before the fix. After the fix,
+  `sys.prefix` is `/opt/doc-tools/venv`, the documented command works,
+  arguments pass through, and openpyxl and pptx import (9 of 9 checks).
+- **`tests/verify-tool-refresh.sh`.** 9 passed, 1 failed. `opencode mcp list`
+  shows searxng connected, and `opencode run` on omlx `gemma-4-e4b-it-6bit`
+  called the searxng tool and answered. The failure is "results from at least
+  two engines": brave and duckduckgo were throttled upstream, as in every
+  earlier run of this check, bookworm included (ADR-054, second amendment).
+- **Size.** `base` went from 2.37 GB (bookworm) to 2.35 GB, and `latest` from
+  3.94 GB to 3.92 GB.
+
+### Consequences
+
+- **Rollback.** After the `docpython` fix, `claude-agent:previous` is the
+  trixie image without the fix, so `--restore-previous-image` stays on trixie.
+  To go back to bookworm, retag the saved base and refresh:
+  `docker --context colima-claude-agent tag claude-agent:base-bookworm claude-agent:base`,
+  then `start-agent.sh --refresh-tools`. That image has the old `docpython`
+  symlink. To make the rollback outlast a `--rebuild`, also revert the `FROM`
+  line.
+- **`claude-agent:base-bookworm` costs 2.37 GB in the VM.** `--rebuild` does not
+  remove it. Once trixie has settled, remove it with
+  `docker --context colima-claude-agent image rm claude-agent:base-bookworm`.
+- The baked venvs run on Python 3.13, so code that agents run with `docpython`
+  or in the SearXNG MCP shim runs on 3.13.
+- The two images run different releases: `claude-dev:latest`
+  (`start-claude.sh`) stays on bookworm until its own move.

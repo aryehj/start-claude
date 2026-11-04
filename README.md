@@ -391,6 +391,9 @@ to a different sandbox restarts the VM with the new `--mount` (~10s).
 | `node` / `npm` | Node.js LTS |
 | `git`, `ripgrep`, `fd`, `jq`, `unzip`, `zip` | Dev tooling |
 
+The image is built on `debian:trixie-slim` (system Python 3.13). `start-claude.sh`'s
+image stays on bookworm. See `ADR.md` §ADR-057.
+
 ## Mounts
 
 | Host | Container | Mode |
@@ -739,6 +742,29 @@ list`, and an `opencode run` on omlx `gemma-4-e4b-it-6bit` that calls the
 SearXNG tool. After a refresh it also checks that `claude-agent:latest` is
 `claude-agent:base` plus the npm layer, and that `previous` shares the base when
 it was built on the same one. See `ADR.md` §ADR-054.
+
+### Rolling back to the bookworm image
+
+The image moved from bookworm to trixie on 2026-11-04 (`ADR.md` §ADR-057).
+After the `docpython` fix that followed, `claude-agent:previous` is the trixie
+image without that fix, so `--restore-previous-image` stays on trixie. The
+bookworm base is kept as `claude-agent:base-bookworm`. To go back to it, retag it
+as the base and refresh, which rebuilds `latest` on bookworm:
+
+```bash
+docker --context colima-claude-agent tag claude-agent:base-bookworm claude-agent:base
+start-agent.sh --refresh-tools
+```
+
+The bookworm image has the old `docpython` symlink, which does not find the
+doc-tools venv. A later `--rebuild` builds from the Dockerfile's `FROM` line
+again, so revert that line too if the rollback should last. `--rebuild` does
+not remove `claude-agent:base-bookworm` (2.37 GB). Once trixie has settled,
+remove it:
+
+```bash
+docker --context colima-claude-agent image rm claude-agent:base-bookworm
+```
 
 ### Update warnings
 
