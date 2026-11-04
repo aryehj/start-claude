@@ -92,10 +92,25 @@ def test_doc_tools_venv_python_pptx():
     )
 
 
-def test_docpython_symlink_created():
-    assert "docpython" in _TEXT, (
-        "docpython symlink not created in Dockerfile; expected a symlink from "
-        "/opt/doc-tools/venv/bin/python to /usr/local/bin/docpython"
+_DOC_PY = "/opt/doc-tools/venv/bin/python"
+_BASE_CODE = "\n".join(l for l in _BASE.splitlines() if not l.strip().startswith("#"))
+
+
+def test_docpython_is_not_a_symlink_to_the_venv_interpreter():
+    # Started through a symlink, Python looks for pyvenv.cfg next to the link,
+    # not the venv, so sys.prefix is /usr and the venv's packages are missing
+    # (seen on bookworm's 3.11 and trixie's 3.13).
+    links = [l for l in _BASE_CODE.splitlines()
+             if re.search(r"\bln\s+-\w*s", l) and "docpython" in l]
+    assert not links, f"docpython must not be a symlink to {_DOC_PY}: {links}"
+
+
+def test_docpython_wrapper_execs_the_venv_interpreter():
+    assert f'exec {_DOC_PY} "$@"' in _BASE_CODE, (
+        f"docpython must be a wrapper that runs `exec {_DOC_PY} \"$@\"`"
+    )
+    assert re.search(r"chmod\s+\+?[0-7x]+\s+/usr/local/bin/docpython", _BASE_CODE), (
+        "the docpython wrapper must be made executable"
     )
 
 

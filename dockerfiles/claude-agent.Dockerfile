@@ -89,11 +89,15 @@ RUN uv venv /opt/searxng-mcp/venv \
 # Baked venv so python-docx/openpyxl/python-pptx are present without a runtime
 # install step. Mirrors the searxng-mcp pattern — system Python is PEP 668
 # externally managed so uv pip install --system hard-fails. docpython is exposed
-# as a stable entrypoint agents can invoke without knowing the venv path.
+# as a stable entrypoint agents can invoke without knowing the venv path. It is
+# a wrapper, not a symlink: started through a symlink in /usr/local/bin, Python
+# looks for pyvenv.cfg next to the link, so sys.prefix is /usr and the venv's
+# packages are not found.
 RUN uv venv /opt/doc-tools/venv \
  && uv pip install --python /opt/doc-tools/venv/bin/python \
       python-docx openpyxl python-pptx \
- && ln -sf /opt/doc-tools/venv/bin/python /usr/local/bin/docpython
+ && printf '#!/bin/sh\nexec /opt/doc-tools/venv/bin/python "$@"\n' > /usr/local/bin/docpython \
+ && chmod 755 /usr/local/bin/docpython
 
 # ── UV project venv redirect (dynamic $TMPDIR) ───────────────────────────────
 # Redirect venvs out of the bind-mounted project dir, which may carry a
