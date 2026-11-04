@@ -416,10 +416,10 @@ ALLOWLIST_FILE="$SANDBOX_ROOT/.sandbox_config/allowlist.txt"
 ALLOWLIST_TEMPLATE="$SCRIPT_DIR/templates/sandbox-allowlist.txt"
 TINYPROXY_PORT=8888
 SEARXNG_CONTAINER="searxng"
-# Pinned by digest (SearXNG 2026.4.24+a7ac696b4, running and known good on 2026-10-05). Bump it
+# Pinned by digest (SearXNG 2026.11.2-cccbc9e15, upstream latest and known good on 2026-11-03). Bump it
 # with scripts/bump-searxng.sh, verify with tests/verify-tool-refresh.sh, then
 # commit. Any launch replaces a searxng container on another pin (ADR-054).
-SEARXNG_IMAGE="docker.io/searxng/searxng@sha256:c9100c29c14a77d5289263a671580226c3b8a396a1a0130d2f500f57076a0119"
+SEARXNG_IMAGE="docker.io/searxng/searxng@sha256:892ed5710603e38f9dc201e6a0b2f3f14dbdb8108edcadac30e55b165c979fb7"
 SEARXNG_DIR="$SANDBOX_ROOT/.sandbox_config/searxng"
 SEARXNG_SETTINGS_FILE="$SEARXNG_DIR/settings.yml"
 AGENT_NET_NAME="claude-agent-net"
