@@ -3080,6 +3080,61 @@ The guardrail ADR-044 rests on is untouched: `--unshare-net` is gated solely on
   path is unavailable under Apple Containers' `/proc` masking while the container
   runs as root.
 
+### Amendment (2026-11-04): pin 0.0.73 → 0.0.81, `--cap-add SETFCAP`
+
+Two releases in the range changed the weaker path; the rest did not touch it:
+
+- **0.0.76** gives weaker mode `--cap-drop ALL` as well, plus
+  `--cap-add CAP_SETFCAP` when the caller is uid 0 and uses the seccomp helper.
+- **0.0.77** refuses to sandbox as uid 0 without `CAP_SETFCAP` in the bounding
+  (or inheritable) set, and probes `bwrap --unshare-user --dev-bind / / true`
+  first.
+- 0.0.80 adds `--disable-userns`, but never under weaker mode. Every version
+  keeps `--bind /proc /proc` in weaker mode, the branch this ADR depends on.
+
+Apple Containers' default capability set already has `CAP_SETFCAP`: with no
+`--cap-add`, `CapBnd` is `a80425fb` (bit 31 set). `start-claude.sh` now passes
+`--cap-add SETFCAP` anyway, next to `SYS_ADMIN` and `NET_ADMIN` (ADR-043's
+reasoning applies: the cap has effect only inside the project's microVM). It
+grants nothing new today; it states a dependency that 0.0.77+ enforces, so a
+change in Apple's defaults cannot silently break the sandbox.
+
+**Claude Code carries its own copy of the runtime.** Claude Code's binary
+bundles the sandbox-runtime JS (it contains the `CAP_SETFCAP` refusal text), so
+the bwrap arguments for its Bash tool follow the Claude Code version, not this
+pin. The pinned global package supplies the `srt` CLI and the `apply-seccomp`
+helper, which Claude Code finds through `npm root -g`. A Claude Code update can
+therefore change sandbox behaviour without a pin bump, so the re-test covers
+both paths.
+
+**Re-test.** `tests/verify-sandbox-runtime.sh` (host-driven, log
+`.verify/verify-sandbox-runtime.log`) rebuilds a throwaway `sandbox-probe`
+container when its runtime differs from the pin, then runs the same in-sandbox
+checks under `srt` and under one `claude -p` Bash call. On 2026-11-04
+(sandbox-runtime 0.0.81, Claude Code 2.1.318, bubblewrap 0.8.0, kernel 6.18.5)
+all 26 checks passed on both paths:
+
+| check | `srt` | Claude Code |
+|---|---|---|
+| uid-0 userns preflight | pass | — |
+| runs inside a user namespace | pass | pass |
+| write to the project dir | allowed | allowed |
+| write to `/etc` | denied | denied |
+| `mount -o remount,rw /` | denied | denied |
+| read `/proc/1/environ` | denied | denied |
+| nested user namespace | refused | refused |
+| non-allowlisted domain | blocked | blocked |
+| allowlisted domain | reachable | reachable |
+| direct connection skipping the proxy | fails | fails |
+
+Inside the sandbox the command still reports a full capability set
+(`CapEff 000001ffffffffff`). Those caps belong to the child user namespace, and
+the matrix shows they reach neither the locked mounts nor other processes'
+`environ`. `apply-seccomp` cannot lower `user.max_user_namespaces` (read-only
+`/proc/sys`), so its seccomp filter is what refuses the nested namespace. The
+run did not determine whether `--cap-drop ALL` is applied and the caps then
+re-granted by a nested namespace, or not applied at all.
+
 ---
 
 ## ADR-048: `start-agent.sh` container lifecycle: one network, start failures, pinned SearXNG

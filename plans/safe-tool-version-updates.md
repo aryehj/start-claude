@@ -7,12 +7,13 @@
   - [x] Step 7, SearXNG half: pin bumped to 2026.11.2 and committed (84228a8), bing turned on in the seed (9d0ea4a)
   - [x] Steps 1 + 7, refresh half: `.temp/phase1-refresh-run.sh` on the host (`--refresh-tools`, then a host-mode `tests/verify-tool-refresh.sh` whose cache probe answers Unknown 1; log `.verify/phase1-refresh-run.log`), then record the cache finding in ADR-054. Earlier host-mode verify runs stalled after "mode: host"; fixed in 9b6683a (no piped stdin into `docker exec`)
     Result 2026-11-04 (`.verify/verify-tool-refresh-20261103-203928.log`): 10 passed, 1 failed. The failure is the two-engine SearXNG check: only bing answered, with Brave and DuckDuckGo throttling (CAPTCHA, too many requests). The user accepted bing alone; the check stays strict.
-- [ ] Phase 2: Bump sandbox-runtime 0.0.73 → current, re-tested under Apple Containers (Opus recommended)
+- [x] Phase 2: Bump sandbox-runtime 0.0.73 → current, re-tested under Apple Containers (Opus recommended)
   - [x] Step 1, from source: Apple's `defaultOCICapabilities` (containerization `LinuxProcessConfiguration.swift`, used by `container run` and `container exec` when no `--cap-drop ALL` is given) has `.setfcap` in the bounding set, so Unknown 2 is very likely "present". `--cap-add SETFCAP` added anyway, to make the dependency explicit; the live script also reads the default set with no `--cap-add`
   - [x] Step 2: pin → 0.0.81 (still npm `latest` on 2026-11-04), comment updated. Bisect of the tarballs: 0.0.76 puts `--cap-drop ALL` (+ `--cap-add CAP_SETFCAP` for uid 0 with the seccomp helper) on the weaker path too; 0.0.77 adds the uid-0 `CAP_SETFCAP` refusal and the `bwrap --unshare-user --dev-bind / / true` probe; 0.0.80 adds `--disable-userns`, never under weaker mode. Weaker mode keeps `--bind /proc /proc` throughout. Claude Code bundles its own copy of the runtime JS; the global install supplies `srt` and the apply-seccomp helper (found via `npm root -g`)
-  - [ ] Step 3: human run of `tests/verify-sandbox-runtime.sh` on the host (rebuilds a throwaway `sandbox-probe` container; log `.verify/verify-sandbox-runtime.log`)
+  - [x] Step 3: human run of `tests/verify-sandbox-runtime.sh` on the host (rebuilds a throwaway `sandbox-probe` container; log `.verify/verify-sandbox-runtime.log`)
     First run 2026-11-04: 17 passed, 1 failed. Rebuild OK, sandbox-runtime 0.0.81, Claude Code 2.1.318, bwrap 0.8.0, kernel 6.18.5. CapBnd a82435fb with the flags; Apple's default set a80425fb already has CAP_SETFCAP (Unknown 2: present). Under `srt` every check passed: userns, preflight, write allowed/denied, remount denied, environ unreadable, nested userns refused, network denied/allowed/isolated. The `claude -p` check did not run: the shared login had expired. The script now runs `claude auth login` in the probe and retries; a rerun skips the rebuild.
-  - [ ] Step 4: ADR-047 amendment, from the live result
+    Rerun 2026-11-04 after `claude auth login`: 26 passed, 0 failed (`.verify/verify-sandbox-runtime.log`); every check passed under both `srt` and `claude -p`.
+  - [x] Step 4: ADR-047 amendment, from the live result
 - [ ] Phase 3: Launch-time staleness warnings
 
 ## Context
