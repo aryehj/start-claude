@@ -44,7 +44,7 @@ Direction: read the version installed in the image or container, and fall back t
 
 ### 4. Warm reattach never records tool versions (checked)
 
-`start-agent.sh:2195`: `record_tool_versions` runs only on the fresh-container path. `attach_existing` (`:2135`) goes straight to `report_version_check`. A user who upgrades with an existing container and image has no `tool-versions` file, so `check_versions.py` skips OpenCode and Pi on every launch until a `--reset-container`. The comment at `:2192` ("Images built before the version record existed get one here") reads as if it always covers them. ADR-054 says "never on a warm reattach", which was meant to avoid a container start per launch, not to leave old images without a record.
+`start-agent.sh:2195`: `record_tool_versions` runs only on the fresh-container path. `attach_existing` (`:2135`) goes straight to `report_version_check`. A user who upgrades with an existing container and image has no `tool-versions` file, so `check_versions.py` skips OpenCode and Pi on every launch until a `--reset-container`. The comment at `:2193` ("Images built before the version record existed get one here") reads as if it always covers them. ADR-054 says "never on a warm reattach", which was meant to avoid a container start per launch, not to leave old images without a record.
 
 Direction: on reattach, record only when the file is missing or its `image_id` doesn't match. That costs one throwaway container once per image. Or fix the comment and document the gap.
 
