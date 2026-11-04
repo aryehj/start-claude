@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.6
 #
-# claude-agent base image — Debian bookworm with the Claude Code CLI, Node LTS,
+# claude-agent base image — Debian trixie with the Claude Code CLI, Node LTS,
 # uv, git, ripgrep, fd, jq, unzip/zip, the office toolchain and the Python venvs.
 # Built by start-agent.sh into Colima's docker runtime as claude-agent:base.
 # claude-agent-tools.Dockerfile adds OpenCode and Pi on top of that tag to make
@@ -15,7 +15,7 @@
 # that is already the real isolation layer here. start-agent.sh force-disables
 # sandbox.enabled in project settings.
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PATH="/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
@@ -75,7 +75,7 @@ RUN apt-get update -qq \
 # package bundles a `web_url_read` tool that bypasses opencode's webfetch
 # permission model. See ADR-014.
 COPY searxng-mcp/server.py /opt/searxng-mcp/server.py
-# Dedicated venv — Debian bookworm's system Python is PEP 668 externally
+# Dedicated venv — Debian trixie's system Python is PEP 668 externally
 # managed, so `uv pip install --system` hard-fails. The venv is baked into the
 # image and invoked directly (see start-agent.sh command wiring).
 # mcp is pinned <2: server.py uses the v1 `mcp.server.fastmcp.FastMCP` API,

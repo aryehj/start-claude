@@ -2,8 +2,8 @@
 
 ## Status
 
-- [ ] Switch `FROM` to `debian:trixie-slim` and refresh the bookworm comments in the Dockerfile (Haiku ok)
-- [ ] Make `tests/verify-tool-refresh.sh` read the base image from the Dockerfile instead of hardcoding it (Haiku ok)
+- [x] Switch `FROM` to `debian:trixie-slim` and refresh the bookworm comments in the Dockerfile (Haiku ok)
+- [x] Make `tests/verify-tool-refresh.sh` read the base image from the Dockerfile instead of hardcoding it (Haiku ok) — already satisfied: since 7334782 (the base/tools split, written after this plan) check 4 compares `latest` against the `claude-agent:base` tag and no longer names a Debian tag; an older-base `:previous` is INFO, not FAIL
 - [ ] Build on the host via `start-agent.sh --refresh-tools`, which keeps bookworm as `claude-agent:previous`
 - [ ] Live checks: `tests/verify-tool-refresh.sh`, plus a doc-toolchain and searxng-mcp smoke test
 - [ ] Docs: ADR-055, ADR-054 amendment, README note on rollback (Opus recommended)
