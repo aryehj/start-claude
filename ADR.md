@@ -3768,7 +3768,13 @@ On the host it checks:
 - `--rebuild` passes no cache-bust value. Whether it refreshes the tools depends
   on whether the builder's cache survives `docker image rm`. The verify script's
   cache probe reports which, and the docs point to `--refresh-tools` for
-  updating either way.
+  updating either way. On 2026-11-04 the probe found that it does **not**
+  survive (docker client 29.9.2, server 29.5.2, no buildx plugin on the host,
+  so `docker build` uses the legacy builder, whose cache is the image's own
+  layers). So `--rebuild` today reruns every layer, npm included, and picks up
+  new OpenCode/Pi versions along with new apt packages. Installing buildx would
+  switch the client to BuildKit, whose cache can outlive the image. Rerun the
+  probe after any change to the host's docker client.
 - `claude-agent:previous` costs one image's worth of extra disk in the VM.
 - `--refresh-tools` and `--restore-previous-image` remove the agent container,
   which ends any session running inside it.

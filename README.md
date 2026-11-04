@@ -657,7 +657,11 @@ layer and the layers after it rerun; OS packages, Node, uv and Claude Code stay
 cached. It prints the old and new versions and records them, keyed by image ID,
 in `$SANDBOX_ROOT/.sandbox_config/tool-versions`. It removes the agent container,
 so exit any session running in it first. Only one previous image is kept.
-`--rebuild` passes no cache-bust value, so it may reuse the cached npm layer.
+`--rebuild` passes no cache-bust value. With the legacy builder (no buildx
+plugin on the host, the case as of 2026-11-04) the build cache goes with the
+image, so `--rebuild` reruns every layer and also picks up new tool versions.
+Under BuildKit it may reuse the cached npm layer; `tests/verify-tool-refresh.sh`
+reports which applies. Use `--refresh-tools` to update the tools either way.
 
 **SearXNG** is pinned by digest (`SEARXNG_IMAGE` in `start-agent.sh`). To move
 to the current upstream image:
