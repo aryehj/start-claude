@@ -3801,3 +3801,13 @@ and the searxng container is recreated, because SearXNG reads `settings.yml`
 only at startup. `--reload-allowlist` skips the migration, since it exits
 before the container lifecycle. google and qwant stay disabled: qwant answered
 403 through the proxy, and google needs JavaScript.
+
+### Amendment (2026-11-04): acceptance with one engine
+
+The live `--refresh-tools` run passed every check except "results from at least
+two engines": bing returned results, while brave and duckduckgo answered only
+with throttling (`too many requests`, CAPTCHA). Those come from upstream rate
+limits on a single home IP, not from the config or the allowlist, and the "no
+engine fails for a non-throttling reason" check passed. The change was accepted
+with bing alone. The two-engine check stays as written, so a run made while
+the other engines are not throttling still shows whether they work.
