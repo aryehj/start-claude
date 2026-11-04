@@ -29,7 +29,6 @@ tests/test_check_versions.py pins the interface. See ADR-055.
 """
 import argparse
 import datetime
-import gzip
 import json
 import os
 import re
@@ -39,6 +38,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import zlib
 
 NPM_REGISTRY = "https://registry.npmjs.org"
 DOCKER_HUB = "https://hub.docker.com"
@@ -250,8 +250,23 @@ def get_json(url, timeout):
     if len(body) > MAX_RESPONSE_BYTES:
         raise ValueError("response too large")
     if encoding == "gzip":
-        body = gzip.decompress(body)
+        body = gunzip_bounded(body, MAX_RESPONSE_BYTES)
     return json.loads(body.decode("utf-8"))
+
+
+def gunzip_bounded(data, limit):
+    """Inflate a gzip body, refusing more than limit bytes of output.
+
+    MAX_RESPONSE_BYTES caps the compressed read; without an output cap a small
+    gzip bomb could inflate to gigabytes in the detached fetcher.
+    """
+    d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    out = d.decompress(data, limit + 1)
+    if len(out) > limit or d.unconsumed_tail:
+        raise ValueError("decompressed response too large")
+    if not d.eof:
+        raise ValueError("truncated gzip response")
+    return out
 
 
 def source_url(source):

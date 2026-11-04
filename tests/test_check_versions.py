@@ -454,6 +454,42 @@ def test_timeout_is_silent(cv, server, tmp_path, capsys, monkeypatch):
     assert capsys.readouterr() == ("", "")
 
 
+def test_gzip_response_is_inflated_and_parsed(cv, server, tmp_path):
+    srv = server({"/opencode-ai": packument()})
+    state = tmp_path / "state.json"
+    lines = cv.run(["--state", str(state), "opencode=1.19.5"], now=NOW)
+    assert srv.paths == ["/opencode-ai"]
+    assert lines and "OpenCode 1.19.5" in lines[0]
+    assert json.loads(state.read_text())["sources"]["npm:opencode-ai"]["latest"] == "1.20.0"
+
+
+def test_gzip_bomb_is_refused_silently_and_keeps_old_data(cv, server, tmp_path, capsys, monkeypatch):
+    # The compressed body is tiny, well under the cap; only the inflated size
+    # trips it. A small cap keeps the test cheap.
+    monkeypatch.setattr(cv, "MAX_RESPONSE_BYTES", 64 << 10)
+    bomb = packument(latest="9.9.9", times={"9.9.9": "2026-12-30T00:00:00.000Z"})
+    bomb["padding"] = "x" * (4 << 20)
+    srv = server({"/opencode-ai": bomb})
+    state = tmp_path / "state.json"
+    old = state_with(cv, opencode=cv.parse_npm(packument()))
+    old["sources"]["npm:opencode-ai"]["checked"] = NOW - 2 * DAY
+    state.write_text(json.dumps(old))
+    assert cv.main(["--fetch-only", "--state", str(state), "opencode=1.19.5"]) == 0
+    assert srv.paths == ["/opencode-ai"]
+    assert capsys.readouterr() == ("", "")
+    saved = json.loads(state.read_text())["sources"]["npm:opencode-ai"]
+    assert saved["latest"] == "1.20.0", "the oversized response must not replace old data"
+
+
+def test_gunzip_bounded(cv):
+    raw = b"y" * 1000
+    assert cv.gunzip_bounded(gzip.compress(raw), 1000) == raw
+    with pytest.raises(ValueError):
+        cv.gunzip_bounded(gzip.compress(raw), 999)
+    with pytest.raises(ValueError):
+        cv.gunzip_bounded(gzip.compress(raw)[:-10], 1000)
+
+
 # ── CLI contract (subprocess) ────────────────────────────────────────────────
 
 def _cli(*args):
